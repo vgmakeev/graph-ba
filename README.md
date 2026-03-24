@@ -73,7 +73,7 @@ graph-ba anomalies
 | `coverage` | Cross-layer coverage matrix |
 | `sql <query>` | Raw SQL against the DB |
 
-Global options: `--root <path>` (project root, default `.`), `--db <path>` (SQLite DB path).
+Global options: `--root <path>` (project root, default `.`), `--db <path>` (SQLite DB path), `--json` (output as JSON for programmatic use).
 
 ## Configuration
 
@@ -210,11 +210,26 @@ graph_ba/
 ├── config.py         — loads and validates graph-ba.toml
 ├── traceability.py   — scanner, graph builder, verification, export (JSON/DOT/HTML)
 └── graph_db.py       — SQLite + FTS5 storage, CLI (click), anomaly detection
+tests/
+├── conftest.py       — synthetic BA project (fixtures)
+├── test_config.py    — config loading, normalization, classification
+├── test_scanning.py  — definition/reference scanning
+├── test_graph.py     — graph construction, verification
+├── test_db.py        — SQLite import, FTS, helpers
+└── test_cli.py       — CLI commands + JSON output
 ```
+
+## Tests
+
+```bash
+uv run pytest tests/ -v
+```
+
+111 tests cover every layer: config → scanning → graph → DB → CLI. A synthetic BA project (5 artifact types, 11 definitions, cross-references, dangling refs, coverage gaps) is built in session-scoped fixtures.
 
 ## Claude Code integration
 
-The `.agents/` directory contains skills for [Claude Code](https://claude.ai/claude-code). They are installed automatically when you clone the repository — no extra setup needed.
+The `.claude/skills/` directory contains skills for [Claude Code](https://claude.ai/claude-code). They are auto-activated by the Claude agent when relevant — no setup needed.
 
 | Skill | Description |
 |---|---|
@@ -225,6 +240,8 @@ The `.agents/` directory contains skills for [Claude Code](https://claude.ai/cla
 The primary workflow with Claude Code:
 1. `/reindex` — build/update the graph
 2. `/review FEAT-01` — deep semantic review of any artifact
+
+All commands support `--json` output, making them suitable for agent pipelines.
 
 ## License
 
