@@ -73,7 +73,37 @@ $ graph-ba review F-01 --semantic --lines 20
     ...first 20 lines of BR.1 content...
 ```
 
-This output is designed for both human reading and [Claude Code](https://claude.ai/claude-code) agent pipelines (`--json` flag returns structured JSON).
+For a full project audit, `audit` combines all checks and produces a prioritized review list:
+
+```
+$ graph-ba audit
+Global Audit (214 nodes, 847 edges)
+
+── Issues (12) ──
+
+  CYCLE (2):
+    BP-01 → F-01 → REQ-01 → REQ-02
+    BR.3 → F-05 → REQ-11
+  DANGLING (1):
+    REQ-99 ← F-01, BP-03
+  COVERAGE_GAP (2):
+    FEAT→REQ: 80.0% (missing: F-08, F-09)
+    REQ→BR: 73.3% (missing: REQ-03, REQ-07, REQ-12, REQ-14)
+  MISSING_CROSS_LAYER (3):
+    F-08 → needs REQ (requirements)
+    F-09 → needs REQ (requirements)
+    F-10 → needs REQ (requirements)
+
+── Review Candidates (9) ──
+  HIGH  F-01         [FEAT]  BRIDGE, CYCLE
+  HIGH  REQ-99       [REQ ]  DANGLING
+  HIGH  REQ-01       [REQ ]  CYCLE
+        F-08         [FEAT]  COVERAGE_GAP, MISSING_CROSS_LAYER, ROOT
+        F-09         [FEAT]  COVERAGE_GAP, MISSING_CROSS_LAYER
+        REQ-03       [REQ ]  COVERAGE_GAP, ROOT, SINK
+```
+
+All output is designed for both human reading and [Claude Code](https://claude.ai/claude-code) agent pipelines (`--json` flag returns structured JSON).
 
 ## Install
 
@@ -284,19 +314,25 @@ uv run pytest tests/ -v
 
 ## Claude Code integration
 
-The `.claude/skills/` directory contains skills for [Claude Code](https://claude.ai/claude-code). They are auto-activated by the Claude agent when relevant — no setup needed.
+The `.claude/skills/` directory contains skills for [Claude Code](https://claude.ai/claude-code). Auto-activated by the agent when relevant — no setup needed.
 
 | Skill | Description |
 |---|---|
-| **`/review <ID>`** | Semantic review — gather full text of linked artifacts, validate completeness and consistency |
+| **`/review <ID>`** | Semantic review — full text of linked artifacts, validate completeness and consistency |
 | **`/reindex`** | Re-scan artifacts and rebuild the graph DB |
 | **`/find-anomalies`** | Detect and explain graph anomalies (islands, cycles, dangling refs) |
-| **`/audit`** | Global audit — funnel: structural analysis → coverage gaps → semantic review of flagged artifacts via subagents |
+| **`/audit`** | Global audit with parallel subagents (see below) |
 
-The primary workflow with Claude Code:
-1. `/reindex` — build/update the graph
-2. `/review FEAT-01` — deep semantic review of any artifact
-3. `/audit` — full graph audit with prioritized review
+### `/audit` — full project audit
+
+The audit skill uses a funnel strategy to handle projects of any size:
+
+1. **Structural pass** — `graph-ba --json audit` finds anomalies, coverage gaps, and missing links across the entire graph (fast, no LLM needed)
+2. **Prioritize** — produces a ranked list of review candidates with reasons (CYCLE, DANGLING, COVERAGE_GAP, etc.)
+3. **Parallel semantic review** — launches subagents (3-5 artifacts each) that run `graph-ba review <ID> --semantic` and check completeness, numeric consistency, and bidirectional traceability
+4. **Aggregate** — collects subagent findings into a single report with prioritized recommendations
+
+This keeps the work within context limits: structural analysis covers all 200+ artifacts, but deep semantic review targets only the 10-15 most problematic ones.
 
 All commands support `--json` output, making them suitable for agent pipelines.
 
