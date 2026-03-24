@@ -67,7 +67,8 @@ graph-ba anomalies
 | `path <from> <to>` | Shortest path between two artifacts |
 | `impact <id>` | Cascade analysis — what does changing this affect? |
 | `review <id>` | Validate structure + show context from linked artifacts |
-| `review <id> --semantic` | Full text of all linked artifacts for deep review |
+| `review <id> --semantic` | Full text of linked artifacts (default 20 lines each) |
+| `review <id> --semantic --lines 0` | Full text with no line limit per artifact |
 | `anomalies` | Detect islands, cycles, bridges, bottlenecks, dangling refs |
 | `coverage` | Cross-layer coverage matrix |
 | `sql <query>` | Raw SQL against the DB |

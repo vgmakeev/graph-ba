@@ -946,7 +946,8 @@ def _read_artifact_section(filepath: str, start_line: int,
 
     # Heading or plain text: read until next heading of same/higher level
     result = []
-    for i in range(idx, min(len(lines), idx + max_lines)):
+    end = len(lines) if max_lines <= 0 else min(len(lines), idx + max_lines)
+    for i in range(idx, end):
         line = lines[i]
         if i > idx and heading_level > 0:
             lvl = 0
