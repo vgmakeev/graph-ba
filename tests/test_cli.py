@@ -1,4 +1,6 @@
 """Tests for CLI commands via CliRunner."""
+import json
+
 import pytest
 from click.testing import CliRunner
 
@@ -6,8 +8,8 @@ from graph_ba.graph_db import cli
 
 
 class TestImportCmd:
-    def test_success(self, cli_env):
-        runner, root, db_path = cli_env
+    def test_success(self, cli_env_rw):
+        runner, root, db_path = cli_env_rw
         # Import already ran in fixture; verify output
         result = runner.invoke(cli, [
             "--root", str(root), "--db", str(db_path), "import"
@@ -210,52 +212,48 @@ class TestJsonOutput:
     """Test --json flag across commands."""
 
     def test_search_json(self, cli_env):
-        import json as j
         runner, root, db_path = cli_env
         result = runner.invoke(cli, [
             "--root", str(root), "--db", str(db_path),
             "--json", "search", "Order"
         ])
         assert result.exit_code == 0
-        data = j.loads(result.output)
+        data = json.loads(result.output)
         assert "artifacts" in data
         assert "clusters" in data
         assert "edges" in data
 
     def test_node_json(self, cli_env):
-        import json as j
         runner, root, db_path = cli_env
         result = runner.invoke(cli, [
             "--root", str(root), "--db", str(db_path),
             "--json", "node", "F-01"
         ])
         assert result.exit_code == 0
-        data = j.loads(result.output)
+        data = json.loads(result.output)
         assert data["id"] == "F-01"
         assert data["type"] == "FEAT"
         assert isinstance(data["outgoing"], list)
         assert isinstance(data["incoming"], list)
 
     def test_anomalies_json(self, cli_env):
-        import json as j
         runner, root, db_path = cli_env
         result = runner.invoke(cli, [
             "--root", str(root), "--db", str(db_path),
             "--json", "anomalies"
         ])
         assert result.exit_code == 0
-        data = j.loads(result.output)
+        data = json.loads(result.output)
         assert "nodes" in data
         assert "issues" in data
 
     def test_coverage_json(self, cli_env):
-        import json as j
         runner, root, db_path = cli_env
         result = runner.invoke(cli, [
             "--root", str(root), "--db", str(db_path),
             "--json", "coverage"
         ])
         assert result.exit_code == 0
-        data = j.loads(result.output)
+        data = json.loads(result.output)
         assert "pairs" in data
         assert len(data["pairs"]) == 2

@@ -246,13 +246,20 @@ def db_conn(db_path):
     conn.close()
 
 
+@pytest.fixture(scope="session")
+def cli_env(ba_project, db_path):
+    """Session-scoped DB + CliRunner for read-only CLI tests."""
+    runner = CliRunner()
+    return runner, ba_project, db_path
+
+
 @pytest.fixture
-def cli_env(ba_project, tmp_path):
-    """Fresh DB + CliRunner for CLI tests that may write."""
-    db_path = tmp_path / "cli_test.db"
+def cli_env_rw(ba_project, tmp_path):
+    """Fresh DB + CliRunner for CLI tests that write."""
+    path = tmp_path / "cli_test.db"
     runner = CliRunner()
     result = runner.invoke(cli, [
-        "--root", str(ba_project), "--db", str(db_path), "import"
+        "--root", str(ba_project), "--db", str(path), "import"
     ])
     assert result.exit_code == 0, result.output
-    return runner, ba_project, db_path
+    return runner, ba_project, path
