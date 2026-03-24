@@ -64,21 +64,13 @@ graph-ba anomalies
 | `init` | Create a template `graph-ba.toml` |
 | `search <query>` | FTS5 full-text search across titles and IDs |
 | `node <id>` | Show node details and immediate neighbors |
-| `neighbors <id>` | List neighbors with type/direction filters |
 | `path <from> <to>` | Shortest path between two artifacts |
-| `walk <id> --depth N` | BFS traversal tree from a node |
 | `impact <id>` | Cascade analysis — what does changing this affect? |
 | `review <id>` | Validate structure + show context from linked artifacts |
 | `review <id> --semantic` | Full text of all linked artifacts for deep review |
 | `anomalies` | Detect islands, cycles, bridges, bottlenecks, dangling refs |
 | `coverage` | Cross-layer coverage matrix |
-| `gaps <type1> <type2>` | Artifacts of type1 with no links to type2 |
-| `hubs` | Most connected nodes |
-| `orphans` | Poorly connected artifacts |
-| `cluster <term>` | Semantic cluster lookup |
-| `stats` | Summary statistics |
 | `sql <query>` | Raw SQL against the DB |
-| `render` | Interactive HTML visualization (vis-network) |
 
 Global options: `--root <path>` (project root, default `.`), `--db <path>` (SQLite DB path).
 
