@@ -1,7 +1,8 @@
 """
 Traceability Scanner — builds a cross-reference graph
-of BA artifacts (ST, BR, BR-XX, BP, BD, BF, F, VAD, M, DM, SM, EN, RL) and
-reports coverage gaps, orphans, and dangling references.
+of BA artifacts and reports coverage gaps, orphans, and dangling references.
+
+Config-driven: artifact types, patterns, and scan rules are defined in graph-ba.toml.
 
 Usage:
     trace-ba --root /path/to/project
@@ -15,53 +16,21 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import click
 import networkx as nx
 
-# ── Artifact types ────────────────────────────────────────────────
+from graph_ba.config import ProjectConfig, load_config, normalize_id, classify_id
 
-class ArtifactType(Enum):
-    ST = "ST"
-    BR_REQ = "BR_REQ"
-    BR_RULE = "BR_RULE"
-    BP = "BP"
-    BD = "BD"
-    BF = "BF"
-    F = "F"
-    VAD = "VAD"
-    M = "M"
-    DM = "DM"
-    SM = "SM"
-    EN = "EN"
-    RL = "RL"
-
-
-LABELS = {
-    ArtifactType.ST: "Stakeholder Expectations",
-    ArtifactType.BR_REQ: "Business Requirements (BR.X)",
-    ArtifactType.BR_RULE: "Business Rules (BR-XX)",
-    ArtifactType.BP: "Business Processes (BP-XX)",
-    ArtifactType.BD: "Business Decisions (BD-XX)",
-    ArtifactType.BF: "Business Functions (BF.XX)",
-    ArtifactType.F: "Features (F-XX)",
-    ArtifactType.VAD: "Value Chains (VAD-XX)",
-    ArtifactType.M: "Modules (M-XX)",
-    ArtifactType.DM: "Domain Model (DM-X.Y)",
-    ArtifactType.SM: "Status Models (SM-XX)",
-    ArtifactType.EN: "Enums / Reference Data (EN-XX)",
-    ArtifactType.RL: "Roles & Permissions (RL-XX)",
-}
 
 # ── Data model ────────────────────────────────────────────────────
 
 @dataclass
 class Artifact:
     id: str
-    artifact_type: ArtifactType
+    artifact_type: str  # type ID from config (e.g. "ST", "BR_REQ")
     source_file: Path
     line_number: int
     title: str = ""
@@ -75,169 +44,45 @@ class Reference:
     context: str = ""
 
 
-# ── Regex patterns for matching references in text ────────────────
-
-# Order matters: more specific patterns first to avoid false matches.
-# Each tuple: (ArtifactType, compiled_regex, group_index_for_full_id)
-
-def _build_ref_patterns():
-    """Build list of (ArtifactType, regex) for scanning references."""
-    return [
-        (ArtifactType.BF, re.compile(r'(?<![A-Za-zА-Яа-я])(BF\.\d{2}\.\d+)(?!\d)')),
-        (ArtifactType.BR_REQ, re.compile(r'(?<![A-Za-zА-Яа-я-])(BR\.\d+(?:\.\d+)?)(?!\.\d)')),
-        (ArtifactType.BR_RULE, re.compile(r'(?<![A-Za-zА-Яа-я.])(BR-\d{2})(?!\d)')),
-        (ArtifactType.VAD, re.compile(r'(?<![A-Za-zА-Яа-я])(VAD-\d{2})(?!\d)')),
-        (ArtifactType.BP, re.compile(r'(?<![A-Za-zА-Яа-я])(BP-\d{2}[a-z]?)(?![a-z\d])')),
-        (ArtifactType.BD, re.compile(r'(?<![A-Za-zА-Яа-я])(BD-\d{2})(?!\d)')),
-        (ArtifactType.ST, re.compile(r'(?<![A-Za-zА-Яа-я])(ST-\d{2})(?!\d)')),
-        (ArtifactType.F, re.compile(r'(?<![A-Za-zА-Яа-я])(F-\d{2})(?!\d)')),
-        # Module: Cyrillic М + digits  (Latin M only in module_decomposition.md)
-        (ArtifactType.M, re.compile(r'(?<![A-Za-zА-Яа-я])([МM]\d{1,2})(?!\d)')),
-        # Domain Model: DM-X.Y
-        (ArtifactType.DM, re.compile(r'(?<![A-Za-zА-Яа-я])(DM-\d+\.\d+)(?!\d)')),
-        # Status Models: SM-XX
-        (ArtifactType.SM, re.compile(r'(?<![A-Za-zА-Яа-я])(SM-\d{2})(?!\d)')),
-        # Enums: EN-XX
-        (ArtifactType.EN, re.compile(r'(?<![A-Za-zА-Яа-я])(EN-\d{2})(?!\d)')),
-        # Roles: RL-XX
-        (ArtifactType.RL, re.compile(r'(?<![A-Za-zА-Яа-я])(RL-\d{2})(?!\d)')),
-    ]
-
-
-REF_PATTERNS = _build_ref_patterns()
-
-# Range pattern: e.g. BR.12.1–BR.12.6, BF.02.5–BF.02.11
-RANGE_RE = re.compile(
-    r'((?:BR|BF)\.\d+\.)(\d+)\s*[–\-]\s*(?:(?:BR|BF)\.\d+\.)(\d+)'
-)
-
-# ── ID normalisation ─────────────────────────────────────────────
-
-def normalize_id(raw: str) -> str:
-    """Canonical form: Latin M, zero-padded module numbers."""
-    # Cyrillic М → Latin M
-    s = raw.replace("М", "M")
-    # Zero-pad module numbers: M1 → M01
-    m = re.fullmatch(r'M(\d{1,2})', s)
-    if m:
-        return f"M{int(m.group(1)):02d}"
-    return s
-
-
-def classify_id(raw: str) -> Optional[ArtifactType]:
-    nid = normalize_id(raw)
-    if re.fullmatch(r'BF\.\d{2}\.\d+', nid):
-        return ArtifactType.BF
-    if re.fullmatch(r'BR\.\d+(?:\.\d+)?', nid):
-        return ArtifactType.BR_REQ
-    if re.fullmatch(r'BR-\d{2}', nid):
-        return ArtifactType.BR_RULE
-    if re.fullmatch(r'VAD-\d{2}', nid):
-        return ArtifactType.VAD
-    if re.fullmatch(r'BP-\d{2}[a-z]?', nid):
-        return ArtifactType.BP
-    if re.fullmatch(r'BD-\d{2}', nid):
-        return ArtifactType.BD
-    if re.fullmatch(r'ST-\d{2}', nid):
-        return ArtifactType.ST
-    if re.fullmatch(r'F-\d{2}', nid):
-        return ArtifactType.F
-    if re.fullmatch(r'M\d{2}', nid):
-        return ArtifactType.M
-    return None
-
-
 # ── Phase 1: Definition scanning ─────────────────────────────────
 
 def _read_lines(path: Path) -> List[str]:
     return path.read_text(encoding="utf-8").splitlines()
 
 
-def _register(registry: Dict[str, Artifact], art: Artifact):
-    nid = normalize_id(art.id)
+def _register(registry: Dict[str, Artifact], art: Artifact, config: ProjectConfig):
+    nid = normalize_id(art.id, config)
     art.id = nid
     if nid not in registry:
         registry[nid] = art
 
 
-def scan_definitions(root: Path) -> Dict[str, Artifact]:
-    disc = root / "02_Discovery"
+def scan_definitions(root: Path, config: ProjectConfig) -> Dict[str, Artifact]:
+    """Scan artifact definitions using rules from config."""
     registry: Dict[str, Artifact] = {}
 
-    # ST — headings in 01_Stakeholder_Expectations.md
-    _scan_heading(registry, disc / "01_Stakeholder_Expectations.md",
-                  re.compile(r'^###\s+(ST-\d{2})\s*[—–\-]\s*(.+)'), ArtifactType.ST)
-
-    # BR.X.Y — table rows in 03_Business_Requirements.md
-    _scan_table_first_col(registry, disc / "03_Business_Requirements.md",
-                          re.compile(r'^\|\s*(BR\.\d+(?:\.\d+)?)\s*\|'), ArtifactType.BR_REQ)
-
-    # BR-XX — H1 in individual files
-    for f in sorted((disc / "06_Business_Rules").glob("BR-*.md")):
-        _scan_heading(registry, f,
-                      re.compile(r'^#\s+(BR-\d{2})\b\s*[—–\-:]*\s*(.*)'), ArtifactType.BR_RULE)
-
-    # BR-XX — also register from index table (for row-level reference attribution)
-    _scan_table_first_col(registry, disc / "06_Business_Rules.md",
-                          re.compile(r'^\|\s*(BR-\d{2})\s*\|'), ArtifactType.BR_RULE)
-
-    # BP-XX — H1 in E2E flow files
-    for f in sorted((disc / "05_E2E_Flows").rglob("BP-*.md")):
-        _scan_heading(registry, f,
-                      re.compile(r'^#\s+(BP-\d{2}[a-z]?)\b\s*(.*)'), ArtifactType.BP)
-
-    # BD-XX — H1 in decision files
-    decisions_dir = disc / "Research" / "Decisions"
-    if decisions_dir.exists():
-        for f in sorted(decisions_dir.glob("BD-*.md")):
-            # Skip _client duplicates — extract base BD-XX
-            _scan_heading(registry, f,
-                          re.compile(r'^#\s+(BD-\d{2})\b\s*[—–\-:]*\s*(.*)'), ArtifactType.BD)
-
-    # BF.XX.Y — table rows
-    _scan_table_first_col(registry, disc / "07_Business_Functions.md",
-                          re.compile(r'^\|\s*(BF\.\d{2}\.\d+)\s*\|'), ArtifactType.BF)
-
-    # F-XX — table rows
-    _scan_table_first_col(registry, disc / "08_Features_List.md",
-                          re.compile(r'^\|\s*(F-\d{2})\s*\|'), ArtifactType.F)
-
-    # VAD-XX — table rows
-    _scan_table_first_col(registry, disc / "04_Business_Processes_Structure.md",
-                          re.compile(r'^\|\s*(VAD-\d{2})\s*\|'), ArtifactType.VAD)
-
-    # М-XX — table rows in module_decomposition.md
-    mod_file = disc / "module_decomposition.md"
-    if mod_file.exists():
-        _scan_table_first_col(registry, mod_file,
-                              re.compile(r'^\|\s*([МM]\d{1,2})\s*\|'), ArtifactType.M)
-
-    # DM-X.Y — headings in domain_model/*.md
-    dm_dir = disc / "domain_model"
-    if dm_dir.exists():
-        for f in sorted(dm_dir.glob("0[1-5]_*.md")):
-            _scan_heading(registry, f,
-                          re.compile(r'^##\s+(DM-\d+\.\d+)\s*[—–\-:]*\s*(.*)'), ArtifactType.DM)
-
-    # SM-XX — headings in domain_model/06_statuses.md
-    statuses_file = dm_dir / "06_statuses.md" if dm_dir.exists() else disc / "domain_model" / "06_statuses.md"
-    _scan_heading(registry, statuses_file,
-                  re.compile(r'^##\s+(SM-\d{2})\s*[—–\-:]*\s*(.*)'), ArtifactType.SM)
-
-    # EN-XX — headings in domain_model/08_enums.md
-    enums_file = dm_dir / "08_enums.md" if dm_dir.exists() else disc / "domain_model" / "08_enums.md"
-    _scan_heading(registry, enums_file,
-                  re.compile(r'^##\s+(EN-\d{2})\s*[—–\-:]*\s*(.*)'), ArtifactType.EN)
-
-    # RL-XX — headings in roles-permissions.md
-    roles_file = disc / "roles-permissions.md"
-    _scan_heading(registry, roles_file,
-                  re.compile(r'^##\s+(RL-\d{2})\s*[—–\-:]*\s*(.*)'), ArtifactType.RL)
+    for rule in config.definitions:
+        file_str = rule.file
+        # Support glob patterns in file field
+        if '*' in file_str or '?' in file_str:
+            # Glob: scan matching files
+            matched = sorted(root.glob(file_str))
+            for f in matched:
+                if rule.mode == "heading":
+                    _scan_heading(registry, f, rule.pattern, rule.type_id, config)
+                elif rule.mode == "table":
+                    _scan_table_first_col(registry, f, rule.pattern, rule.type_id, config)
+        else:
+            filepath = root / file_str
+            if rule.mode == "heading":
+                _scan_heading(registry, filepath, rule.pattern, rule.type_id, config)
+            elif rule.mode == "table":
+                _scan_table_first_col(registry, filepath, rule.pattern, rule.type_id, config)
 
     return registry
 
 
-def _scan_heading(registry, filepath, pattern, atype):
+def _scan_heading(registry, filepath, pattern, type_id, config):
     if not filepath.exists():
         return
     for i, line in enumerate(_read_lines(filepath), 1):
@@ -245,44 +90,43 @@ def _scan_heading(registry, filepath, pattern, atype):
         if m:
             raw_id = m.group(1)
             title = m.group(2).strip() if m.lastindex >= 2 else ""
-            _register(registry, Artifact(raw_id, atype, filepath, i, title))
+            _register(registry, Artifact(raw_id, type_id, filepath, i, title), config)
 
 
-def _scan_table_first_col(registry, filepath, pattern, atype):
+def _scan_table_first_col(registry, filepath, pattern, type_id, config):
     if not filepath.exists():
         return
     for i, line in enumerate(_read_lines(filepath), 1):
         m = pattern.match(line)
         if m:
             raw_id = m.group(1)
-            # Extract title: second table column
             cols = [c.strip() for c in line.split("|")]
             title = cols[2] if len(cols) > 2 else ""
-            _register(registry, Artifact(raw_id, atype, filepath, i, title))
+            _register(registry, Artifact(raw_id, type_id, filepath, i, title), config)
 
 
 # ── Phase 2: Reference extraction ────────────────────────────────
 
-def scan_index_cross_refs(root: Path) -> List[Tuple[str, str, Path, int]]:
-    """Parse index tables where first column is the 'source' artifact and other
-    columns contain 'target' artifact IDs.
+def expand_ranges(text: str, config: ProjectConfig) -> List[str]:
+    """Expand ranges like BR.12.1–BR.12.6 into individual IDs."""
+    results = []
+    for m in config.range_pattern.finditer(text):
+        prefix, start_s, end_s = m.group(1), m.group(2), m.group(3)
+        for i in range(int(start_s), int(end_s) + 1):
+            results.append(f"{prefix}{i}")
+    return results
 
-    Returns list of (source_id, target_id, file, line_number).
-    """
-    disc = root / "02_Discovery"
+
+def scan_index_cross_refs(
+    root: Path, config: ProjectConfig
+) -> List[Tuple[str, str, Path, int]]:
+    """Parse index tables where first column is the 'source' artifact and other
+    columns contain 'target' artifact IDs."""
     results: List[Tuple[str, str, Path, int]] = []
 
-    # 06_Business_Rules.md — row: | BR-XX | ... | BP-XX, BP-XX | ... |
-    _parse_index_table(results, disc / "06_Business_Rules.md",
-                       re.compile(r'^\|\s*(BR-\d{2})\s*\|'))
-
-    # 08_Features_List.md — row: | F-XX | ... | BR.X, BR.X.Y | BF.XX.Y | ... |
-    _parse_index_table(results, disc / "08_Features_List.md",
-                       re.compile(r'^\|\s*(F-\d{2})\s*\|'))
-
-    # 07_Business_Functions.md — row: | BF.XX.Y | ... | BR.X, BR.X.Y | ... |
-    _parse_index_table(results, disc / "07_Business_Functions.md",
-                       re.compile(r'^\|\s*(BF\.\d{2}\.\d+)\s*\|'))
+    for rule in config.index_tables:
+        filepath = root / rule.file
+        _parse_index_table(results, filepath, rule.first_col_pattern, config)
 
     return results
 
@@ -291,9 +135,8 @@ def _parse_index_table(
     results: List[Tuple[str, str, Path, int]],
     filepath: Path,
     first_col_re: re.Pattern,
+    config: ProjectConfig,
 ):
-    """For each row matching first_col_re, find the source ID in column 1,
-    then scan the REST of the row for target artifact IDs."""
     if not filepath.exists():
         return
     lines = _read_lines(filepath)
@@ -301,59 +144,50 @@ def _parse_index_table(
         m = first_col_re.match(line)
         if not m:
             continue
-        source_id = normalize_id(m.group(1))
-
-        # Everything after the first two pipes = "other columns"
+        source_id = normalize_id(m.group(1), config)
         rest = line[m.end():]
 
         # Find all artifact IDs in the rest of the row
-        for _, pat in REF_PATTERNS:
-            for rm in pat.finditer(rest):
-                target_id = normalize_id(rm.group(1))
+        for tid, tdef in config.types.items():
+            for rm in tdef.ref_pattern.finditer(rest):
+                target_id = normalize_id(rm.group(1), config)
                 if target_id != source_id:
                     results.append((source_id, target_id, filepath, line_num))
 
-        # Also expand ranges in the row
-        for eid in expand_ranges(rest):
-            nid = normalize_id(eid)
+        # Also expand ranges
+        for eid in expand_ranges(rest, config):
+            nid = normalize_id(eid, config)
             if nid != source_id:
                 results.append((source_id, nid, filepath, line_num))
-
-
-def expand_ranges(text: str) -> List[str]:
-    """Expand BR.12.1–BR.12.6 or BF.02.5–BF.02.11 into individual IDs."""
-    results = []
-    for m in RANGE_RE.finditer(text):
-        prefix, start_s, end_s = m.group(1), m.group(2), m.group(3)
-        for i in range(int(start_s), int(end_s) + 1):
-            results.append(f"{prefix}{i}")
-    return results
 
 
 def scan_references(
     root: Path,
     registry: Dict[str, Artifact],
-    module_ref_in_all_files: bool = False,
+    config: ProjectConfig,
 ) -> List[Reference]:
     """Scan all .md files for cross-references to known artifact types."""
-    scan_dirs = [
-        root / "02_Discovery",
-        root / "04_PRD",
-    ]
+    scan_dirs = [root / d for d in config.scan_dirs]
     md_files: List[Path] = []
     for d in scan_dirs:
         if d.exists():
             md_files.extend(sorted(d.rglob("*.md")))
 
-    # Determine which files can have module refs (avoid false positives)
-    module_files = set()
-    mod_file = root / "02_Discovery" / "module_decomposition.md"
-    if mod_file.exists():
-        module_files.add(mod_file)
-    # PRD files may contain Module mapping sections
-    prd_dir = root / "04_PRD"
-    if prd_dir.exists():
-        module_files.update(prd_dir.rglob("*.md"))
+    # Build restriction sets for types with restrict_to
+    restrict_files: Dict[str, Set[Path]] = {}
+    for tid, tdef in config.types.items():
+        if tdef.restrict_to:
+            files: Set[Path] = set()
+            for pattern in tdef.restrict_to:
+                p = root / pattern
+                if p.is_file():
+                    files.add(p)
+                elif p.is_dir():
+                    files.update(p.rglob("*.md"))
+                else:
+                    # Treat as glob
+                    files.update(root.glob(pattern))
+            restrict_files[tid] = files
 
     all_refs: List[Reference] = []
 
@@ -365,33 +199,30 @@ def scan_references(
         for line_num, line in enumerate(lines, 1):
             stripped = line.strip()
 
-            # Track code fences
             if stripped.startswith("```"):
                 in_code_fence = not in_code_fence
                 continue
             if in_code_fence:
                 continue
 
-            # Track section headings
             if stripped.startswith("## "):
                 current_section = stripped.lstrip("# ").strip()
 
-            # Expand ranges first
-            expanded = expand_ranges(line)
+            # Expand ranges
+            expanded = expand_ranges(line, config)
             for eid in expanded:
-                nid = normalize_id(eid)
+                nid = normalize_id(eid, config)
                 all_refs.append(Reference(nid, filepath, line_num, current_section))
 
-            # Match all patterns
-            for atype, pat in REF_PATTERNS:
-                # Skip module pattern in non-module files to avoid false positives
-                if atype == ArtifactType.M and not module_ref_in_all_files:
-                    if filepath not in module_files:
-                        continue
+            # Match all type patterns
+            for tid, tdef in config.types.items():
+                # Check restriction
+                if tid in restrict_files and filepath not in restrict_files[tid]:
+                    continue
 
-                for m in pat.finditer(line):
+                for m in tdef.ref_pattern.finditer(line):
                     raw_id = m.group(1)
-                    nid = normalize_id(raw_id)
+                    nid = normalize_id(raw_id, config)
                     all_refs.append(Reference(nid, filepath, line_num, current_section))
 
     return all_refs
@@ -403,16 +234,10 @@ def _find_owner(
     file_arts: List[Tuple[int, str]],
     ref_line: int,
 ) -> Optional[str]:
-    """Find the artifact defined at or just before ref_line (same table row or section).
-
-    For table files, definition and reference are on the SAME line.
-    For section files, the definition is the nearest preceding heading.
-    """
     if not file_arts:
         return None
     if len(file_arts) == 1:
         return file_arts[0][1]
-    # Binary search: find the last artifact defined at or before ref_line
     best = None
     for def_line, aid in file_arts:
         if def_line <= ref_line:
@@ -425,29 +250,26 @@ def _find_owner(
 def build_graph(
     registry: Dict[str, Artifact],
     references: List[Reference],
+    config: ProjectConfig,
     index_xrefs: Optional[List[Tuple[str, str, Path, int]]] = None,
 ) -> nx.DiGraph:
     G = nx.DiGraph()
 
-    # Nodes: all defined artifacts
     for aid, art in registry.items():
-        G.add_node(aid, type=art.artifact_type.value, title=art.title,
+        G.add_node(aid, type=art.artifact_type, title=art.title,
                    source_file=str(art.source_file.name))
 
-    # Build file → sorted [(line, artifact_id)] mapping
     file_arts_map: Dict[Path, List[Tuple[int, str]]] = defaultdict(list)
     for aid, art in registry.items():
         file_arts_map[art.source_file].append((art.line_number, aid))
     for k in file_arts_map:
         file_arts_map[k].sort()
 
-    # Build edges using line-proximity matching
     for ref in references:
         target = ref.target_id
-        # Ensure target node exists (might be dangling)
         if target not in G:
-            atype = classify_id(target)
-            G.add_node(target, type=atype.value if atype else "UNKNOWN",
+            atype = classify_id(target, config)
+            G.add_node(target, type=atype or "UNKNOWN",
                        title="", source_file="", defined=False)
 
         file_arts = file_arts_map.get(ref.source_file)
@@ -458,7 +280,6 @@ def build_graph(
                        source_file=str(ref.source_file.name),
                        line=ref.line_number)
         elif not owner:
-            # File-level reference (e.g. PRD, other docs without definitions)
             file_node = f"FILE:{ref.source_file.name}"
             if not G.has_node(file_node):
                 G.add_node(file_node, type="FILE", title=ref.source_file.name,
@@ -468,53 +289,52 @@ def build_graph(
                            source_file=str(ref.source_file.name),
                            line=ref.line_number)
 
-    # Add index cross-references (explicit source→target from table rows)
     if index_xrefs:
         for src, tgt, fpath, lnum in index_xrefs:
             if tgt not in G:
-                atype = classify_id(tgt)
-                G.add_node(tgt, type=atype.value if atype else "UNKNOWN",
+                atype = classify_id(tgt, config)
+                G.add_node(tgt, type=atype or "UNKNOWN",
                            title="", source_file="", defined=False)
             if src not in G:
-                continue  # source not in registry
+                continue
             if src != tgt:
                 G.add_edge(src, tgt, context="index_table",
                            source_file=str(fpath.name), line=lnum)
 
-    # Mark defined nodes
     for aid in registry:
         G.nodes[aid]["defined"] = True
 
-    # Resolve bare BP-01 → BP-01a, BP-01b
-    _resolve_bare_bp(G, registry)
+    _resolve_dangling_variants(G, registry)
 
     return G
 
 
-def _resolve_bare_bp(G: nx.DiGraph, registry: Dict[str, Artifact]):
-    """If BP-01 is referenced but not defined, link to BP-01a/BP-01b if they exist."""
-    dangling_bps = [
+def _resolve_dangling_variants(G: nx.DiGraph, registry: Dict[str, Artifact]):
+    """If an ID is referenced but not defined, link to its variants if they exist.
+
+    E.g. BP-01 → BP-01a, BP-01b.
+    """
+    dangling = [
         n for n in G.nodes()
-        if n.startswith("BP-") and not G.nodes[n].get("defined", False)
+        if not G.nodes[n].get("defined", False) and not n.startswith("FILE:")
     ]
-    for bp in dangling_bps:
-        base = bp  # e.g. BP-01
-        variants = [aid for aid in registry if aid.startswith(base) and aid != base]
-        if variants:
-            # Redirect all edges TO this node to point to each variant
-            preds = list(G.predecessors(bp))
-            for pred in preds:
-                edge_data = G.edges[pred, bp]
-                for var in variants:
-                    if pred != var:
-                        G.add_edge(pred, var, **edge_data)
-            succs = list(G.successors(bp))
-            for succ in succs:
-                edge_data = G.edges[bp, succ]
-                for var in variants:
-                    if var != succ:
-                        G.add_edge(var, succ, **edge_data)
-            G.remove_node(bp)
+    for node_id in dangling:
+        variants = [aid for aid in registry if aid.startswith(node_id) and aid != node_id]
+        if not variants:
+            continue
+        preds = list(G.predecessors(node_id))
+        for pred in preds:
+            edge_data = G.edges[pred, node_id]
+            for var in variants:
+                if pred != var:
+                    G.add_edge(pred, var, **edge_data)
+        succs = list(G.successors(node_id))
+        for succ in succs:
+            edge_data = G.edges[node_id, succ]
+            for var in variants:
+                if var != succ:
+                    G.add_edge(var, succ, **edge_data)
+        G.remove_node(node_id)
 
 
 # ── Phase 4: Verification checks ────────────────────────────────
@@ -524,41 +344,37 @@ class TraceReport:
     registry_count: Dict[str, int] = field(default_factory=dict)
     total_edges: int = 0
     orphans: List[str] = field(default_factory=list)
-    dangling: List[Tuple[str, str, int]] = field(default_factory=list)  # (id, file, line)
+    dangling: List[Tuple[str, str, int]] = field(default_factory=list)
     coverage: Dict[str, dict] = field(default_factory=dict)
-    missing_expected: List[Tuple[str, str]] = field(default_factory=list)  # (id, missing_type)
+    missing_expected: List[Tuple[str, str]] = field(default_factory=list)
 
 
 def verify(
     G: nx.DiGraph,
     registry: Dict[str, Artifact],
     references: List[Reference],
+    config: ProjectConfig,
 ) -> TraceReport:
     report = TraceReport()
 
-    # Registry counts
     type_counts: Dict[str, int] = defaultdict(int)
     for art in registry.values():
-        type_counts[art.artifact_type.value] += 1
+        type_counts[art.artifact_type] += 1
     report.registry_count = dict(type_counts)
     report.total_edges = G.number_of_edges()
 
-    # Orphans: defined but no incoming edges from other artifacts
     for aid in registry:
         if G.in_degree(aid) == 0:
             report.orphans.append(aid)
 
-    # Dangling: referenced but not defined
     defined_ids = set(registry.keys())
     dangling_ids: Set[str] = set()
     for ref in references:
         if ref.target_id not in defined_ids:
-            # Check if it was resolved (bare BP)
             if ref.target_id in G:
                 continue
             dangling_ids.add(ref.target_id)
 
-    # Collect first occurrence for each dangling ID
     dangling_first: Dict[str, Tuple[str, int]] = {}
     for ref in references:
         if ref.target_id in dangling_ids and ref.target_id not in dangling_first:
@@ -566,18 +382,10 @@ def verify(
     for did, (fname, lnum) in sorted(dangling_first.items()):
         report.dangling.append((did, fname, lnum))
 
-    # Coverage matrix
-    expected_pairs = [
-        ("BR_RULE", "BR_REQ", "BR-XX → BR.X"),
-        ("BR_RULE", "BP", "BR-XX → BP-XX"),
-        ("F", "BR_REQ", "F-XX → BR.X"),
-        ("F", "BF", "F-XX → BF.XX"),
-        ("BF", "BR_REQ", "BF.XX → BR.X"),
-        ("BP", "VAD", "BP-XX → VAD-XX"),
-        ("BP", "BD", "BP-XX → BD-XX"),
-    ]
-    for src_type, tgt_type, label in expected_pairs:
-        src_ids = [aid for aid, art in registry.items() if art.artifact_type.value == src_type]
+    # Coverage matrix from config
+    for cp in config.coverage_pairs:
+        src_type, tgt_type, label = cp.source, cp.target, cp.label
+        src_ids = [aid for aid, art in registry.items() if art.artifact_type == src_type]
         linked = []
         missing = []
         for sid in src_ids:
@@ -601,40 +409,42 @@ def verify(
             "missing": missing,
         }
 
-    # Missing expected links (individual)
-    for aid, art in registry.items():
-        if art.artifact_type == ArtifactType.BR_RULE and aid in G:
-            if not any(G.nodes.get(t, {}).get("type") == "BR_REQ" for t in G.successors(aid)):
-                report.missing_expected.append((aid, "BR.X (нормативная ссылка)"))
-            if not any(G.nodes.get(t, {}).get("type") == "BP" for t in G.successors(aid)):
-                report.missing_expected.append((aid, "BP-XX (применение)"))
-        if art.artifact_type == ArtifactType.F and aid in G:
-            if not any(G.nodes.get(t, {}).get("type") == "BR_REQ" for t in G.successors(aid)):
-                report.missing_expected.append((aid, "BR.X (требования)"))
-            if not any(G.nodes.get(t, {}).get("type") == "BF" for t in G.successors(aid)):
-                report.missing_expected.append((aid, "BF.XX (бизнес-функции)"))
+    # Missing expected links from config
+    for atype, expected in config.expected_cross_layer.items():
+        for aid, art in registry.items():
+            if art.artifact_type != atype or aid not in G:
+                continue
+            for target_type, label in expected:
+                if not any(G.nodes.get(t, {}).get("type") == target_type
+                           for t in G.successors(aid)):
+                    report.missing_expected.append((aid, f"{target_type} ({label})"))
 
     return report
 
 
 # ── Output: Console report ───────────────────────────────────────
 
-def print_report(report: TraceReport, registry: Dict[str, Artifact], verbose: bool):
+def print_report(report: TraceReport, registry: Dict[str, Artifact],
+                 config: ProjectConfig, verbose: bool):
     print("=" * 60)
     print("  Traceability Report")
     print(f"  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 60)
 
-    # Registry summary
     print("\n--- Registry Summary ---")
     total = 0
-    for atype in ArtifactType:
-        cnt = report.registry_count.get(atype.value, 0)
+    for tid in config.type_order:
+        cnt = report.registry_count.get(tid, 0)
         total += cnt
-        print(f"  {LABELS[atype]:40s} {cnt:>4d}")
+        label = config.types[tid].label if tid in config.types else tid
+        print(f"  {label:40s} {cnt:>4d}")
+    # Types not in config (shouldn't happen, but be safe)
+    for tid, cnt in report.registry_count.items():
+        if tid not in config.type_order:
+            print(f"  {tid:40s} {cnt:>4d}")
+            total += cnt
     print(f"  {'TOTAL':40s} {total:>4d} artifacts, {report.total_edges} edges")
 
-    # Coverage matrix
     print("\n--- Coverage Matrix ---")
     for label, data in report.coverage.items():
         status = "OK" if data["pct"] >= 100 else f"WARN: {len(data['missing'])} missing"
@@ -644,7 +454,6 @@ def print_report(report: TraceReport, registry: Dict[str, Artifact], verbose: bo
             for mid in data["missing"]:
                 print(f"       - {mid}")
 
-    # Dangling references
     if report.dangling:
         print(f"\n--- Dangling References ({len(report.dangling)}) ---")
         for did, fname, lnum in report.dangling:
@@ -652,19 +461,17 @@ def print_report(report: TraceReport, registry: Dict[str, Artifact], verbose: bo
     else:
         print("\n--- Dangling References: none ---")
 
-    # Orphans
     if report.orphans:
         print(f"\n--- Orphan Artifacts ({len(report.orphans)}) ---")
         orphan_types = defaultdict(list)
         for oid in report.orphans:
             if oid in registry:
-                orphan_types[registry[oid].artifact_type.value].append(oid)
+                orphan_types[registry[oid].artifact_type].append(oid)
         for tval, ids in sorted(orphan_types.items()):
             print(f"  [{tval}] ({len(ids)}): {', '.join(sorted(ids))}")
     else:
         print("\n--- Orphan Artifacts: none ---")
 
-    # Missing expected links
     if report.missing_expected:
         print(f"\n--- Missing Expected Links ({len(report.missing_expected)}) ---")
         for aid, missing_type in sorted(report.missing_expected):
@@ -672,7 +479,6 @@ def print_report(report: TraceReport, registry: Dict[str, Artifact], verbose: bo
     else:
         print("\n--- Missing Expected Links: none ---")
 
-    # Summary line
     errors = len(report.dangling)
     warnings = len(report.orphans) + len(report.missing_expected)
     ok_pairs = sum(1 for d in report.coverage.values() if d["pct"] >= 100)
@@ -726,416 +532,8 @@ def export_json(G: nx.DiGraph, registry: Dict[str, Artifact],
 
 # ── Output: DOT export ───────────────────────────────────────────
 
-DOT_COLORS = {
-    "ST": "#FFF3C4",       # soft amber
-    "BR_REQ": "#C3DAF9",   # soft blue
-    "BR_RULE": "#FCCFCF",  # soft red
-    "BP": "#C6F6D5",       # soft green
-    "BD": "#FEEBC8",       # soft orange
-    "BF": "#E9D8FD",       # soft purple
-    "F": "#B2F5EA",        # soft teal
-    "VAD": "#FED7E2",      # soft pink
-    "M": "#E2E8F0",        # soft grey
-    "FILE": "#F7FAFC",     # very light grey
-    "UNKNOWN": "#FED7D7",  # soft red
-}
-
-DOT_BORDER_COLORS = {
-    "ST": "#D69E2E",
-    "BR_REQ": "#2B6CB0",
-    "BR_RULE": "#C53030",
-    "BP": "#276749",
-    "BD": "#C05621",
-    "BF": "#6B46C1",
-    "F": "#285E61",
-    "VAD": "#B83280",
-    "M": "#4A5568",
-    "FILE": "#A0AEC0",
-    "UNKNOWN": "#E53E3E",
-}
-
-DOT_SHAPES = {
-    "ST": "house",          # stakeholders at the top
-    "BR_REQ": "box",        # requirements — rectangular
-    "BR_RULE": "octagon",   # rules — stop-sign shape
-    "BP": "cds",            # processes — cylinder-like
-    "BD": "diamond",        # decisions
-    "BF": "component",      # business functions
-    "F": "note",            # features
-    "VAD": "hexagon",       # value chains
-    "M": "box3d",           # modules — 3D box
-    "FILE": "folder",       # file references
-    "UNKNOWN": "plaintext",
-}
-
-DOT_CLUSTER_LABELS = {
-    "ST": "Стейкхолдеры",
-    "BR_REQ": "Бизнес-требования (BR.X)",
-    "BR_RULE": "Бизнес-правила (BR-XX)",
-    "BP": "Бизнес-процессы (BP-XX)",
-    "BD": "Решения (BD-XX)",
-    "BF": "Бизнес-функции (BF.XX)",
-    "F": "Фичи (F-XX)",
-    "VAD": "Цепочки ценности (VAD-XX)",
-    "M": "Модули (М-XX)",
-    "FILE": "Документы",
-}
-
-# Logical hierarchy ranks (top → bottom)
-DOT_RANK_ORDER = ["ST", "BR_REQ", "BR_RULE", "BP", "BD", "BF", "VAD", "F", "M"]
-
-DOT_EDGE_COLORS = {
-    "ST": "#D69E2E",
-    "BR_REQ": "#2B6CB0",
-    "BR_RULE": "#C53030",
-    "BP": "#276749",
-    "BD": "#C05621",
-    "BF": "#6B46C1",
-    "F": "#285E61",
-    "VAD": "#B83280",
-    "M": "#4A5568",
-    "FILE": "#A0AEC0",
-    "UNKNOWN": "#E53E3E",
-}
-
-
-# ── Output: ARTIFACT_INDEX.md ─────────────────────────────────────
-
-# Semantic clusters: glossary term → related artifact IDs
-# Derived from project structure and process/feature naming.
-SEMANTIC_CLUSTERS = {
-    "Приём заказа / КЦ / Касса": [
-        "BP-01a", "BP-01b", "F-01", "F-02", "F-03",
-        "BF.01.1", "BF.01.2", "BF.01.3", "BF.01.4", "BF.01.5",
-        "BF.01.6", "BF.01.7", "BF.01.8", "BF.01.9",
-        "BR.1", "BR.1.1", "BR.1.2", "BR.1.3",
-        "BR.6", "BR.6.1", "BR.6.2", "BR.6.3",
-        "BR.7", "BR.7.1", "BR.7.2", "BR.7.3",
-        "BR-10", "BR-12", "BR-13", "BR-14", "BR-16", "BR-17", "BR-18",
-        "BD-01", "BD-13", "BD-14",
-        "M08",
-    ],
-    "Набивка кухни / Производительность": [
-        "BP-02", "F-04",
-        "BF.02.1", "BF.02.2", "BF.02.3", "BF.02.4",
-        "BR.2", "BR.2.1", "BR.2.2", "BR.2.3", "BR.2.4",
-        "BR-01", "BR-02", "BR-11", "BR-15", "BR-19", "BR-23",
-        "BD-02",
-        "M09",
-    ],
-    "KDS повара / Приготовление": [
-        "BP-03", "F-05", "F-07",
-        "BF.02.5", "BF.02.6", "BF.02.7", "BF.02.8", "BF.02.9",
-        "BF.02.10", "BF.02.11",
-        "BR.12", "BR.12.1", "BR.12.2", "BR.12.3", "BR.12.4", "BR.12.5", "BR.12.6",
-        "BR-27", "BR-28", "BR-29", "BR-30", "BR-31", "BR-32", "BR-33",
-        "BD-06", "BD-11",
-        "M10",
-    ],
-    "KDS сборки / Упаковка": [
-        "F-06",
-        "BF.02.12", "BF.02.13", "BF.02.14", "BF.02.15",
-        "BR.13", "BR.13.1", "BR.13.2", "BR.13.3", "BR.13.4", "BR.13.5", "BR.13.6",
-        "BR-34", "BR-35", "BR-36", "BR-37",
-        "BD-08", "BD-10",
-        "M11",
-    ],
-    "Схемы станций / Брак / Маркировка": [
-        "BF.02.16", "BF.02.17", "BF.02.18", "BF.02.19",
-        "BR.14", "BR.14.1", "BR.14.2",
-        "BR.18", "BR.18.1", "BR.19",
-        "BR-38", "BR-39", "BR-40", "BR-44", "BR-45",
-        "BD-09", "BD-10",
-        "M13",
-    ],
-    "Обещанное время / ETA": [
-        "F-08",
-        "BF.03.1", "BF.03.2", "BF.03.3",
-        "BR.3", "BR.3.1", "BR.3.2",
-        "BR-03", "BR-04", "BR-21",
-        "BD-14",
-    ],
-    "Маршрутизация / Назначение курьеров": [
-        "BP-05", "F-09",
-        "BF.03.4", "BF.03.5", "BF.03.6", "BF.03.7", "BF.03.8", "BF.03.9", "BF.03.10",
-        "BR.4", "BR.4.1", "BR.4.2", "BR.4.3", "BR.4.4", "BR.4.5", "BR.4.6", "BR.4.7",
-        "BR-05", "BR-06", "BR-08", "BR-09", "BR-24", "BR-25", "BR-26",
-        "BD-12",
-        "M12",
-    ],
-    "Доставка / Курьерская служба": [
-        "BP-06", "BP-10", "F-10", "F-11", "F-12",
-        "BF.04.1", "BF.04.2", "BF.04.3", "BF.04.4", "BF.04.5", "BF.04.6",
-        "BR.5", "BR.5.1",
-        "BR.15", "BR.15.1", "BR.15.2", "BR.16",
-        "BR-07", "BR-41", "BR-42",
-        "M06", "M07",
-    ],
-    "Оплата / Фискализация / Чаевые": [
-        "BP-07", "F-13",
-        "BF.05.1", "BF.05.2", "BF.05.3",
-        "BR.9", "BR.9.1", "BR.9.2",
-        "M17",
-    ],
-    "Меню / Стоп-листы / Конфигурация": [
-        "BP-08", "F-15",
-        "BF.06.4", "BF.06.5", "BF.06.6",
-        "BR.8", "BR.8.1",
-        "M01", "M13",
-    ],
-    "Профиль гостя / CRM / Лояльность": [
-        "BP-09", "F-14",
-        "BF.06.1", "BF.06.2", "BF.06.3",
-        "BR-20",
-        "M04", "M14",
-    ],
-    "Персонал / Смены / Графики": [
-        "BP-11", "F-16",
-        "BF.07.1", "BF.07.2", "BF.07.3",
-        "BR.10", "BR.10.1",
-        "BR-43",
-        "BD-15",
-        "M15",
-    ],
-    "Мониторинг / Аналитика / Дашборд": [
-        "BP-12", "BP-13", "F-17",
-        "BF.08.1", "BF.08.2", "BF.08.3", "BF.08.4",
-        "M16",
-    ],
-    "Управление партнёрами / Франшиза": [
-        "BP-14", "F-19",
-        "BF.09.1", "BF.09.2", "BF.09.3",
-        "BR.11", "BR.11.1",
-    ],
-    "Обратная связь / NPS / Отзывы": [
-        "BP-15", "F-18", "F-20",
-        "BF.10.1", "BF.10.2", "BF.10.3",
-    ],
-    "Мобильное приложение (B2C)": [
-        "M01", "M02", "M03", "M04", "M05",
-    ],
-}
-
-
-def export_index(G: nx.DiGraph, registry: Dict[str, Artifact], root: Path, path: Path):
-    """Generate compact ARTIFACT_INDEX.md for agent navigation.
-
-    Design: minimal token footprint, agent-grep-friendly.
-    - Semantic map: topic → IDs (for business-term lookup)
-    - Flat lookup: ID  file:line  title (for direct navigation)
-    - No link columns (agent can use --json-out or script for links)
-    """
-    lines = [
-        "# Artifact Index",
-        "",
-        f"Generated: {datetime.now().strftime('%Y-%m-%d')}. "
-        "Rebuild: `uv run scripts/traceability.py --index-auto`",
-        "",
-        "## Semantic Map",
-        "",
-    ]
-
-    # Semantic map — compact
-    for topic, ids in SEMANTIC_CLUSTERS.items():
-        existing = [i for i in ids if normalize_id(i) in registry]
-        if existing:
-            lines.append(f"**{topic}:** {', '.join(existing)}")
-
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    # Per-type: flat list, grouped by common directory prefix
-    for atype in ArtifactType:
-        arts = sorted(
-            [(aid, art) for aid, art in registry.items() if art.artifact_type == atype],
-            key=lambda x: x[0],
-        )
-        if not arts:
-            continue
-
-        lines.append(f"## {LABELS[atype]} ({len(arts)})")
-        lines.append("")
-
-        # Group by directory to reduce repetition
-        dir_groups: Dict[str, List[Tuple[str, Artifact]]] = defaultdict(list)
-        for aid, art in arts:
-            d = str(art.source_file.parent.relative_to(root)) if root in art.source_file.parents else str(art.source_file.parent)
-            dir_groups[d].append((aid, art))
-
-        for dirpath, group in dir_groups.items():
-            if len(dir_groups) > 1:
-                lines.append(f"_{dirpath}/_")
-            for aid, art in group:
-                fname = art.source_file.name
-                title = art.title[:55] if art.title else ""
-                if title:
-                    lines.append(f"- `{aid}` {fname}:{art.line_number} — {title}")
-                else:
-                    lines.append(f"- `{aid}` {fname}:{art.line_number}")
-
-        lines.append("")
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"Index exported to {path}")
-
-
-def _relpath(filepath: Path, root: Path) -> str:
-    try:
-        return str(filepath.relative_to(root))
-    except ValueError:
-        return str(filepath)
-
-
-def export_dot(G: nx.DiGraph, path: Path):
-    """Export graph as a richly styled DOT file with clusters, shapes, and legend."""
-    # Group nodes by type
-    type_groups: Dict[str, List[str]] = defaultdict(list)
-    for n, d in G.nodes(data=True):
-        atype = d.get("type", "UNKNOWN")
-        type_groups[atype].append(n)
-
-    lines: List[str] = []
-    lines.append('digraph traceability {')
-    lines.append('  // Global settings')
-    lines.append('  rankdir=TB;')
-    lines.append('  newrank=true;')
-    lines.append('  concentrate=true;')
-    lines.append('  compound=true;')
-    lines.append('  splines=ortho;')
-    lines.append('  nodesep=0.4;')
-    lines.append('  ranksep=0.8;')
-    lines.append('  fontname="Helvetica";')
-    lines.append('  bgcolor="#FAFAFA";')
-    lines.append('  pad=0.5;')
-    lines.append('')
-    lines.append('  // Default node style')
-    lines.append('  node [style="filled,rounded", fontname="Helvetica", fontsize=10, '
-                 'penwidth=1.5, margin="0.15,0.08"];')
-    lines.append('  edge [fontname="Helvetica", fontsize=8, penwidth=0.8, '
-                 'arrowsize=0.7, color="#718096"];')
-    lines.append('')
-
-    # Emit clustered subgraphs in hierarchy order
-    for atype in DOT_RANK_ORDER:
-        nodes = type_groups.get(atype, [])
-        if not nodes:
-            continue
-        cluster_label = DOT_CLUSTER_LABELS.get(atype, atype)
-        fill = DOT_COLORS.get(atype, "#FFFFFF")
-        border = DOT_BORDER_COLORS.get(atype, "#999999")
-        shape = DOT_SHAPES.get(atype, "box")
-        # Sort nodes for deterministic output
-        nodes.sort()
-
-        lines.append(f'  subgraph cluster_{atype} {{')
-        lines.append(f'    label="{cluster_label}";')
-        lines.append(f'    style="rounded,filled"; fillcolor="{fill}20"; '
-                     f'color="{border}"; penwidth=1.5;')
-        lines.append(f'    fontname="Helvetica"; fontsize=12; fontcolor="{border}"; labeljust=l;')
-        lines.append('')
-        for n in nodes:
-            d = G.nodes[n]
-            label = _dot_node_label(n, d)
-            defined = d.get("defined", True)
-            node_style = "filled,rounded,dashed" if not defined else "filled,rounded"
-            lines.append(
-                f'    "{_esc(n)}" [label="{label}", shape={shape}, '
-                f'fillcolor="{fill}", color="{border}", style="{node_style}"];'
-            )
-        lines.append('  }')
-        lines.append('')
-
-    # FILE and UNKNOWN nodes (outside clusters)
-    for atype in ("FILE", "UNKNOWN"):
-        nodes = type_groups.get(atype, [])
-        if not nodes:
-            continue
-        cluster_label = DOT_CLUSTER_LABELS.get(atype, atype)
-        fill = DOT_COLORS.get(atype, "#FFFFFF")
-        border = DOT_BORDER_COLORS.get(atype, "#999999")
-        shape = DOT_SHAPES.get(atype, "box")
-        nodes.sort()
-
-        lines.append(f'  subgraph cluster_{atype} {{')
-        lines.append(f'    label="{cluster_label}";')
-        lines.append(f'    style="rounded,dashed"; color="{border}"; penwidth=1.0;')
-        lines.append(f'    fontname="Helvetica"; fontsize=10; fontcolor="{border}";')
-        lines.append('')
-        for n in nodes:
-            d = G.nodes[n]
-            label = _dot_node_label(n, d)
-            lines.append(
-                f'    "{_esc(n)}" [label="{label}", shape={shape}, '
-                f'fillcolor="{fill}", color="{border}"];'
-            )
-        lines.append('  }')
-        lines.append('')
-
-    # Edges — colored by source node type
-    lines.append('  // Edges')
-    for u, v, d in G.edges(data=True):
-        src_type = G.nodes[u].get("type", "UNKNOWN") if u in G.nodes else "UNKNOWN"
-        edge_color = DOT_EDGE_COLORS.get(src_type, "#718096")
-        ctx = d.get("context", "").replace('"', '\\"')[:60]
-        lines.append(
-            f'  "{_esc(u)}" -> "{_esc(v)}" '
-            f'[color="{edge_color}80", tooltip="{ctx}"];'
-        )
-    lines.append('')
-
-    # Legend
-    lines.append('  // Legend')
-    lines.append('  subgraph cluster_legend {')
-    lines.append('    label="Легенда";')
-    lines.append('    style="rounded,filled"; fillcolor="#FFFFFF"; color="#CBD5E0"; penwidth=1.5;')
-    lines.append('    fontname="Helvetica"; fontsize=12; fontcolor="#2D3748"; labeljust=l;')
-    lines.append('    node [fontsize=9, width=0.3, height=0.2, margin="0.08,0.04"];')
-    lines.append('')
-    for atype in DOT_RANK_ORDER:
-        lbl = DOT_CLUSTER_LABELS.get(atype, atype)
-        fill = DOT_COLORS.get(atype, "#FFFFFF")
-        border = DOT_BORDER_COLORS.get(atype, "#999999")
-        shape = DOT_SHAPES.get(atype, "box")
-        lines.append(
-            f'    "legend_{atype}" [label="{lbl}", shape={shape}, '
-            f'fillcolor="{fill}", color="{border}"];'
-        )
-    # Invisible edges to order legend items vertically
-    legend_ids = [f'"legend_{a}"' for a in DOT_RANK_ORDER]
-    lines.append(f'    {" -> ".join(legend_ids)} [style=invis];')
-    lines.append('  }')
-    lines.append('')
-
-    lines.append('}')
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"DOT exported to {path}")
-
-
-def _esc(s: str) -> str:
-    """Escape a string for DOT identifiers."""
-    return s.replace('"', '\\"')
-
-
-def _dot_node_label(node_id: str, data: dict) -> str:
-    """Build a compact two-line label: ID + truncated title."""
-    eid = node_id.replace('"', '\\"')
-    title = data.get("title", "")
-    if not title:
-        return eid
-    # Truncate to 35 chars for readability
-    short = title[:35].replace('"', '\\"')
-    if len(title) > 35:
-        short += "…"
-    return f"{eid}\\n{short}"
-
-
-# ── Output: Interactive HTML (vis-network) ───────────────────────
-
-HTML_COLORS = {
+# Default colors for common types; config can extend/override
+_DEFAULT_COLORS = {
     "ST":      {"bg": "#FFF3C4", "border": "#D69E2E"},
     "BR_REQ":  {"bg": "#C3DAF9", "border": "#2B6CB0"},
     "BR_RULE": {"bg": "#FCCFCF", "border": "#C53030"},
@@ -1145,33 +543,188 @@ HTML_COLORS = {
     "F":       {"bg": "#B2F5EA", "border": "#285E61"},
     "VAD":     {"bg": "#FED7E2", "border": "#B83280"},
     "M":       {"bg": "#E2E8F0", "border": "#4A5568"},
+    "DM":      {"bg": "#D6BCFA", "border": "#553C9A"},
+    "SM":      {"bg": "#FBD38D", "border": "#B7791F"},
+    "EN":      {"bg": "#BEE3F8", "border": "#2A69AC"},
+    "RL":      {"bg": "#C6F6D5", "border": "#22543D"},
     "FILE":    {"bg": "#F7FAFC", "border": "#A0AEC0"},
     "UNKNOWN": {"bg": "#FED7D7", "border": "#E53E3E"},
 }
 
-HTML_SHAPES = {
+_DEFAULT_SHAPES = {
+    "ST": "house", "BR_REQ": "box", "BR_RULE": "octagon",
+    "BP": "cds", "BD": "diamond", "BF": "component",
+    "F": "note", "VAD": "hexagon", "M": "box3d",
+    "DM": "box", "SM": "box", "EN": "box", "RL": "box",
+    "FILE": "folder", "UNKNOWN": "plaintext",
+}
+
+_HTML_SHAPES = {
     "ST": "triangle", "BR_REQ": "box", "BR_RULE": "diamond",
     "BP": "ellipse", "BD": "hexagon", "BF": "box",
     "F": "star", "VAD": "hexagon", "M": "database",
+    "DM": "box", "SM": "box", "EN": "box", "RL": "box",
     "FILE": "text", "UNKNOWN": "dot",
 }
 
-HTML_SIZES = {
+_HTML_SIZES = {
     "ST": 25, "BR_REQ": 18, "BR_RULE": 16, "BP": 22, "BD": 20,
-    "BF": 14, "F": 24, "VAD": 22, "M": 26, "FILE": 10, "UNKNOWN": 10,
-}
-
-HTML_GROUP_LABELS = {
-    "ST": "Стейкхолдеры", "BR_REQ": "Бизнес-требования",
-    "BR_RULE": "Бизнес-правила", "BP": "Бизнес-процессы",
-    "BD": "Решения", "BF": "Бизнес-функции", "F": "Фичи",
-    "VAD": "Цепочки ценности", "M": "Модули",
-    "FILE": "Документы", "UNKNOWN": "Прочее",
+    "BF": 14, "F": 24, "VAD": 22, "M": 26,
+    "DM": 16, "SM": 16, "EN": 14, "RL": 16,
+    "FILE": 10, "UNKNOWN": 10,
 }
 
 
-def export_html(G: nx.DiGraph, path: Path):
-    """Export a standalone interactive HTML visualization (vis-network via CDN)."""
+def _get_colors(atype: str) -> dict:
+    return _DEFAULT_COLORS.get(atype, _DEFAULT_COLORS["UNKNOWN"])
+
+
+def export_dot(G: nx.DiGraph, config: ProjectConfig, path: Path):
+    """Export graph as a richly styled DOT file with clusters."""
+    type_groups: Dict[str, List[str]] = defaultdict(list)
+    for n, d in G.nodes(data=True):
+        atype = d.get("type", "UNKNOWN")
+        type_groups[atype].append(n)
+
+    lines: List[str] = []
+    lines.append('digraph traceability {')
+    lines.append('  rankdir=TB; newrank=true; concentrate=true; compound=true;')
+    lines.append('  splines=ortho; nodesep=0.4; ranksep=0.8;')
+    lines.append('  fontname="Helvetica"; bgcolor="#FAFAFA"; pad=0.5;')
+    lines.append('  node [style="filled,rounded", fontname="Helvetica", fontsize=10, '
+                 'penwidth=1.5, margin="0.15,0.08"];')
+    lines.append('  edge [fontname="Helvetica", fontsize=8, penwidth=0.8, '
+                 'arrowsize=0.7, color="#718096"];')
+    lines.append('')
+
+    # Clustered subgraphs by type order from config
+    all_types = list(config.type_order) + [t for t in type_groups if t not in config.type_order]
+    for atype in all_types:
+        nodes = type_groups.get(atype, [])
+        if not nodes:
+            continue
+        label = config.types[atype].label if atype in config.types else atype
+        colors = _get_colors(atype)
+        shape = _DEFAULT_SHAPES.get(atype, "box")
+        nodes.sort()
+
+        is_meta = atype in ("FILE", "UNKNOWN")
+        style = 'rounded,dashed' if is_meta else 'rounded,filled'
+
+        lines.append(f'  subgraph cluster_{atype} {{')
+        lines.append(f'    label="{label}"; style="{style}";')
+        lines.append(f'    fillcolor="{colors["bg"]}20"; color="{colors["border"]}";')
+        lines.append(f'    penwidth=1.5; fontname="Helvetica"; fontsize=12;')
+        for n in nodes:
+            d = G.nodes[n]
+            lbl = _dot_node_label(n, d)
+            defined = d.get("defined", True)
+            ns = "filled,rounded,dashed" if not defined else "filled,rounded"
+            lines.append(
+                f'    "{_esc(n)}" [label="{lbl}", shape={shape}, '
+                f'fillcolor="{colors["bg"]}", color="{colors["border"]}", style="{ns}"];'
+            )
+        lines.append('  }')
+        lines.append('')
+
+    # Edges
+    lines.append('  // Edges')
+    for u, v, d in G.edges(data=True):
+        src_type = G.nodes[u].get("type", "UNKNOWN") if u in G.nodes else "UNKNOWN"
+        edge_color = _get_colors(src_type)["border"]
+        ctx = d.get("context", "").replace('"', '\\"')[:60]
+        lines.append(
+            f'  "{_esc(u)}" -> "{_esc(v)}" '
+            f'[color="{edge_color}80", tooltip="{ctx}"];'
+        )
+    lines.append('}')
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"DOT exported to {path}")
+
+
+def _esc(s: str) -> str:
+    return s.replace('"', '\\"')
+
+
+def _dot_node_label(node_id: str, data: dict) -> str:
+    eid = node_id.replace('"', '\\"')
+    title = data.get("title", "")
+    if not title:
+        return eid
+    short = title[:35].replace('"', '\\"')
+    if len(title) > 35:
+        short += "…"
+    return f"{eid}\\n{short}"
+
+
+# ── Output: ARTIFACT_INDEX.md ────────────────────────────────────
+
+def export_index(G: nx.DiGraph, registry: Dict[str, Artifact],
+                 config: ProjectConfig, root: Path, path: Path):
+    """Generate compact ARTIFACT_INDEX.md for agent navigation."""
+    lines_out = [
+        "# Artifact Index",
+        "",
+        f"Generated: {datetime.now().strftime('%Y-%m-%d')}. "
+        "Rebuild: `graph-ba import`",
+        "",
+        "## Semantic Map",
+        "",
+    ]
+
+    for topic, ids in config.clusters.items():
+        existing = [i for i in ids if normalize_id(i, config) in registry]
+        if existing:
+            lines_out.append(f"**{topic}:** {', '.join(existing)}")
+
+    lines_out.append("")
+    lines_out.append("---")
+    lines_out.append("")
+
+    for tid in config.type_order:
+        arts = sorted(
+            [(aid, art) for aid, art in registry.items() if art.artifact_type == tid],
+            key=lambda x: x[0],
+        )
+        if not arts:
+            continue
+
+        label = config.types[tid].label if tid in config.types else tid
+        lines_out.append(f"## {label} ({len(arts)})")
+        lines_out.append("")
+
+        dir_groups: Dict[str, List[Tuple[str, Artifact]]] = defaultdict(list)
+        for aid, art in arts:
+            try:
+                d = str(art.source_file.parent.relative_to(root))
+            except ValueError:
+                d = str(art.source_file.parent)
+            dir_groups[d].append((aid, art))
+
+        for dirpath, group in dir_groups.items():
+            if len(dir_groups) > 1:
+                lines_out.append(f"_{dirpath}/_")
+            for aid, art in group:
+                fname = art.source_file.name
+                title = art.title[:55] if art.title else ""
+                if title:
+                    lines_out.append(f"- `{aid}` {fname}:{art.line_number} — {title}")
+                else:
+                    lines_out.append(f"- `{aid}` {fname}:{art.line_number}")
+
+        lines_out.append("")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines_out), encoding="utf-8")
+    print(f"Index exported to {path}")
+
+
+# ── Output: Interactive HTML (vis-network) ───────────────────────
+
+def export_html(G: nx.DiGraph, config: ProjectConfig, path: Path):
+    """Export a standalone interactive HTML visualization."""
     nodes_js: List[str] = []
     for n, d in G.nodes(data=True):
         atype = d.get("type", "UNKNOWN")
@@ -1179,22 +732,22 @@ def export_html(G: nx.DiGraph, path: Path):
         source_file = d.get("source_file", "")
         defined = d.get("defined", True)
 
-        colors = HTML_COLORS.get(atype, HTML_COLORS["UNKNOWN"])
-        shape = HTML_SHAPES.get(atype, "dot")
-        size = HTML_SIZES.get(atype, 15)
-        group = HTML_GROUP_LABELS.get(atype, "Прочее")
+        colors = _get_colors(atype)
+        shape = _HTML_SHAPES.get(atype, "dot")
+        size = _HTML_SIZES.get(atype, 15)
+        group_label = config.types[atype].label if atype in config.types else atype
 
         in_deg = G.in_degree(n)
         out_deg = G.out_degree(n)
         tip_parts = [f"<b>{n}</b>"]
         if title_text:
             tip_parts.append(title_text)
-        tip_parts.append(f"<i>Тип:</i> {group}")
+        tip_parts.append(f"<i>Тип:</i> {group_label}")
         if source_file:
             tip_parts.append(f"<i>Файл:</i> {source_file}")
-        tip_parts.append(f"<i>Входящие:</i> {in_deg} | <i>Исходящие:</i> {out_deg}")
+        tip_parts.append(f"<i>In:</i> {in_deg} | <i>Out:</i> {out_deg}")
         if not defined:
-            tip_parts.append("<b style='color:red'>⚠ Не определён</b>")
+            tip_parts.append("<b style='color:red'>Not defined</b>")
         tooltip = "<br>".join(tip_parts).replace("'", "\\'")
 
         bg = colors["bg"] if defined else "#FED7D7"
@@ -1222,14 +775,16 @@ def export_html(G: nx.DiGraph, path: Path):
         ev = v.replace("'", "\\'")
         edges_js.append(f"  {{from:'{eu}',to:'{ev}',title:'{tip}'}}")
 
-    # Legend items
+    # Legend items from config types
     legend_items_html = []
-    for atype in DOT_RANK_ORDER:
-        c = HTML_COLORS.get(atype, HTML_COLORS["UNKNOWN"])
-        lbl = HTML_GROUP_LABELS.get(atype, atype)
+    for tid in config.type_order:
+        if tid not in config.types:
+            continue
+        c = _get_colors(tid)
+        lbl = config.types[tid].label
         legend_items_html.append(
             f'<label style="display:flex;align-items:center;gap:6px;margin:2px 0;cursor:pointer">'
-            f'<input type="checkbox" checked data-group="{atype}" '
+            f'<input type="checkbox" checked data-group="{tid}" '
             f'onchange="toggleGroup(this)">'
             f'<span style="display:inline-block;width:14px;height:14px;'
             f'background:{c["bg"]};border:2px solid {c["border"]};border-radius:3px"></span>'
@@ -1251,10 +806,10 @@ def export_html(G: nx.DiGraph, path: Path):
 
 _HTML_TEMPLATE = """\
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Graph BA — Граф трассируемости артефактов</title>
+<title>Graph BA — Artifact Traceability</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/dist/vis-network.min.css" crossorigin="anonymous"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/vis-network.min.js" crossorigin="anonymous"></script>
 <style>
@@ -1294,20 +849,15 @@ _HTML_TEMPLATE = """\
 </head>
 <body>
 <div id="graph"></div>
-
 <div id="legend">
-  <h3>Легенда (клик — фильтр)</h3>
+  <h3>Legend (click to filter)</h3>
   {legend_items}
 </div>
-
 <div id="search">
-  <input type="text" id="searchBox" placeholder="Поиск по ID..." oninput="onSearch(this.value)">
+  <input type="text" id="searchBox" placeholder="Search by ID..." oninput="onSearch(this.value)">
 </div>
-
-<div id="stats">Узлов: {node_count} | Рёбер: {edge_count}</div>
-
-<div id="stabilize-msg">Стабилизация графа…</div>
-
+<div id="stats">Nodes: {node_count} | Edges: {edge_count}</div>
+<div id="stabilize-msg">Stabilizing graph…</div>
 <script>
 var allNodes = new vis.DataSet([
 {nodes_data}
@@ -1315,19 +865,14 @@ var allNodes = new vis.DataSet([
 var allEdges = new vis.DataSet([
 {edges_data}
 ]);
-
 var container = document.getElementById('graph');
 var data = {{ nodes: allNodes, edges: allEdges }};
 var options = {{
   physics: {{
     enabled: true,
     barnesHut: {{
-      gravitationalConstant: -6000,
-      centralGravity: 0.25,
-      springLength: 140,
-      springConstant: 0.04,
-      damping: 0.09,
-      avoidOverlap: 0.4
+      gravitationalConstant: -6000, centralGravity: 0.25,
+      springLength: 140, springConstant: 0.04, damping: 0.09, avoidOverlap: 0.4
     }},
     stabilization: {{ enabled: true, iterations: 500, updateInterval: 25 }}
   }},
@@ -1338,17 +883,14 @@ var options = {{
   edges: {{
     arrows: {{ to: {{ enabled: true, scaleFactor: 0.5 }} }},
     smooth: {{ type: 'cubicBezier', forceDirection: 'vertical', roundness: 0.4 }},
-    color: {{ inherit: 'from', opacity: 0.35 }},
-    width: 0.7, hoverWidth: 2
+    color: {{ inherit: 'from', opacity: 0.35 }}, width: 0.7, hoverWidth: 2
   }},
   nodes: {{
     font: {{ size: 11, face: 'Helvetica, Arial, sans-serif' }},
     borderWidth: 2, borderWidthSelected: 3
   }}
 }};
-
 var network = new vis.Network(container, data, options);
-
 network.on('stabilizationIterationsDone', function() {{
   network.setOptions({{ physics: {{ enabled: false }} }});
   document.getElementById('stabilize-msg').style.opacity = '0';
@@ -1356,13 +898,10 @@ network.on('stabilizationIterationsDone', function() {{
     document.getElementById('stabilize-msg').style.display = 'none';
   }}, 600);
 }});
-
-// Search
 function onSearch(q) {{
   q = q.trim().toUpperCase();
   if (!q) {{
     allNodes.forEach(function(n) {{ allNodes.update({{id:n.id, opacity:1, font:{{size:11}}}}); }});
-    allEdges.forEach(function(e) {{ allEdges.update({{id:e.id, hidden:false}}); }});
     return;
   }}
   allNodes.forEach(function(n) {{
@@ -1370,8 +909,6 @@ function onSearch(q) {{
     allNodes.update({{id:n.id, opacity: match ? 1 : 0.15, font:{{size: match ? 14 : 8}}}});
   }});
 }}
-
-// Filter by group (legend checkboxes)
 var hiddenGroups = {{}};
 function toggleGroup(cb) {{
   var g = cb.dataset.group;
@@ -1385,70 +922,6 @@ function toggleGroup(cb) {{
 </body>
 </html>
 """
-
-
-# ── CLI ───────────────────────────────────────────────────────────
-
-@click.command()
-@click.option("--root", type=click.Path(exists=True, path_type=Path),
-              default=".", help="Project root directory")
-@click.option("--json-out", type=click.Path(path_type=Path), default=None,
-              help="Path for JSON graph export")
-@click.option("--dot-out", type=click.Path(path_type=Path), default=None,
-              help="Path for DOT file export")
-@click.option("--html-out", type=click.Path(path_type=Path), default=None,
-              help="Path for interactive HTML export (vis-network)")
-@click.option("--no-file-nodes", is_flag=True,
-              help="Exclude FILE nodes from HTML/DOT (reduce noise)")
-@click.option("--no-transitive", is_flag=True,
-              help="Remove transitive edges A→C where A→B→C exists")
-@click.option("--index", "index_out", type=click.Path(path_type=Path), default=None,
-              help="Path for ARTIFACT_INDEX.md (default: 02_Discovery/ARTIFACT_INDEX.md)")
-@click.option("--index-auto", is_flag=True,
-              help="Generate index at default path 02_Discovery/ARTIFACT_INDEX.md")
-@click.option("-v", "--verbose", is_flag=True, help="Show detailed info")
-def main(root: Path, json_out: Optional[Path], dot_out: Optional[Path],
-         html_out: Optional[Path],
-         no_file_nodes: bool, no_transitive: bool,
-         index_out: Optional[Path], index_auto: bool, verbose: bool):
-    """Traceability Scanner — parse BA artifacts and verify cross-references."""
-    root = root.resolve()
-
-    # Phase 1: Definitions
-    registry = scan_definitions(root)
-    if verbose:
-        print(f"[scan] {len(registry)} artifact definitions found")
-
-    # Phase 2: References
-    references = scan_references(root, registry)
-    index_xrefs = scan_index_cross_refs(root)
-    if verbose:
-        print(f"[scan] {len(references)} references found, {len(index_xrefs)} index cross-refs")
-
-    # Phase 3: Graph
-    G = build_graph(registry, references, index_xrefs)
-
-    # Phase 4: Verify (always on full graph)
-    report = verify(G, registry, references)
-
-    # Output
-    print_report(report, registry, verbose)
-
-    if json_out:
-        export_json(G, registry, report, json_out)
-
-    # Build filtered graph for visual exports
-    G_vis = _filter_graph(G, no_file_nodes, no_transitive, verbose)
-
-    if dot_out:
-        export_dot(G_vis, dot_out)
-    if html_out:
-        export_html(G_vis, html_out)
-
-    # Index generation
-    idx_path = index_out or (root / "02_Discovery" / "ARTIFACT_INDEX.md" if index_auto else None)
-    if idx_path:
-        export_index(G, registry, root, idx_path)
 
 
 def _filter_graph(G: nx.DiGraph, no_file_nodes: bool, no_transitive: bool,
@@ -1469,7 +942,6 @@ def _filter_graph(G: nx.DiGraph, no_file_nodes: bool, no_transitive: bool,
     if no_transitive:
         to_remove = []
         for u, v in list(H.edges()):
-            # Check if there's an alternative path u→…→v of length ≥ 2
             H.remove_edge(u, v)
             if nx.has_path(H, u, v):
                 to_remove.append((u, v))
@@ -1487,6 +959,70 @@ def _filter_graph(G: nx.DiGraph, no_file_nodes: bool, no_transitive: bool,
               f" (removed {removed_nodes} FILE nodes, {removed_edges} transitive edges)")
 
     return H
+
+
+# ── CLI ───────────────────────────────────────────────────────────
+
+@click.command()
+@click.option("--root", type=click.Path(exists=True, path_type=Path),
+              default=".", help="Project root directory")
+@click.option("--json-out", type=click.Path(path_type=Path), default=None,
+              help="Path for JSON graph export")
+@click.option("--dot-out", type=click.Path(path_type=Path), default=None,
+              help="Path for DOT file export")
+@click.option("--html-out", type=click.Path(path_type=Path), default=None,
+              help="Path for interactive HTML export")
+@click.option("--no-file-nodes", is_flag=True,
+              help="Exclude FILE nodes from visual exports")
+@click.option("--no-transitive", is_flag=True,
+              help="Remove transitive edges")
+@click.option("--index", "index_out", type=click.Path(path_type=Path), default=None,
+              help="Path for ARTIFACT_INDEX.md")
+@click.option("--index-auto", is_flag=True,
+              help="Generate index at default path")
+@click.option("-v", "--verbose", is_flag=True, help="Show detailed info")
+def main(root: Path, json_out: Optional[Path], dot_out: Optional[Path],
+         html_out: Optional[Path],
+         no_file_nodes: bool, no_transitive: bool,
+         index_out: Optional[Path], index_auto: bool, verbose: bool):
+    """Traceability Scanner — parse BA artifacts and verify cross-references."""
+    root = root.resolve()
+    config = load_config(root)
+
+    registry = scan_definitions(root, config)
+    if verbose:
+        print(f"[scan] {len(registry)} artifact definitions found")
+
+    references = scan_references(root, registry, config)
+    index_xrefs = scan_index_cross_refs(root, config)
+    if verbose:
+        print(f"[scan] {len(references)} references found, {len(index_xrefs)} index cross-refs")
+
+    G = build_graph(registry, references, config, index_xrefs)
+    report = verify(G, registry, references, config)
+    print_report(report, registry, config, verbose)
+
+    if json_out:
+        export_json(G, registry, report, json_out)
+
+    G_vis = _filter_graph(G, no_file_nodes, no_transitive, verbose)
+
+    if dot_out:
+        export_dot(G_vis, config, dot_out)
+    if html_out:
+        export_html(G_vis, config, html_out)
+
+    # Index generation
+    idx_path = index_out
+    if not idx_path and index_auto:
+        # Find first scan dir that exists
+        for d in config.scan_dirs:
+            p = root / d
+            if p.exists():
+                idx_path = p / "ARTIFACT_INDEX.md"
+                break
+    if idx_path:
+        export_index(G, registry, config, root, idx_path)
 
 
 if __name__ == "__main__":

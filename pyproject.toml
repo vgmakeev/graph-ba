@@ -2,7 +2,7 @@
 name = "graph-ba"
 version = "0.1.0"
 description = "Graph-based traceability index for BA artifacts — SQLite + FTS5 + NetworkX"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "networkx>=3.0",
     "click>=8.0",

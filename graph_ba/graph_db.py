@@ -120,14 +120,16 @@ def get_db(path: Optional[Path] = None) -> sqlite3.Connection:
 
 def do_import(root: Path, db: sqlite3.Connection):
     """Import graph by running traceability scan and loading into SQLite."""
-    # Import traceability module functions
     from graph_ba import traceability as t
+    from graph_ba.config import load_config
 
     root = root.resolve()
-    registry = t.scan_definitions(root)
-    references = t.scan_references(root, registry)
-    index_xrefs = t.scan_index_cross_refs(root)
-    G = t.build_graph(registry, references, index_xrefs)
+    config = load_config(root)
+
+    registry = t.scan_definitions(root, config)
+    references = t.scan_references(root, registry, config)
+    index_xrefs = t.scan_index_cross_refs(root, config)
+    G = t.build_graph(registry, references, config, index_xrefs)
 
     # Clear existing data
     db.executescript("""
@@ -158,16 +160,16 @@ def do_import(root: Path, db: sqlite3.Connection):
             (u, v, d.get("context", ""), d.get("source_file", ""), d.get("line", 0))
         )
 
-    # Insert semantic clusters
-    for cluster_name, ids in t.SEMANTIC_CLUSTERS.items():
+    # Insert semantic clusters from config
+    for cluster_name, ids in config.clusters.items():
         for aid in ids:
             db.execute(
                 "INSERT OR IGNORE INTO semantic_clusters (cluster_name, artifact_id) "
                 "VALUES (?, ?)", (cluster_name, aid)
             )
 
-    # Build filename → full_path mapping from registry and references
-    file_map: Dict[str, str] = {}
+    # Build filename → full_path mapping
+    file_map: dict = {}
     for art in registry.values():
         file_map[art.source_file.name] = str(art.source_file)
     for ref in references:
@@ -187,8 +189,9 @@ def do_import(root: Path, db: sqlite3.Connection):
     n_nodes = db.execute("SELECT count(*) FROM artifacts").fetchone()[0]
     n_edges = db.execute("SELECT count(*) FROM edges").fetchone()[0]
     n_clusters = db.execute("SELECT count(DISTINCT cluster_name) FROM semantic_clusters").fetchone()[0]
+    db_path = db.execute("PRAGMA database_list").fetchone()[2]
     print(f"Imported: {n_nodes} artifacts, {n_edges} edges, {n_clusters} semantic clusters")
-    print(f"DB: {DB_PATH}")
+    print(f"DB: {db_path}")
 
 
 # ── Query helpers ─────────────────────────────────────────────────
@@ -241,12 +244,15 @@ def fmt_table(rows: list, headers: list) -> str:
 
 @click.group()
 @click.option("--db", type=click.Path(path_type=Path), default=None,
-              help=f"Path to SQLite DB (default: {DB_PATH})")
+              help=f"Path to SQLite DB (default: reports/graph.db)")
+@click.option("--root", type=click.Path(exists=True, path_type=Path),
+              default=".", help="Project root directory")
 @click.pass_context
-def cli(ctx, db):
+def cli(ctx, db, root):
     """Graph BA — query the artifact traceability graph."""
     ctx.ensure_object(dict)
     ctx.obj["db_path"] = db
+    ctx.obj["root"] = str(Path(root).resolve())
 
 
 def _conn(ctx) -> sqlite3.Connection:
@@ -254,14 +260,115 @@ def _conn(ctx) -> sqlite3.Connection:
 
 
 @cli.command("import")
-@click.option("--root", type=click.Path(exists=True, path_type=Path),
-              default=".", help="Project root")
 @click.pass_context
-def cmd_import(ctx, root):
+def cmd_import(ctx):
     """Scan artifacts and populate the SQLite DB."""
+    root = Path(ctx.obj.get("root", "."))
     db = _conn(ctx)
     do_import(root, db)
     db.close()
+
+
+@cli.command("init")
+@click.pass_context
+def cmd_init(ctx):
+    """Create a template graph-ba.toml in the project root."""
+    from graph_ba.config import CONFIG_FILENAME
+    root = Path(ctx.obj.get("root", "."))
+    config_path = root / CONFIG_FILENAME
+    if config_path.exists():
+        print(f"Config already exists: {config_path}")
+        return
+
+    template = '''\
+# graph-ba.toml — project configuration for Graph BA
+# Defines artifact types, scan rules, and cross-reference patterns.
+
+[scan]
+# Directories to scan for .md files (relative to project root)
+dirs = ["docs"]
+
+# ID normalization rules
+[normalize]
+# Character replacements (e.g. Cyrillic → Latin)
+char_map = {}
+# Zero-padding rules: { pattern = "regex with group(1)=number", format = "python format string" }
+zero_pad = []
+
+# Range expansion pattern (for references like REQ.1.1–REQ.1.5)
+range_pattern = '((?:REQ|FUNC)\\\\.\\\\.d+\\\\.)(\\\\d+)\\\\s*[–\\\\-]\\\\s*(?:(?:REQ|FUNC)\\\\.\\\\d+\\\\.)(\\\\d+)'
+
+# ── Artifact types ──
+# Each type needs:
+#   ref = regex to find references in text (group 1 = full ID)
+#   classify = regex to classify an ID string (used with fullmatch)
+#   label = human-readable name
+#   restrict_to = optional list of files/dirs where this pattern is allowed
+
+[types.REQ]
+label = "Requirements"
+ref = '(?<![A-Za-z])(REQ-\\\\d{2,4})(?!\\\\d)'
+classify = 'REQ-\\\\d{2,4}'
+
+[types.FEAT]
+label = "Features"
+ref = '(?<![A-Za-z])(FEAT-\\\\d{2,4})(?!\\\\d)'
+classify = 'FEAT-\\\\d{2,4}'
+
+# ── Definition scan rules ──
+# type = artifact type ID
+# file = relative path (supports * glob patterns)
+# mode = "heading" (match heading lines) or "table" (match table rows)
+# pattern = regex (group 1 = ID, group 2 = title)
+
+[[definitions]]
+type = "REQ"
+file = "docs/requirements.md"
+mode = "table"
+pattern = '^\\\\|\\\\s*(REQ-\\\\d{2,4})\\\\s*\\\\|'
+
+[[definitions]]
+type = "FEAT"
+file = "docs/features.md"
+mode = "heading"
+pattern = '^##\\\\s+(FEAT-\\\\d{2,4})\\\\s*[—–\\\\-]\\\\s*(.*)'
+
+# ── Index tables (extract cross-refs from table rows) ──
+# file = path to index file
+# first_col = regex matching the source ID in the first column
+
+# [[index_tables]]
+# file = "docs/features.md"
+# first_col = '^\\\\|\\\\s*(FEAT-\\\\d{2,4})\\\\s*\\\\|'
+
+# ── Coverage expectations ──
+# source/target = type IDs, label = display name
+
+# [[coverage]]
+# source = "FEAT"
+# target = "REQ"
+# label = "FEAT → REQ"
+
+# ── Review validation ──
+[review]
+# Required sections in artifacts of a given type
+# required_sections = { "FEAT" = ["Goal", "Scope"] }
+
+# Expected bidirectional links
+# expected_bidir = { "FEAT" = ["REQ"] }
+
+# Expected cross-layer links for review
+# [[review.expected_cross_layer.FEAT]]
+# type = "REQ"
+# label = "requirements"
+
+# ── Semantic clusters ──
+[clusters]
+# "Topic Name" = ["ID-01", "ID-02"]
+'''
+    config_path.write_text(template, encoding="utf-8")
+    print(f"Created template config: {config_path}")
+    print("Edit it to match your project's artifact naming conventions.")
 
 
 @cli.command()
@@ -721,15 +828,17 @@ def gaps(ctx, from_type, to_type):
 @click.pass_context
 def coverage(ctx):
     """Show cross-layer coverage matrix."""
+    from graph_ba.config import load_config
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    config = load_config(root)
+
     db = _conn(ctx)
-    # Expected cross-layer links
-    pairs = [
-        ("F", "M"), ("F", "BF"), ("F", "BR_REQ"),
-        ("BF", "BR_REQ"), ("BR_RULE", "BR_REQ"), ("BR_RULE", "BP"),
-        ("BP", "F"), ("BP", "VAD"), ("BP", "BD"),
-        ("ST", "BR_REQ"),
-    ]
-    print("Матрица покрытия межслойных связей:")
+    pairs = [(cp.source, cp.target) for cp in config.coverage_pairs]
+    if not pairs:
+        print("No coverage pairs defined in graph-ba.toml [coverage]")
+        db.close()
+        return
+    print("Cross-layer coverage matrix:")
     print()
     for src_type, tgt_type in pairs:
         total = db.execute(
@@ -779,6 +888,10 @@ def _load_nx(db: sqlite3.Connection):
 def render(ctx, output, no_file_nodes, no_transitive):
     """Render interactive HTML visualization from the DB."""
     from graph_ba import traceability as t
+    from graph_ba.config import load_config
+
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    config = load_config(root)
 
     db = _conn(ctx)
     G = _load_nx(db)
@@ -786,7 +899,7 @@ def render(ctx, output, no_file_nodes, no_transitive):
 
     H = t._filter_graph(G, no_file_nodes, no_transitive, verbose=True)
     out = output or (Path.cwd() / "reports" / "traceability.html")
-    t.export_html(H, out)
+    t.export_html(H, config, out)
 
 
 @cli.command()
@@ -947,20 +1060,39 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
             content = ""
 
         atype = row["type"]
-        if atype in _REQUIRED_SECTIONS:
-            for section in _REQUIRED_SECTIONS[atype]:
+        # Load config for review validation
+        from graph_ba.config import load_config
+        root = Path(ctx.obj.get("root", ".")).resolve()
+        try:
+            review_config = load_config(root)
+            req_sections = review_config.required_sections
+            bidir_expected = review_config.expected_bidir
+        except FileNotFoundError:
+            review_config = None
+            req_sections = {}
+            bidir_expected = {}
+
+        if atype in req_sections:
+            for section in req_sections[atype]:
                 if section.lower() not in content.lower():
-                    issues.append(("STRUCT", node_id, f"Отсутствует секция '{section}'"))
+                    issues.append(("STRUCT", node_id, f"Missing section '{section}'"))
 
         if nums and content:
             num_vals = _extract_numbers(content)
             _check_numeric_conflicts(db, node_id, fname, full_path, num_vals, issues)
 
-        _check_bidirectional(db, node_id, atype, issues)
+        _check_bidirectional(db, node_id, atype, issues, bidir_expected)
         _check_empty_links(db, node_id, issues)
 
     # Coverage: missing cross-layer links
-    _check_layer_gaps(db, node_id, row["type"], issues)
+    if 'review_config' not in dir():
+        from graph_ba.config import load_config
+        root = Path(ctx.obj.get("root", ".")).resolve()
+        try:
+            review_config = load_config(root)
+        except FileNotFoundError:
+            review_config = None
+    _check_layer_gaps(db, node_id, row["type"], issues, review_config)
 
     if issues:
         print(f"\n┌─ Проблемы ({len(issues)}) ─────────────────────────────────")
@@ -1067,14 +1199,12 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
     db.close()
 
 
-def _check_layer_gaps(db, aid, atype, issues):
+def _check_layer_gaps(db, aid, atype, issues, config=None):
     """Check if this artifact has expected cross-layer links."""
-    expected = {
-        "F": [("BF", "бизнес-функции"), ("BR_REQ", "бизнес-требования"), ("M", "модули")],
-        "BP": [("F", "фичи"), ("VAD", "цепочки ценности"), ("BD", "решения")],
-        "BR_RULE": [("BR_REQ", "бизнес-требования"), ("BP", "бизнес-процессы")],
-        "ST": [("BR_REQ", "бизнес-требования")],
-    }
+    if config and config.expected_cross_layer:
+        expected = config.expected_cross_layer
+    else:
+        expected = {}
     pairs = expected.get(atype, [])
     for target_type, label in pairs:
         linked = db.execute(
@@ -1233,11 +1363,7 @@ def _print_edge_context(db, arrow, ref_id, ref_type, ref_title,
 
 # ── Validation helpers (used by review) ─────────────────────────
 
-_REQUIRED_SECTIONS = {
-    "BR_RULE": ["Описание правила", "Входные параметры", "Выход"],
-    "BD": ["Контекст", "решение"],
-    "F": ["Goal", "Scope", "Traceability"],
-}
+_REQUIRED_SECTIONS: dict = {}  # populated from config at review time
 
 
 
@@ -1320,15 +1446,11 @@ def _context_keywords(line: str) -> frozenset:
     return frozenset(words)
 
 
-def _check_bidirectional(db, aid, atype, issues):
+def _check_bidirectional(db, aid, atype, issues, expected_bidir=None):
     """Check for one-way links that should be bidirectional."""
-    # Expected bidirectional pairs
-    expected_pairs = {
-        "BR_RULE": ["BP", "BR_REQ"],
-        "BP": ["BD", "VAD"],
-        "F": ["BF", "BR_REQ"],
-    }
-    expected = expected_pairs.get(atype, [])
+    if expected_bidir is None:
+        expected_bidir = {}
+    expected = expected_bidir.get(atype, [])
     if not expected:
         return
 
@@ -1372,6 +1494,122 @@ def _check_empty_links(db, aid, issues):
                                    f"→{e['target_id']} в {e['source_file']}:{e['line_number']}"
                                    " — голая ссылка без контекста"))
 
+
+
+# ── Anomaly detection ─────────────────────────────────────────────
+
+@cli.command()
+@click.option("--min-component", default=2, help="Min size of islands to report")
+@click.pass_context
+def anomalies(ctx, min_component):
+    """Detect graph anomalies: islands, cycles, weak nodes, broken chains."""
+    import networkx as nx
+
+    db = _conn(ctx)
+    G = _load_nx(db)
+    db.close()
+
+    issues = []
+
+    # 1. Disconnected components (islands)
+    U = G.to_undirected()
+    components = list(nx.connected_components(U))
+    if len(components) > 1:
+        # Sort by size, largest first
+        components.sort(key=len, reverse=True)
+        main_size = len(components[0])
+        islands = [c for c in components[1:] if len(c) >= min_component]
+        if islands:
+            issues.append(("ISLAND", f"{len(islands)} disconnected component(s) "
+                          f"(main: {main_size} nodes)"))
+            for i, comp in enumerate(islands[:10], 1):
+                nodes = sorted(comp)[:10]
+                suffix = f" ... +{len(comp)-10}" if len(comp) > 10 else ""
+                issues.append(("ISLAND", f"  Component {i} ({len(comp)} nodes): "
+                              f"{', '.join(nodes)}{suffix}"))
+
+    # 2. Strongly connected components (cycles)
+    sccs = [c for c in nx.strongly_connected_components(G) if len(c) > 1]
+    if sccs:
+        issues.append(("CYCLE", f"{len(sccs)} cycle(s) found"))
+        for scc in sccs[:5]:
+            nodes = sorted(scc)
+            issues.append(("CYCLE", f"  Cycle: {' → '.join(nodes[:8])}"
+                          f"{' → ...' if len(nodes) > 8 else ''}"))
+
+    # 3. Source nodes with no incoming edges (roots)
+    sources = [n for n in G.nodes() if G.in_degree(n) == 0
+               and not n.startswith("FILE:") and G.nodes[n].get("defined")]
+    # Filter to defined artifacts only
+    if sources:
+        by_type: dict = {}
+        for n in sources:
+            t = G.nodes[n].get("type", "?")
+            by_type.setdefault(t, []).append(n)
+        issues.append(("ROOT", f"{len(sources)} root node(s) (no incoming edges)"))
+        for t, ids in sorted(by_type.items()):
+            issues.append(("ROOT", f"  [{t}] ({len(ids)}): {', '.join(sorted(ids)[:10])}"))
+
+    # 4. Sink nodes with no outgoing edges (dead ends)
+    sinks = [n for n in G.nodes() if G.out_degree(n) == 0
+             and not n.startswith("FILE:") and G.nodes[n].get("defined")]
+    if sinks:
+        by_type = {}
+        for n in sinks:
+            t = G.nodes[n].get("type", "?")
+            by_type.setdefault(t, []).append(n)
+        issues.append(("SINK", f"{len(sinks)} sink node(s) (no outgoing edges)"))
+        for t, ids in sorted(by_type.items()):
+            issues.append(("SINK", f"  [{t}] ({len(ids)}): {', '.join(sorted(ids)[:10])}"))
+
+    # 5. Dangling references (referenced but not defined)
+    dangling = [n for n in G.nodes() if not G.nodes[n].get("defined", False)
+                and not n.startswith("FILE:")]
+    if dangling:
+        issues.append(("DANGLING", f"{len(dangling)} dangling reference(s) (not defined)"))
+        for n in sorted(dangling)[:15]:
+            # Who references it?
+            preds = sorted(G.predecessors(n))[:3]
+            issues.append(("DANGLING", f"  {n} ← referenced by: {', '.join(preds)}"))
+
+    # 6. Bridge edges (removing them would disconnect the graph)
+    try:
+        bridges = list(nx.bridges(U))
+        if bridges:
+            issues.append(("BRIDGE", f"{len(bridges)} bridge edge(s) (critical connections)"))
+            for u, v in bridges[:10]:
+                issues.append(("BRIDGE", f"  {u} — {v}"))
+    except nx.NetworkXError:
+        pass
+
+    # 7. High-degree nodes (potential bottlenecks)
+    threshold = max(10, G.number_of_edges() // G.number_of_nodes() * 3) if G.number_of_nodes() > 0 else 10
+    bottlenecks = [(n, G.in_degree(n) + G.out_degree(n)) for n in G.nodes()
+                   if G.in_degree(n) + G.out_degree(n) > threshold
+                   and not n.startswith("FILE:")]
+    bottlenecks.sort(key=lambda x: -x[1])
+    if bottlenecks:
+        issues.append(("BOTTLENECK", f"{len(bottlenecks)} high-degree node(s) (degree > {threshold})"))
+        for n, deg in bottlenecks[:10]:
+            t = G.nodes[n].get("type", "?")
+            issues.append(("BOTTLENECK", f"  [{t}] {n} degree={deg}"))
+
+    # Print results
+    if not issues:
+        print("No anomalies found.")
+        return
+
+    print(f"Graph anomalies ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges):")
+    print()
+    current_cat = None
+    for cat, msg in issues:
+        if cat != current_cat:
+            current_cat = cat
+            print(f"── {cat} ──")
+        print(f"  {msg}")
+    print()
+    total = sum(1 for cat, _ in issues if not _.startswith("  "))
+    print(f"Total: {total} anomaly types detected")
 
 
 if __name__ == "__main__":
