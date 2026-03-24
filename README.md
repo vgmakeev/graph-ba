@@ -1,16 +1,79 @@
 # Graph BA
 
-Config-driven traceability graph for business analysis artifacts. Scans markdown documents, builds a cross-reference graph in SQLite with FTS5 full-text search, and provides CLI commands for navigation, validation, and anomaly detection.
+Config-driven traceability graph for business analysis artifacts. Scans markdown documents, builds a cross-reference graph in SQLite, and provides CLI commands for navigation, validation, and anomaly detection.
 
-## Why
+## The problem
 
-BA projects accumulate hundreds of interconnected artifacts — requirements, business rules, processes, decisions, features, domain models. Keeping cross-references consistent and complete across 300+ documents is hard. Graph BA automates this:
+A typical BA project has hundreds of markdown documents: requirements, features, business rules, processes, domain models. They reference each other — `REQ-01` mentions `F-01`, `BP-03` references `BR.2`, and so on.
 
-- **Indexes** artifact definitions and cross-references from markdown files
-- **Builds** a directed graph with file:line attribution for every edge
-- **Validates** coverage, bidirectional links, dangling references, numeric conflicts
-- **Detects anomalies** — islands, cycles, bridges, bottleneck nodes, dead ends
-- **Searches** with FTS5 full-text search and semantic clustering
+Over time, these cross-references break silently:
+- Someone renames `REQ-05` to `REQ-5` and 12 links go dangling
+- A new feature `F-08` has no requirements linked — nobody notices for weeks
+- `BP-03` says "delivery within 30 min", but `BR.7` says "45 min" — the conflict hides across two files
+- Requirement `REQ-12` becomes a bottleneck with 40 inbound links — a change there cascades everywhere
+
+Manual cross-checking doesn't scale past ~50 documents. You need a graph.
+
+## What it does
+
+Graph BA scans your markdown files, extracts artifact definitions and cross-references using regex patterns from a TOML config, and builds a queryable graph in SQLite.
+
+```
+$ graph-ba import
+Imported: 214 artifacts, 847 edges, 12 semantic clusters
+
+$ graph-ba anomalies
+Graph anomalies (214 nodes, 847 edges):
+
+── CYCLE ──
+  2 cycle(s) found
+    Cycle: BP-01 → F-01 → REQ-01 → REQ-02
+    Cycle: BR.3 → F-05 → REQ-11
+── ROOT ──
+  3 root node(s) (no incoming edges)
+    [FEAT] (1): F-08
+    [REQ] (2): REQ-03, REQ-12
+── BRIDGE ──
+  2 bridge edge(s) (critical connections)
+    F-01 — REQ-02
+    BP-05 — BR.9
+
+$ graph-ba coverage
+Cross-layer coverage matrix:
+
+  FEAT     ↔ REQ         8/10   ████████████████░░░░   80.0%  [WARN]
+  REQ      ↔ BP         12/15   ████████████████░░░░   80.0%  [WARN]
+  REQ      ↔ BR         11/15   ██████████████░░░░░░   73.3%  [WARN]
+
+$ graph-ba impact REQ-01
+Каскадное влияние REQ-01: 8 артефактов
+  [BP] (2): BP-01, BP-03
+  [BR] (3): BR.1, BR.2, BR.5
+  [FEAT] (3): F-01, F-02, F-04
+```
+
+The main use case is **semantic review** — gathering the full text of all linked artifacts to check for completeness, contradictions, and missing links:
+
+```
+$ graph-ba review F-01 --semantic --lines 20
+══════════════════════════════════════════════════════════════════════
+  REVIEW: F-01 — Order Management
+  Тип: FEAT  |  Файл: features.md:3
+══════════════════════════════════════════════════════════════════════
+
+⚠ [STRUCT] Missing section: Scope
+⚠ [GAP] No links to type: BR (business rules)
+
+── СВЯЗАННЫЕ АРТЕФАКТЫ ──
+
+  → [REQ] REQ-01 — Must manage orders
+    ...first 20 lines of REQ-01 content...
+
+  ← [BR] BR.1 — Base Pricing
+    ...first 20 lines of BR.1 content...
+```
+
+This output is designed for both human reading and [Claude Code](https://claude.ai/claude-code) agent pipelines (`--json` flag returns structured JSON).
 
 ## Install
 
@@ -27,33 +90,24 @@ uv tool install git+https://github.com/vgmakeev/graph-ba
 uv add --dev git+https://github.com/vgmakeev/graph-ba
 ```
 
-## Core workflow
-
-The two key actions — the essence of the project:
-
-1. **`graph-ba import`** — reindex: scan markdown files, build traceability graph in SQLite
-2. **`graph-ba review <ID> --semantic`** — semantic review: gather full text of all linked artifacts, validate completeness, consistency, and traceability
-
-Everything else (search, anomalies, coverage, path, impact) — auxiliary navigation tools over the graph.
-
 ## Quick start
 
 ```bash
-# 1. Create a config file in your project root
+# 1. Create a config in your project root
 graph-ba init
 
-# 2. Edit graph-ba.toml — define your artifact types and scan rules
+# 2. Edit graph-ba.toml — define artifact types, scan rules, validation
 
-# 3. Import: scan documents and build the graph DB
+# 3. Scan documents and build the graph
 graph-ba import
 
 # 4. Semantic review of an artifact (the main use case)
-graph-ba review REQ-01 --semantic --lines 20
+graph-ba review F-01 --semantic --lines 20
 
 # 5. Explore
 graph-ba search "delivery"
-graph-ba node REQ-01
 graph-ba anomalies
+graph-ba impact REQ-01
 ```
 
 ## Commands
