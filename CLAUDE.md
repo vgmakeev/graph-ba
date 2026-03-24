@@ -51,6 +51,25 @@ uv run --with ~/dev/graph-ba graph-ba import
 - **`[clusters]`** — семантические кластеры (тема → список ID)
 - **`[normalize]`** — правила нормализации ID (замена символов, zero-padding)
 
+## JSON-вывод
+
+Глобальный флаг `--json` переключает вывод всех команд в JSON:
+
+```bash
+graph-ba --json search "тема"
+graph-ba --json node F-01
+graph-ba --json anomalies
+graph-ba --json coverage
+```
+
+## Скиллы для Claude Code
+
+Скиллы лежат в `.claude/skills/` и автоактивируются Claude агентом:
+
+- **`/reindex`** — переиндексация + аномалии
+- **`/review <ID>`** — семантический ревью артефакта
+- **`/find-anomalies`** — полный анализ аномалий графа
+
 ## Архитектура
 
 ```
@@ -58,11 +77,26 @@ graph_ba/
 ├── config.py         — загрузка и валидация graph-ba.toml
 ├── traceability.py   — сканер артефактов, построение графа, экспорт
 └── graph_db.py       — SQLite + FTS5 БД, CLI (click), anomaly detection
+tests/
+├── conftest.py       — синтетический BA-проект (фикстуры)
+├── test_config.py    — config loading, normalization, classification
+├── test_scanning.py  — definition/reference scanning
+├── test_graph.py     — graph construction, verification
+├── test_db.py        — SQLite import, FTS, helpers
+└── test_cli.py       — CLI commands + JSON output
 ```
 
 - `traceability.py` — ядро: скан определений, ссылок, построение NetworkX-графа, верификация, экспорт (JSON, DOT, HTML, ARTIFACT_INDEX.md)
 - `graph_db.py` — импорт графа в SQLite, FTS5-поиск, CLI команды для навигации и анализа
 - `config.py` — загрузка TOML конфига, нормализация ID, классификация
+
+## Тесты
+
+```bash
+uv run pytest tests/ -v
+```
+
+Синтетический BA-проект в фикстурах: 5 типов артефактов, 11 определений, перекрёстные ссылки, dangling refs, coverage gaps. 111 тестов покрывают все слои: config → scanning → graph → DB → CLI.
 
 ## Язык
 

@@ -11,22 +11,16 @@ user_invocable: true
 ### 1. Запусти детекцию аномалий
 
 ```bash
-uv run --with ~/dev/graph-ba graph-ba anomalies
+uv run --with ~/dev/graph-ba graph-ba --json anomalies
 ```
 
 ### 2. Запусти матрицу покрытия
 
 ```bash
-uv run --with ~/dev/graph-ba graph-ba coverage
+uv run --with ~/dev/graph-ba graph-ba --json coverage
 ```
 
-### 3. Найди сирот и слабые узлы
-
-```bash
-uv run --with ~/dev/graph-ba graph-ba orphans --max-degree 1
-```
-
-### 4. Проанализируй каждый тип аномалии
+### 3. Проанализируй каждый тип аномалии
 
 Для каждой найденной аномалии:
 
@@ -49,10 +43,10 @@ uv run --with ~/dev/graph-ba graph-ba orphans --max-degree 1
 - Не перегружен ли артефакт ответственностью?
 
 **Sink-узлы** — артефакты без исходящих связей (тупики).
-- Ожидаемо для листовых типов (BR.X, DM, EN, M)?
-- Неожиданно для BP, F, BR-XX — могут указывать на недоработку.
+- Ожидаемо для листовых типов?
+- Неожиданно для BP, F — могут указывать на недоработку.
 
-### 5. Выведи отчёт
+### 4. Выведи отчёт
 
 ```
 ## Анализ аномалий графа

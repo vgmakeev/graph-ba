@@ -1,6 +1,6 @@
 ---
 name: reindex
-description: Переиндексировать граф трассируемости артефактов проекта. Сканирует markdown-файлы, находит определения и перекрёстные ссылки, строит SQLite БД.
+description: "Переиндексировать граф трассируемости артефактов проекта. Сканирует markdown-файлы, находит определения и перекрёстные ссылки, строит SQLite БД."
 user_invocable: true
 ---
 
@@ -21,7 +21,7 @@ uv run --with ~/dev/graph-ba graph-ba import
 
 3. После успешного импорта, запусти проверку аномалий:
 ```bash
-uv run --with ~/dev/graph-ba graph-ba anomalies
+uv run --with ~/dev/graph-ba graph-ba --json anomalies
 ```
 
 4. Покажи пользователю краткую сводку:

@@ -12,6 +12,9 @@ dependencies = [
 graph-ba = "graph_ba.graph_db:cli"
 trace-ba = "graph_ba.traceability:main"
 
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

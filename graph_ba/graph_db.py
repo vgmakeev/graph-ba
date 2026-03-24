@@ -24,6 +24,14 @@ import click
 
 DB_PATH = Path.cwd() / "reports" / "graph.db"
 
+
+def _json_out(ctx, data):
+    """Print data as JSON if --json flag is set, return True if printed."""
+    if ctx.obj.get("json"):
+        print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        return True
+    return False
+
 # ── Schema ────────────────────────────────────────────────────────
 
 SCHEMA = """
@@ -242,12 +250,14 @@ def fmt_table(rows: list, headers: list) -> str:
               help=f"Path to SQLite DB (default: reports/graph.db)")
 @click.option("--root", type=click.Path(exists=True, path_type=Path),
               default=".", help="Project root directory")
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 @click.pass_context
-def cli(ctx, db, root):
+def cli(ctx, db, root, json_output):
     """Graph BA — query the artifact traceability graph."""
     ctx.ensure_object(dict)
     ctx.obj["db_path"] = db
     ctx.obj["root"] = str(Path(root).resolve())
+    ctx.obj["json"] = json_output
 
 
 def _conn(ctx) -> sqlite3.Connection:
@@ -382,6 +392,29 @@ def search(ctx, query, limit):
         "WHERE artifacts_fts MATCH ? ORDER BY rank LIMIT ?",
         (fq, limit)
     ).fetchall()
+
+    # Search clusters
+    cl_rows = db.execute(
+        "SELECT DISTINCT cluster_name FROM clusters_fts "
+        "WHERE clusters_fts MATCH ? LIMIT ?",
+        (fq, limit)
+    ).fetchall()
+
+    # Search edge contexts
+    e_rows = db.execute(
+        "SELECT source_id, target_id, context FROM edges_fts "
+        "WHERE edges_fts MATCH ? LIMIT ?",
+        (fq, limit)
+    ).fetchall()
+    db.close()
+
+    if _json_out(ctx, {
+        "artifacts": [dict(r) for r in rows],
+        "clusters": [dict(r) for r in cl_rows],
+        "edges": [dict(r) for r in e_rows],
+    }):
+        return
+
     if rows:
         print(f"── Артефакты ({len(rows)}) ──")
         print(fmt_table(
@@ -391,30 +424,17 @@ def search(ctx, query, limit):
     else:
         print("Артефакты: не найдено")
 
-    # Search clusters
-    cl_rows = db.execute(
-        "SELECT DISTINCT cluster_name FROM clusters_fts "
-        "WHERE clusters_fts MATCH ? LIMIT ?",
-        (fq, limit)
-    ).fetchall()
     if cl_rows:
         print(f"\n── Кластеры ({len(cl_rows)}) ──")
         for r in cl_rows:
             print(f"  • {r['cluster_name']}")
 
-    # Search edge contexts
-    e_rows = db.execute(
-        "SELECT source_id, target_id, context FROM edges_fts "
-        "WHERE edges_fts MATCH ? LIMIT ?",
-        (fq, limit)
-    ).fetchall()
     if e_rows:
         print(f"\n── Связи ({len(e_rows)}) ──")
         print(fmt_table(
             [(r["source_id"], r["target_id"], r["context"][:60]) for r in e_rows],
             ["Из", "В", "Контекст"]
         ))
-    db.close()
 
 
 @cli.command()
@@ -439,19 +459,11 @@ def node(ctx, node_id):
         db.close()
         return
 
-    print(f"ID:     {row['id']}")
-    print(f"Тип:    {row['type']}")
-    print(f"Файл:   {row['source_file']}:{row['line_number']}")
-    print(f"Defined: {'да' if row['defined'] else 'НЕТ (dangling)'}")
-    print(f"Название: {row['title']}")
-
     # Clusters
     clusters = db.execute(
         "SELECT cluster_name FROM semantic_clusters WHERE artifact_id = ?",
         (node_id,)
     ).fetchall()
-    if clusters:
-        print(f"Кластеры: {', '.join(r['cluster_name'] for r in clusters)}")
 
     # Out-edges
     out = db.execute(
@@ -460,6 +472,35 @@ def node(ctx, node_id):
         "WHERE e.source_id = ? ORDER BY a.type, e.target_id",
         (node_id,)
     ).fetchall()
+
+    # In-edges
+    inc = db.execute(
+        "SELECT e.source_id, a.type, a.title, e.source_file, e.line_number, e.context "
+        "FROM edges e LEFT JOIN artifacts a ON e.source_id = a.id "
+        "WHERE e.target_id = ? ORDER BY a.type, e.source_id",
+        (node_id,)
+    ).fetchall()
+
+    if _json_out(ctx, {
+        "id": row["id"], "type": row["type"], "title": row["title"],
+        "source_file": row["source_file"], "line_number": row["line_number"],
+        "defined": bool(row["defined"]),
+        "clusters": [r["cluster_name"] for r in clusters],
+        "outgoing": [dict(r) for r in out],
+        "incoming": [dict(r) for r in inc],
+    }):
+        db.close()
+        return
+
+    print(f"ID:     {row['id']}")
+    print(f"Тип:    {row['type']}")
+    print(f"Файл:   {row['source_file']}:{row['line_number']}")
+    print(f"Defined: {'да' if row['defined'] else 'НЕТ (dangling)'}")
+    print(f"Название: {row['title']}")
+
+    if clusters:
+        print(f"Кластеры: {', '.join(r['cluster_name'] for r in clusters)}")
+
     print(f"\n→ Исходящие ({len(out)}):")
     if out:
         print(fmt_table(
@@ -469,13 +510,6 @@ def node(ctx, node_id):
             ["ID", "Тип", "Где ссылка", "Название"]
         ))
 
-    # In-edges
-    inc = db.execute(
-        "SELECT e.source_id, a.type, a.title, e.source_file, e.line_number, e.context "
-        "FROM edges e LEFT JOIN artifacts a ON e.source_id = a.id "
-        "WHERE e.target_id = ? ORDER BY a.type, e.source_id",
-        (node_id,)
-    ).fetchall()
     print(f"\n← Входящие ({len(inc)}):")
     if inc:
         print(fmt_table(
@@ -615,8 +649,7 @@ def coverage(ctx):
         print("No coverage pairs defined in graph-ba.toml [coverage]")
         db.close()
         return
-    print("Cross-layer coverage matrix:")
-    print()
+    results = []
     for src_type, tgt_type in pairs:
         total = db.execute(
             "SELECT count(*) as c FROM artifacts WHERE type = ? AND defined = 1",
@@ -634,12 +667,22 @@ def coverage(ctx):
                   WHERE e.target_id = a.id AND a2.type = ?
               ))
         """, (src_type, tgt_type, tgt_type)).fetchone()["c"]
-
         pct = (linked / total * 100) if total else 0
-        bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
         status = "OK" if pct >= 90 else "WARN" if pct >= 50 else "GAP"
-        print(f"  {src_type:8s} ↔ {tgt_type:8s}  {linked:3d}/{total:<3d}  {bar}  {pct:5.1f}%  [{status}]")
+        results.append({"source": src_type, "target": tgt_type,
+                        "linked": linked, "total": total,
+                        "pct": round(pct, 1), "status": status})
     db.close()
+
+    if _json_out(ctx, {"pairs": results}):
+        return
+
+    print("Cross-layer coverage matrix:")
+    print()
+    for r in results:
+        bar = "█" * int(r["pct"] / 5) + "░" * (20 - int(r["pct"] / 5))
+        print(f"  {r['source']:8s} ↔ {r['target']:8s}  {r['linked']:3d}/{r['total']:<3d}  "
+              f"{bar}  {r['pct']:5.1f}%  [{r['status']}]")
 
 
 # ── NetworkX loader (for path/impact commands) ────────────────────
@@ -1273,7 +1316,13 @@ def anomalies(ctx, min_component):
             t = G.nodes[n].get("type", "?")
             issues.append(("BOTTLENECK", f"  [{t}] {n} degree={deg}"))
 
-    # Print results
+    # Output
+    if _json_out(ctx, {
+        "nodes": G.number_of_nodes(), "edges": G.number_of_edges(),
+        "issues": [{"type": cat, "message": msg} for cat, msg in issues],
+    }):
+        return
+
     if not issues:
         print("No anomalies found.")
         return
