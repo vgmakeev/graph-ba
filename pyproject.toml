@@ -1,0 +1,17 @@
+[project]
+name = "graph-ba"
+version = "0.1.0"
+description = "Graph-based traceability index for BA artifacts — SQLite + FTS5 + NetworkX"
+requires-python = ">=3.9"
+dependencies = [
+    "networkx>=3.0",
+    "click>=8.0",
+]
+
+[project.scripts]
+graph-ba = "graph_ba.graph_db:cli"
+trace-ba = "graph_ba.traceability:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
