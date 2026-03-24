@@ -208,6 +208,122 @@ class TestReviewCmd:
         assert "STRUCT" in result.output or "Scope" in result.output
 
 
+class TestAuditCmd:
+    def test_runs(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "audit"
+        ])
+        assert result.exit_code == 0
+        assert "Global Audit" in result.output
+
+    def test_finds_issues(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "audit"
+        ])
+        assert result.exit_code == 0
+        assert "Issues" in result.output
+
+    def test_finds_coverage_gap(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "audit"
+        ])
+        assert result.exit_code == 0
+        assert "COVERAGE_GAP" in result.output
+        assert "F-02" in result.output
+
+    def test_finds_dangling(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "audit"
+        ])
+        assert result.exit_code == 0
+        assert "DANGLING" in result.output
+        assert "REQ-99" in result.output
+
+    def test_finds_missing_cross_layer(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "audit"
+        ])
+        assert result.exit_code == 0
+        # F-02 has no REQ links (expected_cross_layer: FEAT needs REQ)
+        assert "MISSING_CROSS_LAYER" in result.output
+
+    def test_candidates_prioritized(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "audit"
+        ])
+        assert result.exit_code == 0
+        assert "Review Candidates" in result.output
+        # HIGH priority should appear before non-HIGH
+        lines = result.output.split("\n")
+        high_lines = [l for l in lines if "HIGH" in l]
+        assert len(high_lines) >= 1
+
+    def test_json_structure(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "--json", "audit"
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "summary" in data
+        assert "issues" in data
+        assert "candidates" in data
+        assert data["summary"]["artifacts"] >= 11
+        assert data["summary"]["issues"] >= 1
+        assert data["summary"]["candidates"] >= 1
+
+    def test_json_candidates_have_reasons(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "--json", "audit"
+        ])
+        data = json.loads(result.output)
+        for c in data["candidates"]:
+            assert "id" in c
+            assert "type" in c
+            assert "reasons" in c
+            assert "priority" in c
+            assert len(c["reasons"]) >= 1
+
+    def test_json_dangling_in_issues(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "--json", "audit"
+        ])
+        data = json.loads(result.output)
+        dangling = [i for i in data["issues"] if i["type"] == "DANGLING"]
+        assert any(i["id"] == "REQ-99" for i in dangling)
+
+    def test_json_coverage_gap_with_missing(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "--json", "audit"
+        ])
+        data = json.loads(result.output)
+        gaps = [i for i in data["issues"] if i["type"] == "COVERAGE_GAP"]
+        assert len(gaps) >= 1
+        for g in gaps:
+            assert "source" in g
+            assert "target" in g
+            assert "missing" in g
+            assert isinstance(g["missing"], list)
+
+    def test_top_option(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path),
+            "--json", "audit", "--top", "2"
+        ])
+        data = json.loads(result.output)
+        assert len(data["candidates"]) <= 2
+
+
 class TestJsonOutput:
     """Test --json flag across commands."""
 

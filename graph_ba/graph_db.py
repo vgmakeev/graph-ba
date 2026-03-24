@@ -1340,5 +1340,228 @@ def anomalies(ctx, min_component):
     print(f"Total: {total} anomaly types detected")
 
 
+# ── Global audit ──────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--top", default=30, help="Max review candidates to return")
+@click.pass_context
+def audit(ctx, top):
+    """Global audit: anomalies + coverage gaps + prioritized review list."""
+    import networkx as nx
+    from graph_ba.config import load_config
+
+    db = _conn(ctx)
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    G = _load_nx(db)
+
+    issues = []
+    candidates = {}  # id -> {"reasons": set, "priority": str}
+
+    def flag(aid, reason, priority="medium"):
+        if aid.startswith("FILE:"):
+            return
+        if aid not in candidates:
+            candidates[aid] = {"reasons": set(), "priority": "medium"}
+        candidates[aid]["reasons"].add(reason)
+        if priority == "high":
+            candidates[aid]["priority"] = "high"
+
+    # ── Structural anomalies ──
+
+    # Cycles
+    try:
+        for c in nx.simple_cycles(G, length_bound=10):
+            issues.append({"type": "CYCLE", "ids": list(c)})
+            for n in c:
+                flag(n, "CYCLE", "high")
+    except Exception:
+        pass
+
+    # Dangling (undefined nodes)
+    for n in G.nodes():
+        if not G.nodes[n].get("defined", False) and not n.startswith("FILE:"):
+            srcs = sorted(p for p in G.predecessors(n))
+            issues.append({"type": "DANGLING", "id": n, "referenced_by": srcs})
+            flag(n, "DANGLING", "high")
+            for s in srcs:
+                flag(s, "REFS_DANGLING")
+
+    # Bridges
+    UG = G.to_undirected()
+    try:
+        for u, v in nx.bridges(UG):
+            if u.startswith("FILE:") or v.startswith("FILE:"):
+                continue
+            issues.append({"type": "BRIDGE", "ids": [u, v]})
+            flag(u, "BRIDGE")
+            flag(v, "BRIDGE")
+    except Exception:
+        pass
+
+    # Bottleneck
+    threshold = max(10, G.number_of_nodes() // 10)
+    for n in G.nodes():
+        if n.startswith("FILE:"):
+            continue
+        deg = G.in_degree(n) + G.out_degree(n)
+        if deg > threshold:
+            issues.append({"type": "BOTTLENECK", "id": n, "degree": deg})
+            flag(n, "BOTTLENECK", "high")
+
+    # Roots / sinks
+    for n in G.nodes():
+        if n.startswith("FILE:"):
+            continue
+        if G.in_degree(n) == 0:
+            flag(n, "ROOT")
+        if G.out_degree(n) == 0:
+            flag(n, "SINK")
+
+    # ── Coverage gaps ──
+
+    try:
+        cfg = load_config(root)
+    except Exception:
+        cfg = None
+
+    if cfg:
+        for cp in cfg.coverage_pairs:
+            total = db.execute(
+                "SELECT count(*) as c FROM artifacts WHERE type = ? AND defined = 1",
+                (cp.source,)).fetchone()["c"]
+            if total == 0:
+                continue
+            missing = [r["id"] for r in db.execute("""
+                SELECT a.id FROM artifacts a
+                WHERE a.type = ? AND a.defined = 1
+                AND NOT EXISTS (
+                    SELECT 1 FROM edges e JOIN artifacts a2 ON e.target_id = a2.id
+                    WHERE e.source_id = a.id AND a2.type = ?
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM edges e JOIN artifacts a2 ON e.source_id = a2.id
+                    WHERE e.target_id = a.id AND a2.type = ?
+                )
+            """, (cp.source, cp.target, cp.target)).fetchall()]
+            if missing:
+                linked = total - len(missing)
+                pct = round(linked / total * 100, 1) if total else 0
+                issues.append({"type": "COVERAGE_GAP", "source": cp.source,
+                               "target": cp.target, "pct": pct, "missing": missing})
+                prio = "high" if pct < 50 else "medium"
+                for aid in missing:
+                    flag(aid, "COVERAGE_GAP", prio)
+
+        # Missing cross-layer links
+        for src_type, expected in cfg.expected_cross_layer.items():
+            for tgt_type, label in expected:
+                for r in db.execute(
+                    "SELECT id FROM artifacts WHERE type = ? AND defined = 1",
+                    (src_type,)).fetchall():
+                    has_link = db.execute("""
+                        SELECT 1 FROM edges e JOIN artifacts a ON e.target_id = a.id
+                        WHERE e.source_id = ? AND a.type = ?
+                        UNION
+                        SELECT 1 FROM edges e JOIN artifacts a ON e.source_id = a.id
+                        WHERE e.target_id = ? AND a.type = ?
+                    """, (r["id"], tgt_type, r["id"], tgt_type)).fetchone()
+                    if not has_link:
+                        issues.append({"type": "MISSING_CROSS_LAYER", "id": r["id"],
+                                       "expected": tgt_type, "label": label})
+                        flag(r["id"], "MISSING_CROSS_LAYER")
+
+        # Missing bidir links
+        for src_type, tgt_types in cfg.expected_bidir.items():
+            for tgt_type in tgt_types:
+                rows = db.execute("""
+                    SELECT DISTINCT e.source_id, e.target_id
+                    FROM edges e
+                    JOIN artifacts a1 ON e.source_id = a1.id
+                    JOIN artifacts a2 ON e.target_id = a2.id
+                    WHERE a1.type = ? AND a2.type = ?
+                    AND NOT EXISTS (
+                        SELECT 1 FROM edges e2
+                        WHERE e2.source_id = e.target_id AND e2.target_id = e.source_id
+                    )
+                """, (src_type, tgt_type)).fetchall()
+                for r in rows:
+                    issues.append({"type": "MISSING_BIDIR", "id": r["source_id"],
+                                   "target": r["target_id"]})
+                    flag(r["source_id"], "MISSING_BIDIR")
+
+    db.close()
+
+    # ── Build sorted candidate list ──
+
+    sorted_list = []
+    for aid, info in candidates.items():
+        t = G.nodes[aid].get("type", "?") if aid in G else "?"
+        sorted_list.append({
+            "id": aid, "type": t,
+            "reasons": sorted(info["reasons"]),
+            "priority": info["priority"],
+        })
+    sorted_list.sort(key=lambda x: (0 if x["priority"] == "high" else 1,
+                                    -len(x["reasons"]), x["id"]))
+    sorted_list = sorted_list[:top]
+
+    result = {
+        "summary": {
+            "artifacts": G.number_of_nodes(),
+            "edges": G.number_of_edges(),
+            "issues": len(issues),
+            "candidates": len(sorted_list),
+        },
+        "issues": issues,
+        "candidates": sorted_list,
+    }
+
+    if _json_out(ctx, result):
+        return
+
+    # ── Human-readable output ──
+
+    print(f"Global Audit ({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)")
+    print()
+
+    if not issues:
+        print("No issues found.")
+        return
+
+    # Group issues by type
+    by_type = {}
+    for iss in issues:
+        by_type.setdefault(iss["type"], []).append(iss)
+    print(f"── Issues ({len(issues)}) ──")
+    for cat in ["CYCLE", "DANGLING", "COVERAGE_GAP", "MISSING_CROSS_LAYER",
+                "MISSING_BIDIR", "BRIDGE", "BOTTLENECK"]:
+        items = by_type.get(cat, [])
+        if not items:
+            continue
+        print(f"\n  {cat} ({len(items)}):")
+        for iss in items[:10]:
+            if cat == "CYCLE":
+                print(f"    {' → '.join(iss['ids'])}")
+            elif cat == "DANGLING":
+                print(f"    {iss['id']} ← {', '.join(iss['referenced_by'][:5])}")
+            elif cat == "COVERAGE_GAP":
+                print(f"    {iss['source']}→{iss['target']}: {iss['pct']}% "
+                      f"(missing: {', '.join(iss['missing'][:10])})")
+            elif cat == "MISSING_CROSS_LAYER":
+                print(f"    {iss['id']} → needs {iss['expected']} ({iss['label']})")
+            elif cat == "MISSING_BIDIR":
+                print(f"    {iss['id']} → {iss['target']} (one-way)")
+            elif cat == "BRIDGE":
+                print(f"    {iss['ids'][0]} — {iss['ids'][1]}")
+            elif cat == "BOTTLENECK":
+                print(f"    {iss['id']} degree={iss['degree']}")
+
+    print()
+    print(f"── Review Candidates ({len(sorted_list)}) ──")
+    for c in sorted_list:
+        prio = "HIGH" if c["priority"] == "high" else "    "
+        reasons = ", ".join(c["reasons"])
+        print(f"  {prio}  {c['id']:12s} [{c['type']:4s}]  {reasons}")
+
+
 if __name__ == "__main__":
     cli()

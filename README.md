@@ -125,6 +125,7 @@ graph-ba impact REQ-01
 | `review <id> --semantic --lines 0` | Full text with no line limit per artifact |
 | `anomalies` | Detect islands, cycles, bridges, bottlenecks, dangling refs |
 | `coverage` | Cross-layer coverage matrix |
+| `audit` | Global audit: anomalies + coverage + prioritized review candidates |
 | `sql <query>` | Raw SQL against the DB |
 
 Global options: `--root <path>` (project root, default `.`), `--db <path>` (SQLite DB path), `--json` (output as JSON for programmatic use).
@@ -279,7 +280,7 @@ tests/
 uv run pytest tests/ -v
 ```
 
-111 tests cover every layer: config → scanning → graph → DB → CLI. A synthetic BA project (5 artifact types, 11 definitions, cross-references, dangling refs, coverage gaps) is built in session-scoped fixtures.
+122 tests cover every layer: config → scanning → graph → DB → CLI → audit. A synthetic BA project (5 artifact types, 11 definitions, cross-references, dangling refs, coverage gaps) is built in session-scoped fixtures.
 
 ## Claude Code integration
 
@@ -290,10 +291,12 @@ The `.claude/skills/` directory contains skills for [Claude Code](https://claude
 | **`/review <ID>`** | Semantic review — gather full text of linked artifacts, validate completeness and consistency |
 | **`/reindex`** | Re-scan artifacts and rebuild the graph DB |
 | **`/find-anomalies`** | Detect and explain graph anomalies (islands, cycles, dangling refs) |
+| **`/audit`** | Global audit — funnel: structural analysis → coverage gaps → semantic review of flagged artifacts via subagents |
 
 The primary workflow with Claude Code:
 1. `/reindex` — build/update the graph
 2. `/review FEAT-01` — deep semantic review of any artifact
+3. `/audit` — full graph audit with prioritized review
 
 All commands support `--json` output, making them suitable for agent pipelines.
 

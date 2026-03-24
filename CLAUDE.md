@@ -36,6 +36,7 @@ uv run --with ~/dev/graph-ba graph-ba import
 | Матрица покрытия | `graph-ba coverage` |
 | Кратчайший путь | `graph-ba path F-04 M09` |
 | Impact analysis | `graph-ba impact BR.2` |
+| **Глобальный аудит** | **`graph-ba audit`** |
 | SQL | `graph-ba sql "SELECT ..."` |
 
 ## Конфигурация (graph-ba.toml)
@@ -69,6 +70,7 @@ graph-ba --json coverage
 - **`/reindex`** — переиндексация + аномалии
 - **`/review <ID>`** — семантический ревью артефакта
 - **`/find-anomalies`** — полный анализ аномалий графа
+- **`/audit`** — глобальный аудит: воронка аномалии → покрытие → семантический ревью подозрительных
 
 ## Архитектура
 
@@ -96,7 +98,7 @@ tests/
 uv run pytest tests/ -v
 ```
 
-Синтетический BA-проект в фикстурах: 5 типов артефактов, 11 определений, перекрёстные ссылки, dangling refs, coverage gaps. 111 тестов покрывают все слои: config → scanning → graph → DB → CLI.
+Синтетический BA-проект в фикстурах: 5 типов артефактов, 11 определений, перекрёстные ссылки, dangling refs, coverage gaps. 122 теста покрывают все слои: config → scanning → graph → DB → CLI → audit.
 
 ## Язык
 
