@@ -8,13 +8,8 @@ Usage:
     graph-ba import              # scan & populate DB
     graph-ba search "кухня"      # FTS5 search
     graph-ba node BP-03           # node details + neighbors
-    graph-ba neighbors BP-03      # in/out edges
     graph-ba path F-04 M09        # shortest path
     graph-ba impact BR.19         # cascade analysis
-    graph-ba hubs                 # most connected nodes
-    graph-ba orphans              # weakly connected nodes
-    graph-ba stats                # summary
-    graph-ba cluster "кухня"      # semantic cluster lookup
     graph-ba sql "SELECT ..."     # raw SQL
 """
 from __future__ import annotations
@@ -492,43 +487,6 @@ def node(ctx, node_id):
     db.close()
 
 
-@cli.command()
-@click.argument("node_id")
-@click.option("--type", "filter_type", default=None, help="Filter by artifact type")
-@click.option("--direction", type=click.Choice(["in", "out", "both"]), default="both")
-@click.pass_context
-def neighbors(ctx, node_id, filter_type, direction):
-    """List neighbors of a node, optionally filtered by type and direction."""
-    db = _conn(ctx)
-    results = []
-    if direction in ("out", "both"):
-        q = ("SELECT 'out' as dir, e.target_id as neighbor, a.type, a.title "
-             "FROM edges e LEFT JOIN artifacts a ON e.target_id = a.id "
-             "WHERE e.source_id = ?")
-        params: list = [node_id]
-        if filter_type:
-            q += " AND a.type = ?"
-            params.append(filter_type)
-        results.extend(db.execute(q, params).fetchall())
-
-    if direction in ("in", "both"):
-        q = ("SELECT 'in' as dir, e.source_id as neighbor, a.type, a.title "
-             "FROM edges e LEFT JOIN artifacts a ON e.source_id = a.id "
-             "WHERE e.target_id = ?")
-        params = [node_id]
-        if filter_type:
-            q += " AND a.type = ?"
-            params.append(filter_type)
-        results.extend(db.execute(q, params).fetchall())
-
-    print(f"Соседи {node_id} ({len(results)}):")
-    if results:
-        print(fmt_table(
-            [(r["dir"], r["neighbor"], r["type"] or "?", r["title"][:50] if r["title"] else "") for r in results],
-            ["Напр", "ID", "Тип", "Название"]
-        ))
-    db.close()
-
 
 @cli.command()
 @click.argument("from_id")
@@ -616,156 +574,8 @@ def impact(ctx, node_id, depth):
                 print(f"         ... и ещё {len(ids)-15}")
 
 
-@cli.command()
-@click.option("-n", "--limit", default=20, help="Max results")
-@click.option("--type", "filter_type", default=None, help="Filter by type")
-@click.pass_context
-def hubs(ctx, limit, filter_type):
-    """Show most connected nodes (hubs)."""
-    db = _conn(ctx)
-    q = """
-        SELECT a.id, a.type, a.title,
-            (SELECT count(*) FROM edges WHERE source_id = a.id) as out_deg,
-            (SELECT count(*) FROM edges WHERE target_id = a.id) as in_deg,
-            (SELECT count(*) FROM edges WHERE source_id = a.id)
-            + (SELECT count(*) FROM edges WHERE target_id = a.id) as total_deg
-        FROM artifacts a
-    """
-    params: list = []
-    if filter_type:
-        q += " WHERE a.type = ?"
-        params.append(filter_type)
-    q += " ORDER BY total_deg DESC LIMIT ?"
-    params.append(limit)
-
-    rows = db.execute(q, params).fetchall()
-    print(f"Хабы (top-{limit}):")
-    print(fmt_table(
-        [(r["id"], r["type"], r["in_deg"], r["out_deg"], r["total_deg"],
-          r["title"][:40]) for r in rows],
-        ["ID", "Тип", "In", "Out", "Total", "Название"]
-    ))
-    db.close()
 
 
-@cli.command()
-@click.option("--max-degree", default=1, help="Max total degree to consider orphan")
-@click.option("--type", "filter_type", default=None, help="Filter by type")
-@click.pass_context
-def orphans(ctx, max_degree, filter_type):
-    """Show poorly connected (orphan) artifacts."""
-    db = _conn(ctx)
-    q = """
-        SELECT a.id, a.type, a.title,
-            (SELECT count(*) FROM edges WHERE source_id = a.id)
-            + (SELECT count(*) FROM edges WHERE target_id = a.id) as total_deg
-        FROM artifacts a
-        WHERE (SELECT count(*) FROM edges WHERE source_id = a.id)
-            + (SELECT count(*) FROM edges WHERE target_id = a.id) <= ?
-    """
-    params: list = [max_degree]
-    if filter_type:
-        q += " AND a.type = ?"
-        params.append(filter_type)
-    q += " ORDER BY a.type, a.id"
-
-    rows = db.execute(q, params).fetchall()
-    if not rows:
-        print(f"Нет артефактов с degree ≤ {max_degree}")
-        db.close()
-        return
-
-    # Group by type
-    current_type = None
-    for r in rows:
-        if r["type"] != current_type:
-            current_type = r["type"]
-            count = sum(1 for x in rows if x["type"] == current_type)
-            print(f"\n[{current_type}] ({count}):")
-        print(f"  {r['id']:12s} deg={r['total_deg']}  {r['title'][:55]}")
-    print(f"\nИтого: {len(rows)} артефактов с degree ≤ {max_degree}")
-    db.close()
-
-
-@cli.command()
-@click.pass_context
-def stats(ctx):
-    """Show summary statistics."""
-    db = _conn(ctx)
-    n_arts = db.execute("SELECT count(*) as c FROM artifacts").fetchone()["c"]
-    n_edges = db.execute("SELECT count(*) as c FROM edges").fetchone()["c"]
-    n_defined = db.execute("SELECT count(*) as c FROM artifacts WHERE defined = 1").fetchone()["c"]
-    n_dangling = n_arts - n_defined
-
-    print(f"Артефактов: {n_arts} ({n_defined} defined, {n_dangling} dangling)")
-    print(f"Связей:     {n_edges}")
-
-    # By type
-    rows = db.execute("""
-        SELECT type, count(*) as cnt,
-            sum(CASE WHEN defined = 1 THEN 1 ELSE 0 END) as def_cnt
-        FROM artifacts GROUP BY type ORDER BY cnt DESC
-    """).fetchall()
-    print("\nПо типам:")
-    print(fmt_table(
-        [(r["type"], r["cnt"], r["def_cnt"]) for r in rows],
-        ["Тип", "Всего", "Defined"]
-    ))
-
-    # Edge density by type pair
-    print("\nТоп связей (тип → тип):")
-    rows = db.execute("""
-        SELECT a1.type as src_type, a2.type as tgt_type, count(*) as cnt
-        FROM edges e
-        JOIN artifacts a1 ON e.source_id = a1.id
-        JOIN artifacts a2 ON e.target_id = a2.id
-        GROUP BY a1.type, a2.type
-        ORDER BY cnt DESC LIMIT 15
-    """).fetchall()
-    print(fmt_table(
-        [(r["src_type"], r["tgt_type"], r["cnt"]) for r in rows],
-        ["Из типа", "В тип", "Кол-во"]
-    ))
-
-    # Clusters
-    n_cl = db.execute("SELECT count(DISTINCT cluster_name) as c FROM semantic_clusters").fetchone()["c"]
-    print(f"\nСемантических кластеров: {n_cl}")
-    db.close()
-
-
-@cli.command()
-@click.argument("term")
-@click.pass_context
-def cluster(ctx, term):
-    """Show a semantic cluster by name (partial match)."""
-    db = _conn(ctx)
-    rows = db.execute(
-        "SELECT DISTINCT cluster_name FROM semantic_clusters "
-        "WHERE cluster_name LIKE ? ORDER BY cluster_name",
-        (f"%{term}%",)
-    ).fetchall()
-
-    if not rows:
-        print(f"Кластер '{term}' не найден")
-        db.close()
-        return
-
-    for cl in rows:
-        name = cl["cluster_name"]
-        members = db.execute(
-            "SELECT sc.artifact_id, a.type, a.title "
-            "FROM semantic_clusters sc "
-            "LEFT JOIN artifacts a ON sc.artifact_id = a.id "
-            "WHERE sc.cluster_name = ? ORDER BY a.type, sc.artifact_id",
-            (name,)
-        ).fetchall()
-        print(f"── {name} ({len(members)}) ──")
-        print(fmt_table(
-            [(r["artifact_id"], r["type"] or "?", r["title"][:55] if r["title"] else "—") for r in members],
-            ["ID", "Тип", "Название"]
-        ))
-        print()
-    db.close()
 
 
 @cli.command("sql")
@@ -789,39 +599,6 @@ def raw_sql(ctx, query):
         print(f"SQL error: {e}", file=sys.stderr)
     db.close()
 
-
-@cli.command()
-@click.argument("from_type")
-@click.argument("to_type")
-@click.pass_context
-def gaps(ctx, from_type, to_type):
-    """Find artifacts of FROM_TYPE that have no edges to artifacts of TO_TYPE."""
-    db = _conn(ctx)
-    rows = db.execute("""
-        SELECT a.id, a.title
-        FROM artifacts a
-        WHERE a.type = ?
-          AND a.defined = 1
-          AND NOT EXISTS (
-              SELECT 1 FROM edges e
-              JOIN artifacts a2 ON e.target_id = a2.id
-              WHERE e.source_id = a.id AND a2.type = ?
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM edges e
-              JOIN artifacts a2 ON e.source_id = a2.id
-              WHERE e.target_id = a.id AND a2.type = ?
-          )
-        ORDER BY a.id
-    """, (from_type, to_type, to_type)).fetchall()
-
-    if not rows:
-        print(f"Все {from_type} связаны с {to_type}")
-    else:
-        print(f"{from_type} без связей с {to_type} ({len(rows)}):")
-        for r in rows:
-            print(f"  {r['id']:12s} {r['title'][:60]}")
-    db.close()
 
 
 @cli.command()
@@ -878,105 +655,6 @@ def _load_nx(db: sqlite3.Connection):
                    context=r["context"], source_file=r["source_file"])
     return G
 
-
-@cli.command()
-@click.option("-o", "--output", type=click.Path(path_type=Path),
-              default=None, help="Output HTML path (default: reports/traceability.html)")
-@click.option("--no-file-nodes", is_flag=True, help="Exclude FILE nodes")
-@click.option("--no-transitive", is_flag=True, help="Remove transitive edges")
-@click.pass_context
-def render(ctx, output, no_file_nodes, no_transitive):
-    """Render interactive HTML visualization from the DB."""
-    from graph_ba import traceability as t
-    from graph_ba.config import load_config
-
-    root = Path(ctx.obj.get("root", ".")).resolve()
-    config = load_config(root)
-
-    db = _conn(ctx)
-    G = _load_nx(db)
-    db.close()
-
-    H = t._filter_graph(G, no_file_nodes, no_transitive, verbose=True)
-    out = output or (Path.cwd() / "reports" / "traceability.html")
-    t.export_html(H, config, out)
-
-
-@cli.command()
-@click.argument("start_id")
-@click.option("--depth", default=3, help="Max traversal depth")
-@click.option("--direction", type=click.Choice(["out", "in", "both"]), default="out",
-              help="Traverse outgoing, incoming, or both edges")
-@click.option("--type", "filter_type", default=None, help="Only show nodes of this type")
-@click.option("--no-file", is_flag=True, help="Skip FILE nodes")
-@click.pass_context
-def walk(ctx, start_id, depth, direction, filter_type, no_file):
-    """BFS walk from a node — shows the reachability tree."""
-    db = _conn(ctx)
-    G = _load_nx(db)
-    db.close()
-
-    if start_id not in G:
-        print(f"Узел '{start_id}' не найден")
-        return
-
-    # BFS with depth tracking
-    visited = {start_id: 0}
-    queue = [(start_id, 0)]
-    tree: dict = {}  # node -> (parent, depth)
-    tree[start_id] = (None, 0)
-
-    while queue:
-        node, d = queue.pop(0)
-        if d >= depth:
-            continue
-
-        if direction in ("out", "both"):
-            for succ in G.successors(node):
-                if succ not in visited:
-                    if no_file and G.nodes[succ].get("type") == "FILE":
-                        continue
-                    if filter_type and G.nodes[succ].get("type") != filter_type:
-                        continue
-                    visited[succ] = d + 1
-                    tree[succ] = (node, d + 1)
-                    queue.append((succ, d + 1))
-
-        if direction in ("in", "both"):
-            for pred in G.predecessors(node):
-                if pred not in visited:
-                    if no_file and G.nodes[pred].get("type") == "FILE":
-                        continue
-                    if filter_type and G.nodes[pred].get("type") != filter_type:
-                        continue
-                    visited[pred] = d + 1
-                    tree[pred] = (node, d + 1)
-                    queue.append((pred, d + 1))
-
-    # Print as indented tree
-    start_data = G.nodes[start_id]
-    print(f"[{start_data.get('type','?')}] {start_id} — {start_data.get('title','')[:55]}")
-
-    # Group by depth, then sort
-    by_depth: dict = {}
-    for nid, (parent, d) in tree.items():
-        if nid == start_id:
-            continue
-        by_depth.setdefault(d, []).append((nid, parent))
-
-    for d in sorted(by_depth):
-        for nid, parent in sorted(by_depth[d]):
-            data = G.nodes.get(nid, {})
-            indent = "  " * d
-            typ = data.get("type", "?")
-            title = data.get("title", "")[:50]
-            print(f"{indent}├─ [{typ}] {nid} — {title}")
-
-    total = len(visited) - 1
-    if total:
-        print(f"\nОбход: {total} узлов за {max(visited.values())} шагов")
-    else:
-        print("\nНет достижимых узлов")
 
 
 # ── Review command (validate + context combined) ─────────────────

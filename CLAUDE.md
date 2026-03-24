@@ -36,12 +36,7 @@ uv run --with ~/dev/graph-ba graph-ba import
 | Матрица покрытия | `graph-ba coverage` |
 | Кратчайший путь | `graph-ba path F-04 M09` |
 | Impact analysis | `graph-ba impact BR.2` |
-| BFS-обход | `graph-ba walk BP-03 --depth 2 --no-file` |
-| Сироты | `graph-ba orphans --max-degree 1` |
-| Хабы | `graph-ba hubs -n 10` |
-| Кластер | `graph-ba cluster "кухня"` |
 | SQL | `graph-ba sql "SELECT ..."` |
-| Визуализация | `graph-ba render --no-file-nodes` |
 
 ## Конфигурация (graph-ba.toml)
 
