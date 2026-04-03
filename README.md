@@ -16,7 +16,7 @@ Manual cross-checking doesn't scale past ~50 documents. You need a graph.
 
 ## What it does
 
-Graph BA scans your markdown files, extracts artifact definitions and cross-references using regex patterns from a TOML config, and builds a queryable graph in SQLite.
+Graph BA scans your markdown files and source code, extracts artifact definitions and cross-references using regex patterns from a TOML config, and builds a queryable graph in SQLite.
 
 ```
 $ graph-ba import
@@ -155,6 +155,9 @@ graph-ba impact REQ-01
 | `review <id> --semantic --lines 0` | Full text with no line limit per artifact |
 | `anomalies` | Detect islands, cycles, bridges, bottlenecks, dangling refs |
 | `coverage` | Cross-layer coverage matrix |
+| `code-refs` | Show code-to-artifact traceability links |
+| `code-refs --by-artifact` | Group by artifact instead of by file |
+| `code-refs --type FEAT` | Filter by artifact type |
 | `audit` | Global audit: anomalies + coverage + prioritized review candidates |
 | `sql <query>` | Raw SQL against the DB |
 
@@ -259,6 +262,65 @@ expected_bidir = { "FEAT" = ["REQ", "BR"] }
 # label = "requirements"
 ```
 
+### Step 5: Configure code traceability (`[code]`)
+
+Link source code back to BA artifacts using `@trace` comments:
+
+```toml
+[code]
+dirs = ["src", "app"]                    # directories to scan
+extensions = ["ts", "tsx", "py", "go"]   # file extensions (defaults to 30+ languages)
+marker = "@trace"                        # comment marker (default)
+coverage_types = ["FEAT", "REQ"]         # artifact types to check for code coverage
+```
+
+In your source code, add `@trace` comments referencing artifact IDs:
+
+```typescript
+// @trace: F-01, REQ-01
+export function processOrder(order: Order) {
+  // @trace: BR.1
+  const price = calculatePrice(order);
+  return price;
+}
+```
+
+```python
+# @trace: F-02, BP-01
+def deliver(order):
+    # @trace: BR.2
+    validate_sla(order)
+```
+
+Supported comment syntaxes: `//`, `#`, `/* */`, `--` (covers TypeScript, Python, Go, Rust, SQL, Lua, and most common languages).
+
+Each file with `@trace` comments becomes a `CODE:path/to/file.ts` node in the graph. All existing commands — `impact`, `path`, `review`, `anomalies` — work with code nodes automatically.
+
+```
+$ graph-ba code-refs
+Code References:
+
+  src/order.ts
+    F-01, REQ-01            line 2
+    BR.1                    line 4
+
+  src/delivery.py
+    F-02, BP-01             line 2
+    BR.2                    line 4
+
+$ graph-ba code-refs --by-artifact
+  F-01    src/order.ts:2
+  F-02    src/delivery.py:2
+  REQ-01  src/order.ts:2
+  ...
+
+$ graph-ba coverage
+  ...
+  Code coverage:
+    FEAT  2/10  ████░░░░░░░░░░░░░░░░  20.0%
+    REQ   1/15  █░░░░░░░░░░░░░░░░░░░   6.7%
+```
+
 ### Other sections
 
 **`[scan]`** — directories to scan:
@@ -284,9 +346,10 @@ zero_pad = [{ pattern = 'M(\d{1,2})', format = "M{:02d}" }]
 
 1. **Scan definitions** — reads markdown files, finds artifact definitions (headings or table rows) using regex patterns from config
 2. **Scan references** — finds cross-references to known artifact IDs in all markdown files
-3. **Build graph** — constructs a NetworkX directed graph with file:line attribution on every edge
-4. **Import to SQLite** — stores the graph in SQLite with FTS5 indexes for fast search
-5. **Query & validate** — CLI commands query the DB for navigation, coverage analysis, and anomaly detection
+3. **Scan code** — finds `@trace` comments in source code files, linking code to artifacts
+4. **Build graph** — constructs a NetworkX directed graph with file:line attribution on every edge
+5. **Import to SQLite** — stores the graph in SQLite with FTS5 indexes for fast search
+6. **Query & validate** — CLI commands query the DB for navigation, coverage analysis, and anomaly detection
 
 ## Architecture
 
@@ -300,6 +363,7 @@ tests/
 ├── test_config.py    — config loading, normalization, classification
 ├── test_scanning.py  — definition/reference scanning
 ├── test_graph.py     — graph construction, verification
+├── test_code_refs.py — code-to-artifact traceability (@trace)
 ├── test_db.py        — SQLite import, FTS, helpers
 └── test_cli.py       — CLI commands + JSON output
 ```
@@ -310,7 +374,7 @@ tests/
 uv run pytest tests/ -v
 ```
 
-122 tests cover every layer: config → scanning → graph → DB → CLI → audit. A synthetic BA project (5 artifact types, 11 definitions, cross-references, dangling refs, coverage gaps) is built in session-scoped fixtures.
+142 tests cover every layer: config → scanning → graph → code refs → DB → CLI → audit. A synthetic BA project (5 artifact types, 11 definitions, cross-references, code traceability, dangling refs, coverage gaps) is built in session-scoped fixtures.
 
 ## Claude Code integration
 

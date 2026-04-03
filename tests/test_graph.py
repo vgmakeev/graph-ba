@@ -77,7 +77,7 @@ class TestFindOwner:
 class TestVerify:
     def test_orphans(self, scan_result, project_config, built_graph):
         G, registry = built_graph
-        _, references, _ = scan_result
+        _, references, _, _ = scan_result
         report = verify(G, registry, references, project_config)
         # ST-01, ST-02, REQ-03, BP-02, BR.2 have no incoming edges
         assert "ST-01" in report.orphans
@@ -94,7 +94,7 @@ class TestVerify:
 
     def test_coverage_feat_req(self, scan_result, project_config, built_graph):
         G, registry = built_graph
-        _, references, _ = scan_result
+        _, references, _, _ = scan_result
         report = verify(G, registry, references, project_config)
         cov = report.coverage.get("FEAT \u2192 REQ", {})
         assert cov.get("total") == 2  # F-01, F-02
@@ -103,7 +103,7 @@ class TestVerify:
 
     def test_coverage_req_bp(self, scan_result, project_config, built_graph):
         G, registry = built_graph
-        _, references, _ = scan_result
+        _, references, _, _ = scan_result
         report = verify(G, registry, references, project_config)
         cov = report.coverage.get("REQ \u2192 BP", {})
         assert cov.get("total") == 3  # REQ-01, REQ-02, REQ-03
@@ -112,7 +112,7 @@ class TestVerify:
 
     def test_missing_expected_links(self, scan_result, project_config, built_graph):
         G, registry = built_graph
-        _, references, _ = scan_result
+        _, references, _, _ = scan_result
         report = verify(G, registry, references, project_config)
         missing_ids = {aid for aid, _ in report.missing_expected}
         # F-02 has no REQ link (expected_cross_layer: FEAT needs REQ)
@@ -120,7 +120,7 @@ class TestVerify:
 
     def test_registry_count(self, scan_result, project_config, built_graph):
         G, registry = built_graph
-        _, references, _ = scan_result
+        _, references, _, _ = scan_result
         report = verify(G, registry, references, project_config)
         assert report.registry_count.get("FEAT") == 2
         assert report.registry_count.get("REQ") == 3

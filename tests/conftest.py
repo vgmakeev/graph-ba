@@ -6,7 +6,8 @@ from click.testing import CliRunner
 
 from graph_ba.config import load_config
 from graph_ba.traceability import (
-    scan_definitions, scan_references, scan_index_cross_refs, build_graph,
+    scan_definitions, scan_references, scan_index_cross_refs,
+    scan_code_references, build_graph,
 )
 from graph_ba.graph_db import get_db, do_import, cli
 
@@ -104,6 +105,12 @@ label = "requirements"
 [clusters]
 "Order Management" = ["F-01", "REQ-01", "BP-01"]
 "Delivery" = ["F-02", "BR.2"]
+
+[code]
+dirs = ["src"]
+extensions = ["ts", "py", "go"]
+marker = "@trace"
+coverage_types = ["FEAT", "REQ"]
 """
 
 # ── Synthetic markdown files ──────────────────────────────────────
@@ -174,6 +181,33 @@ BR_DELIVERY_MD = """\
 Delivery SLA. References: F-02.
 """
 
+# ── Synthetic source code files ───────────────────────────────────
+
+ORDER_TS = """\
+// Order management module
+// @trace: F-01, REQ-01
+export function processOrder(order: Order) {
+  // @trace: BR.1
+  const price = calculatePrice(order);
+  return price;
+}
+"""
+
+DELIVERY_PY = """\
+# Delivery service
+# @trace: F-02, BP-01
+def deliver(order):
+    # @trace: BR.2
+    validate_sla(order)
+"""
+
+NO_TRACE_GO = """\
+package main
+
+// This file has no @trace comments
+func main() {}
+"""
+
 INDEX_MD = """\
 # Cross-Reference Index
 
@@ -205,6 +239,13 @@ def ba_project(tmp_path_factory):
     (docs / "rules" / "BR-delivery.md").write_text(BR_DELIVERY_MD, encoding="utf-8")
     (docs / "index.md").write_text(INDEX_MD, encoding="utf-8")
 
+    # Source code files for code traceability
+    src = root / "src"
+    src.mkdir()
+    (src / "order.ts").write_text(ORDER_TS, encoding="utf-8")
+    (src / "delivery.py").write_text(DELIVERY_PY, encoding="utf-8")
+    (src / "main.go").write_text(NO_TRACE_GO, encoding="utf-8")
+
     return root
 
 
@@ -218,13 +259,14 @@ def scan_result(ba_project, project_config):
     registry = scan_definitions(ba_project, project_config)
     references = scan_references(ba_project, registry, project_config)
     index_xrefs = scan_index_cross_refs(ba_project, project_config)
-    return registry, references, index_xrefs
+    code_refs = scan_code_references(ba_project, project_config)
+    return registry, references, index_xrefs, code_refs
 
 
 @pytest.fixture(scope="session")
 def built_graph(scan_result, project_config):
-    registry, references, index_xrefs = scan_result
-    G = build_graph(registry, references, project_config, index_xrefs)
+    registry, references, index_xrefs, code_refs = scan_result
+    G = build_graph(registry, references, project_config, index_xrefs, code_refs)
     return G, registry
 
 

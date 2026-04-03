@@ -44,6 +44,16 @@ class Reference:
     context: str = ""
 
 
+@dataclass
+class CodeReference:
+    """A @trace reference found in a source code file."""
+    code_file: Path
+    line_number: int
+    target_ids: List[str]  # normalized artifact IDs
+    context: str = ""      # the raw comment line
+    rel_path: str = ""     # relative path from project root
+
+
 # ── Phase 1: Definition scanning ─────────────────────────────────
 
 def _read_lines(path: Path) -> List[str]:
@@ -228,6 +238,71 @@ def scan_references(
     return all_refs
 
 
+# ── Phase 2b: Code reference extraction ──────────────────────────
+
+def scan_code_references(
+    root: Path,
+    config: ProjectConfig,
+) -> List[CodeReference]:
+    """Scan source code files for @trace comments referencing BA artifacts."""
+    if not config.code:
+        return []
+
+    code_cfg = config.code
+    comment_re = code_cfg.comment_pattern
+    if not comment_re:
+        return []
+
+    results: List[CodeReference] = []
+
+    code_files: List[Path] = []
+    for dir_str in code_cfg.dirs:
+        d = root / dir_str
+        if not d.exists():
+            continue
+        for ext in code_cfg.extensions:
+            code_files.extend(sorted(d.rglob(f"*.{ext}")))
+
+    for filepath in code_files:
+        try:
+            lines = filepath.read_text(encoding="utf-8").splitlines()
+        except (UnicodeDecodeError, OSError):
+            continue
+
+        try:
+            rel_path = str(filepath.relative_to(root))
+        except ValueError:
+            rel_path = str(filepath)
+
+        for line_num, line in enumerate(lines, 1):
+            m = comment_re.match(line)
+            if not m:
+                continue
+
+            raw_ids_str = m.group(1).strip()
+            raw_ids = [s.strip() for s in re.split(r'[,\s]+', raw_ids_str) if s.strip()]
+
+            target_ids = []
+            for raw_id in raw_ids:
+                raw_id = raw_id.strip(".,;:")
+                if not raw_id:
+                    continue
+                nid = normalize_id(raw_id, config)
+                if classify_id(nid, config) is not None:
+                    target_ids.append(nid)
+
+            if target_ids:
+                results.append(CodeReference(
+                    code_file=filepath,
+                    line_number=line_num,
+                    target_ids=target_ids,
+                    context=line.strip(),
+                    rel_path=rel_path,
+                ))
+
+    return results
+
+
 # ── Phase 3: Graph construction ──────────────────────────────────
 
 def _find_owner(
@@ -252,6 +327,7 @@ def build_graph(
     references: List[Reference],
     config: ProjectConfig,
     index_xrefs: Optional[List[Tuple[str, str, Path, int]]] = None,
+    code_refs: Optional[List[CodeReference]] = None,
 ) -> nx.DiGraph:
     G = nx.DiGraph()
 
@@ -300,6 +376,23 @@ def build_graph(
             if src != tgt:
                 G.add_edge(src, tgt, context="index_table",
                            source_file=str(fpath.name), line=lnum)
+
+    # ── Code references → CODE nodes ──
+    if code_refs:
+        for cref in code_refs:
+            code_node_id = f"CODE:{cref.rel_path}"
+            if not G.has_node(code_node_id):
+                G.add_node(code_node_id, type="CODE", title=cref.rel_path,
+                           source_file=cref.rel_path, defined=True)
+            for target_id in cref.target_ids:
+                if target_id not in G:
+                    atype = classify_id(target_id, config)
+                    G.add_node(target_id, type=atype or "UNKNOWN",
+                               title="", source_file="", defined=False)
+                G.add_edge(code_node_id, target_id,
+                           context=cref.context,
+                           source_file=cref.rel_path,
+                           line=cref.line_number)
 
     for aid in registry:
         G.nodes[aid]["defined"] = True
@@ -548,6 +641,7 @@ _DEFAULT_COLORS = {
     "EN":      {"bg": "#BEE3F8", "border": "#2A69AC"},
     "RL":      {"bg": "#C6F6D5", "border": "#22543D"},
     "FILE":    {"bg": "#F7FAFC", "border": "#A0AEC0"},
+    "CODE":    {"bg": "#E6FFFA", "border": "#319795"},
     "UNKNOWN": {"bg": "#FED7D7", "border": "#E53E3E"},
 }
 
@@ -995,10 +1089,12 @@ def main(root: Path, json_out: Optional[Path], dot_out: Optional[Path],
 
     references = scan_references(root, registry, config)
     index_xrefs = scan_index_cross_refs(root, config)
+    code_refs = scan_code_references(root, config)
     if verbose:
-        print(f"[scan] {len(references)} references found, {len(index_xrefs)} index cross-refs")
+        print(f"[scan] {len(references)} references found, {len(index_xrefs)} index cross-refs, "
+              f"{len(code_refs)} code trace refs")
 
-    G = build_graph(registry, references, config, index_xrefs)
+    G = build_graph(registry, references, config, index_xrefs, code_refs)
     report = verify(G, registry, references, config)
     print_report(report, registry, config, verbose)
 

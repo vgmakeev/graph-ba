@@ -64,6 +64,16 @@ class NormalizeRule:
 
 
 @dataclass
+class CodeConfig:
+    """Configuration for scanning source code files for @trace references."""
+    dirs: List[str]
+    extensions: List[str]
+    marker: str = "@trace"
+    comment_pattern: Optional[re.Pattern] = None
+    coverage_types: List[str] = field(default_factory=list)
+
+
+@dataclass
 class ProjectConfig:
     """Full project configuration."""
     scan_dirs: List[str]
@@ -79,6 +89,8 @@ class ProjectConfig:
     required_sections: Dict[str, List[str]]
     expected_bidir: Dict[str, List[str]]
     expected_cross_layer: Dict[str, List[Tuple[str, str]]]  # type -> [(target_type, label)]
+    # Code traceability
+    code: Optional[CodeConfig] = None
 
 
 def load_config(root: Path) -> ProjectConfig:
@@ -161,6 +173,41 @@ def load_config(root: Path) -> ProjectConfig:
     for atype, pairs in expected_cross_layer_raw.items():
         expected_cross_layer[atype] = [(p["type"], p["label"]) for p in pairs]
 
+    # ── Code scan config ──
+    code_data = data.get("code")
+    code_config = None
+    if code_data:
+        marker = code_data.get("marker", "@trace")
+        escaped_marker = re.escape(marker)
+        comment_re = re.compile(
+            rf'^\s*(?://+|/?\*+|#+|--)\s*{escaped_marker}:\s*(.+)'
+        )
+        code_config = CodeConfig(
+            dirs=code_data.get("dirs", []),
+            extensions=code_data.get("extensions", [
+                "ts", "tsx", "js", "jsx", "mjs", "cjs",
+                "py", "pyw",
+                "go",
+                "rs",
+                "java", "kt", "kts", "scala",
+                "cs",
+                "c", "h", "cpp", "hpp", "cc", "cxx",
+                "swift",
+                "rb",
+                "php",
+                "lua",
+                "sh", "bash", "zsh",
+                "sql",
+                "dart",
+                "ex", "exs",
+                "zig",
+                "vue", "svelte",
+            ]),
+            marker=marker,
+            comment_pattern=comment_re,
+            coverage_types=code_data.get("coverage_types", []),
+        )
+
     return ProjectConfig(
         scan_dirs=scan_dirs,
         types=types,
@@ -174,6 +221,7 @@ def load_config(root: Path) -> ProjectConfig:
         required_sections=required_sections,
         expected_bidir=expected_bidir,
         expected_cross_layer=expected_cross_layer,
+        code=code_config,
     )
 
 

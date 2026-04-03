@@ -25,6 +25,11 @@ import click
 DB_PATH = Path.cwd() / "reports" / "graph.db"
 
 
+def _is_meta_node(node_id: str) -> bool:
+    """Check if node is a meta-node (FILE: or CODE:) rather than a BA artifact."""
+    return node_id.startswith("FILE:") or node_id.startswith("CODE:")
+
+
 def _json_out(ctx, data):
     """Print data as JSON if --json flag is set, return True if printed."""
     if ctx.obj.get("json"):
@@ -132,7 +137,8 @@ def do_import(root: Path, db: sqlite3.Connection):
     registry = t.scan_definitions(root, config)
     references = t.scan_references(root, registry, config)
     index_xrefs = t.scan_index_cross_refs(root, config)
-    G = t.build_graph(registry, references, config, index_xrefs)
+    code_refs = t.scan_code_references(root, config)
+    G = t.build_graph(registry, references, config, index_xrefs, code_refs)
 
     # Clear existing data
     db.executescript("""
@@ -177,6 +183,8 @@ def do_import(root: Path, db: sqlite3.Connection):
         file_map[art.source_file.name] = str(art.source_file)
     for ref in references:
         file_map[ref.source_file.name] = str(ref.source_file)
+    for cref in code_refs:
+        file_map[cref.code_file.name] = str(cref.code_file)
     for fname, fpath in file_map.items():
         db.execute("INSERT OR IGNORE INTO file_paths (filename, full_path) VALUES (?, ?)",
                    (fname, fpath))
@@ -192,8 +200,12 @@ def do_import(root: Path, db: sqlite3.Connection):
     n_nodes = db.execute("SELECT count(*) FROM artifacts").fetchone()[0]
     n_edges = db.execute("SELECT count(*) FROM edges").fetchone()[0]
     n_clusters = db.execute("SELECT count(DISTINCT cluster_name) FROM semantic_clusters").fetchone()[0]
+    n_code = db.execute(
+        "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'CODE:%'"
+    ).fetchone()[0]
     db_path = db.execute("PRAGMA database_list").fetchone()[2]
-    print(f"Imported: {n_nodes} artifacts, {n_edges} edges, {n_clusters} semantic clusters")
+    print(f"Imported: {n_nodes} artifacts, {n_edges} edges, "
+          f"{n_clusters} semantic clusters, {n_code} code files")
     print(f"DB: {db_path}")
 
 
@@ -370,6 +382,15 @@ pattern = '^##\\\\s+(FEAT-\\\\d{2,4})\\\\s*[—–\\\\-]\\\\s*(.*)'
 # ── Semantic clusters ──
 [clusters]
 # "Topic Name" = ["ID-01", "ID-02"]
+
+# ── Code traceability ──
+# Scan source files for @trace comments referencing artifacts.
+# Example: // @trace: REQ-01, FEAT-02
+# [code]
+# dirs = ["src"]
+# extensions = ["ts", "tsx", "py", "go"]
+# marker = "@trace"
+# coverage_types = ["FEAT", "REQ"]
 '''
     config_path.write_text(template, encoding="utf-8")
     print(f"Created template config: {config_path}")
@@ -645,7 +666,8 @@ def coverage(ctx):
 
     db = _conn(ctx)
     pairs = [(cp.source, cp.target) for cp in config.coverage_pairs]
-    if not pairs:
+    has_code_coverage = config.code and config.code.coverage_types
+    if not pairs and not has_code_coverage:
         print("No coverage pairs defined in graph-ba.toml [coverage]")
         db.close()
         return
@@ -672,17 +694,114 @@ def coverage(ctx):
         results.append({"source": src_type, "target": tgt_type,
                         "linked": linked, "total": total,
                         "pct": round(pct, 1), "status": status})
+
+    # Code reference coverage
+    code_results = []
+    if has_code_coverage:
+        for art_type in config.code.coverage_types:
+            total = db.execute(
+                "SELECT count(*) as c FROM artifacts WHERE type = ? AND defined = 1",
+                (art_type,)
+            ).fetchone()["c"]
+            linked = db.execute("""
+                SELECT count(DISTINCT a.id) as c FROM artifacts a
+                WHERE a.type = ? AND a.defined = 1
+                AND EXISTS (
+                    SELECT 1 FROM edges e
+                    WHERE e.target_id = a.id AND e.source_id LIKE 'CODE:%'
+                )
+            """, (art_type,)).fetchone()["c"]
+            pct = (linked / total * 100) if total else 0
+            status = "OK" if pct >= 90 else "WARN" if pct >= 50 else "GAP"
+            code_results.append({"type": art_type, "linked": linked,
+                                 "total": total, "pct": round(pct, 1),
+                                 "status": status})
+
     db.close()
 
-    if _json_out(ctx, {"pairs": results}):
+    if _json_out(ctx, {"pairs": results, "code_coverage": code_results}):
         return
 
-    print("Cross-layer coverage matrix:")
-    print()
-    for r in results:
-        bar = "█" * int(r["pct"] / 5) + "░" * (20 - int(r["pct"] / 5))
-        print(f"  {r['source']:8s} ↔ {r['target']:8s}  {r['linked']:3d}/{r['total']:<3d}  "
-              f"{bar}  {r['pct']:5.1f}%  [{r['status']}]")
+    if results:
+        print("Cross-layer coverage matrix:")
+        print()
+        for r in results:
+            bar = "█" * int(r["pct"] / 5) + "░" * (20 - int(r["pct"] / 5))
+            print(f"  {r['source']:8s} ↔ {r['target']:8s}  {r['linked']:3d}/{r['total']:<3d}  "
+                  f"{bar}  {r['pct']:5.1f}%  [{r['status']}]")
+
+    if code_results:
+        print("\nCode reference coverage:")
+        print()
+        for r in code_results:
+            bar = "█" * int(r["pct"] / 5) + "░" * (20 - int(r["pct"] / 5))
+            print(f"  CODE → {r['type']:8s}  {r['linked']:3d}/{r['total']:<3d}  "
+                  f"{bar}  {r['pct']:5.1f}%  [{r['status']}]")
+
+
+# ── Code references CLI ──────────────────────────────────────────
+
+@cli.command("code-refs")
+@click.option("--by-artifact", is_flag=True, help="Group by artifact instead of by file")
+@click.option("--type", "art_type", default=None, help="Filter to artifact type (e.g. F, BR_REQ)")
+@click.pass_context
+def code_refs(ctx, by_artifact, art_type):
+    """Show code-to-artifact traceability links."""
+    db = _conn(ctx)
+
+    query = (
+        "SELECT e.source_id as code_node, e.target_id as artifact_id, "
+        "a.type as art_type, a.title, e.source_file, e.line_number, e.context "
+        "FROM edges e "
+        "LEFT JOIN artifacts a ON e.target_id = a.id "
+        "WHERE e.source_id LIKE 'CODE:%'"
+    )
+    params: list = []
+    if art_type:
+        query += " AND a.type = ?"
+        params.append(art_type)
+    query += " ORDER BY e.source_id, e.line_number"
+
+    rows = db.execute(query, params).fetchall()
+    db.close()
+
+    if not rows:
+        print("No code references found. Add @trace comments to source files "
+              "and configure [code] in graph-ba.toml.")
+        return
+
+    if _json_out(ctx, {"code_refs": [dict(r) for r in rows]}):
+        return
+
+    if by_artifact:
+        groups: dict = {}
+        for r in rows:
+            groups.setdefault(r["artifact_id"], []).append(r)
+
+        print(f"Code references by artifact ({len(groups)} artifacts):\n")
+        for aid in sorted(groups):
+            refs = groups[aid]
+            art_type_str = refs[0]["art_type"] or "?"
+            title = refs[0]["title"] or ""
+            print(f"  [{art_type_str}] {aid} — {title[:50]}")
+            for r in refs:
+                code_path = r["code_node"].removeprefix("CODE:")
+                print(f"    {code_path}:{r['line_number']}")
+            print()
+    else:
+        groups = {}
+        for r in rows:
+            groups.setdefault(r["code_node"], []).append(r)
+
+        print(f"Code references by file ({len(groups)} files):\n")
+        for code_node in sorted(groups):
+            code_path = code_node.removeprefix("CODE:")
+            refs = groups[code_node]
+            print(f"  {code_path}")
+            for r in refs:
+                print(f"    L{r['line_number']:>4d}  → [{r['art_type'] or '?'}] "
+                      f"{r['artifact_id']} — {(r['title'] or '')[:40]}")
+            print()
 
 
 # ── NetworkX loader (for path/impact commands) ────────────────────
@@ -833,11 +952,11 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
     if clusters:
         print(f"\nКластеры: {', '.join(r['cluster_name'] for r in clusters)}")
 
-    # Collect edges (skip FILE)
+    # Collect edges (skip FILE and CODE for outgoing, keep CODE for incoming)
     out_edges = db.execute(
         "SELECT e.target_id as ref_id, a.type, a.title, e.source_file, e.line_number, e.context "
         "FROM edges e LEFT JOIN artifacts a ON e.target_id = a.id "
-        "WHERE e.source_id = ? AND COALESCE(a.type,'') != 'FILE' "
+        "WHERE e.source_id = ? AND COALESCE(a.type,'') NOT IN ('FILE', 'CODE') "
         "ORDER BY a.type, e.target_id",
         (node_id,)
     ).fetchall()
@@ -911,11 +1030,40 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
                                     r["title"], r["source_file"],
                                     r["line_number"], r["context"], 4)
         if in_edges:
-            print(f"\n── Входящие ссылки ({len(in_edges)}) ──")
-            for r in in_edges:
-                _print_edge_context(db, "←", r["ref_id"], r["type"],
-                                    r["title"], r["source_file"],
-                                    r["line_number"], r["context"], 4)
+            # Separate BA edges from CODE edges
+            ba_in = [r for r in in_edges if not r["ref_id"].startswith("CODE:")]
+            code_in = [r for r in in_edges if r["ref_id"].startswith("CODE:")]
+            if ba_in:
+                print(f"\n── Входящие ссылки ({len(ba_in)}) ──")
+                for r in ba_in:
+                    _print_edge_context(db, "←", r["ref_id"], r["type"],
+                                        r["title"], r["source_file"],
+                                        r["line_number"], r["context"], 4)
+            if code_in:
+                print(f"\n── Code References ({len(code_in)}) ──")
+                for r in code_in:
+                    code_path = r["ref_id"].removeprefix("CODE:")
+                    ctx = r["context"][:70] if r["context"] else ""
+                    print(f"  {code_path}:{r['line_number']}")
+                    if ctx:
+                        print(f"    {ctx}")
+
+    # Code references (also show in semantic mode)
+    if semantic:
+        code_edges = db.execute(
+            "SELECT e.source_id, e.source_file, e.line_number, e.context "
+            "FROM edges e WHERE e.target_id = ? AND e.source_id LIKE 'CODE:%' "
+            "ORDER BY e.source_id",
+            (node_id,)
+        ).fetchall()
+        if code_edges:
+            print(f"\n── Code References ({len(code_edges)}) ──")
+            for r in code_edges:
+                code_path = r["source_id"].removeprefix("CODE:")
+                ctx = r["context"][:70] if r["context"] else ""
+                print(f"  {code_path}:{r['line_number']}")
+                if ctx:
+                    print(f"    {ctx}")
 
     db.close()
 
@@ -1261,7 +1409,7 @@ def anomalies(ctx, min_component):
 
     # 3. Source nodes with no incoming edges (roots)
     sources = [n for n in G.nodes() if G.in_degree(n) == 0
-               and not n.startswith("FILE:") and G.nodes[n].get("defined")]
+               and not _is_meta_node(n) and G.nodes[n].get("defined")]
     # Filter to defined artifacts only
     if sources:
         by_type: dict = {}
@@ -1274,7 +1422,7 @@ def anomalies(ctx, min_component):
 
     # 4. Sink nodes with no outgoing edges (dead ends)
     sinks = [n for n in G.nodes() if G.out_degree(n) == 0
-             and not n.startswith("FILE:") and G.nodes[n].get("defined")]
+             and not _is_meta_node(n) and G.nodes[n].get("defined")]
     if sinks:
         by_type = {}
         for n in sinks:
@@ -1286,7 +1434,7 @@ def anomalies(ctx, min_component):
 
     # 5. Dangling references (referenced but not defined)
     dangling = [n for n in G.nodes() if not G.nodes[n].get("defined", False)
-                and not n.startswith("FILE:")]
+                and not _is_meta_node(n)]
     if dangling:
         issues.append(("DANGLING", f"{len(dangling)} dangling reference(s) (not defined)"))
         for n in sorted(dangling)[:15]:
@@ -1308,7 +1456,7 @@ def anomalies(ctx, min_component):
     threshold = max(10, G.number_of_edges() // G.number_of_nodes() * 3) if G.number_of_nodes() > 0 else 10
     bottlenecks = [(n, G.in_degree(n) + G.out_degree(n)) for n in G.nodes()
                    if G.in_degree(n) + G.out_degree(n) > threshold
-                   and not n.startswith("FILE:")]
+                   and not _is_meta_node(n)]
     bottlenecks.sort(key=lambda x: -x[1])
     if bottlenecks:
         issues.append(("BOTTLENECK", f"{len(bottlenecks)} high-degree node(s) (degree > {threshold})"))
@@ -1358,7 +1506,7 @@ def audit(ctx, top):
     candidates = {}  # id -> {"reasons": set, "priority": str}
 
     def flag(aid, reason, priority="medium"):
-        if aid.startswith("FILE:"):
+        if _is_meta_node(aid):
             return
         if aid not in candidates:
             candidates[aid] = {"reasons": set(), "priority": "medium"}
@@ -1379,7 +1527,7 @@ def audit(ctx, top):
 
     # Dangling (undefined nodes)
     for n in G.nodes():
-        if not G.nodes[n].get("defined", False) and not n.startswith("FILE:"):
+        if not G.nodes[n].get("defined", False) and not _is_meta_node(n):
             srcs = sorted(p for p in G.predecessors(n))
             issues.append({"type": "DANGLING", "id": n, "referenced_by": srcs})
             flag(n, "DANGLING", "high")
@@ -1390,7 +1538,7 @@ def audit(ctx, top):
     UG = G.to_undirected()
     try:
         for u, v in nx.bridges(UG):
-            if u.startswith("FILE:") or v.startswith("FILE:"):
+            if _is_meta_node(u) or _is_meta_node(v):
                 continue
             issues.append({"type": "BRIDGE", "ids": [u, v]})
             flag(u, "BRIDGE")
@@ -1401,7 +1549,7 @@ def audit(ctx, top):
     # Bottleneck
     threshold = max(10, G.number_of_nodes() // 10)
     for n in G.nodes():
-        if n.startswith("FILE:"):
+        if _is_meta_node(n):
             continue
         deg = G.in_degree(n) + G.out_degree(n)
         if deg > threshold:
@@ -1410,7 +1558,7 @@ def audit(ctx, top):
 
     # Roots / sinks
     for n in G.nodes():
-        if n.startswith("FILE:"):
+        if _is_meta_node(n):
             continue
         if G.in_degree(n) == 0:
             flag(n, "ROOT")
