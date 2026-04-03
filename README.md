@@ -15,12 +15,12 @@ $ graph-ba import
 Imported: 356 artifacts, 2059 edges, 16 semantic clusters
 
 $ graph-ba lint
-── Маркеры незавершённости (24) ──
-  [WARN]  BP-08   ...md:80   <УТОЧНИТЬ> Ручной стоп-лист ...
-── Пустые секции (29) ──
-  [WARN]  BP-02   ...md:112  пустая секция "Исключения"
-── Терминология vs глоссарий (81) ──
-  [INFO]  BP-09   ...md:22   "Courier" → каноническое "Курьер"
+── Incompleteness markers (24) ──
+  [WARN]  BP-08   ...md:80   TODO: manual stop-list ...
+── Empty sections (29) ──
+  [WARN]  BP-02   ...md:112  empty section "Exceptions"
+── Terminology vs glossary (81) ──
+  [INFO]  BP-09   ...md:22   "Courier" → canonical "Курьер"
 Lint: 134 WARN, 81 INFO
 
 $ graph-ba audit
@@ -33,7 +33,7 @@ $ graph-ba audit
 $ graph-ba review F-01 --semantic
   REVIEW: F-01 — Order Management
   ⚠ [GAP] No links to type: BR (business rules)
-  ── СВЯЗАННЫЕ АРТЕФАКТЫ (8) ──
+  ── LINKED ARTIFACTS (8) ──
   → REQ-01 — Must manage orders ...
 ```
 
