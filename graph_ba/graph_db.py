@@ -583,39 +583,59 @@ def impact(ctx, node_id, depth):
     db.close()
 
     if node_id not in G:
+        if _json_out(ctx, {"error": f"Node '{node_id}' not found", "node": node_id}):
+            return
         print(f"Node '{node_id}' not found")
         return
 
     # BFS from node, follow outgoing edges
     reachable = nx.descendants(G, node_id)
+
+    # Group descendants by type
+    descendants_by_type: dict = {}
+    for nid in reachable:
+        t = G.nodes[nid].get("type", "?")
+        descendants_by_type.setdefault(t, []).append(nid)
+
+    # Reverse: what affects this node?
+    ancestors = nx.ancestors(G, node_id)
+    ancestors_by_type: dict = {}
+    for nid in ancestors:
+        t = G.nodes[nid].get("type", "?")
+        ancestors_by_type.setdefault(t, []).append(nid)
+
+    # JSON output
+    if _json_out(ctx, {
+        "node": node_id,
+        "type": G.nodes[node_id].get("type", "?"),
+        "descendants": {
+            "total": len(reachable),
+            "by_type": {t: sorted(ids) for t, ids in sorted(descendants_by_type.items())},
+        },
+        "ancestors": {
+            "total": len(ancestors),
+            "by_type": {t: sorted(ids) for t, ids in sorted(ancestors_by_type.items())},
+        },
+    }):
+        return
+
+    # Text output
     if not reachable:
         print(f"{node_id}: no cascade impact (no outgoing paths)")
         return
 
-    # Group by type
-    by_type: dict = {}
-    for nid in reachable:
-        t = G.nodes[nid].get("type", "?")
-        by_type.setdefault(t, []).append(nid)
-
     print(f"Cascade impact {node_id}: {len(reachable)} artifacts")
     print()
-    for t in sorted(by_type):
-        ids = sorted(by_type[t])
+    for t in sorted(descendants_by_type):
+        ids = sorted(descendants_by_type[t])
         print(f"  [{t}] ({len(ids)}): {', '.join(ids[:15])}")
         if len(ids) > 15:
             print(f"         ... and {len(ids)-15} more")
 
-    # Also show reverse: what affects this node?
-    ancestors = nx.ancestors(G, node_id)
     if ancestors:
         print(f"\nReverse impact (what affects {node_id}): {len(ancestors)} artifacts")
-        by_type2: dict = {}
-        for nid in ancestors:
-            t = G.nodes[nid].get("type", "?")
-            by_type2.setdefault(t, []).append(nid)
-        for t in sorted(by_type2):
-            ids = sorted(by_type2[t])
+        for t in sorted(ancestors_by_type):
+            ids = sorted(ancestors_by_type[t])
             print(f"  [{t}] ({len(ids)}): {', '.join(ids[:15])}")
             if len(ids) > 15:
                 print(f"         ... and {len(ids)-15} more")

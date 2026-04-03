@@ -1,6 +1,6 @@
 ---
-name: reindex
-description: "Переиндексировать граф трассируемости артефактов проекта. Сканирует markdown-файлы, находит определения и перекрёстные ссылки, строит SQLite БД."
+name: ba-reindex
+description: "TRIGGER when: нужно переиндексировать граф трассируемости артефактов проекта — скан markdown, построение SQLite БД."
 user_invocable: true
 ---
 
@@ -16,12 +16,12 @@ user_invocable: true
 
 2. Запусти переиндексацию:
 ```bash
-uv run --with ~/dev/graph-ba graph-ba import
+uvx --from git+https://github.com/vgmakeev/graph-ba graph-ba import
 ```
 
 3. После успешного импорта, запусти проверку аномалий:
 ```bash
-uv run --with ~/dev/graph-ba graph-ba --json anomalies
+uvx --from git+https://github.com/vgmakeev/graph-ba graph-ba --json anomalies
 ```
 
 4. Покажи пользователю краткую сводку:
@@ -30,3 +30,8 @@ uv run --with ~/dev/graph-ba graph-ba --json anomalies
    - Если есть критичные проблемы — опиши их
 
 5. Если найдены dangling-ссылки (артефакты, на которые есть ссылки, но они не определены), выведи их список с указанием, кто на них ссылается.
+
+## Gotchas
+
+- **Нет graph-ba.toml** — без конфига import не работает. Предложи `graph-ba init`.
+- **Большие проекты** — первый import может быть медленным (300+ артефактов). Последующие быстрее.

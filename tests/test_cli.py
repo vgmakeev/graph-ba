@@ -130,6 +130,112 @@ class TestImpactCmd:
         assert result.exit_code == 0
         assert "no cascade impact" in result.output
 
+    def test_unknown_node(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "impact", "FAKE-99"
+        ])
+        assert result.exit_code == 0
+        assert "not found" in result.output
+
+    def test_descendants_grouped_by_type(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "impact", "F-01"
+        ])
+        assert result.exit_code == 0
+        # F-01 references REQ-01, REQ-02, BP-01 → descendants should include them
+        assert "REQ" in result.output or "BP" in result.output
+
+    def test_reverse_impact_shown(self, cli_env):
+        runner, root, db_path = cli_env
+        # BP-01 is referenced by F-01 and F-02, so it should have ancestors
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "impact", "BP-01"
+        ])
+        assert result.exit_code == 0
+        assert "Reverse impact" in result.output or "what affects" in result.output
+
+    def test_leaf_node_no_descendants(self, cli_env):
+        runner, root, db_path = cli_env
+        # ST-02 is isolated — no descendants
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "impact", "ST-02"
+        ])
+        assert result.exit_code == 0
+        assert "no cascade impact" in result.output
+
+    # ── JSON output tests ──
+
+    def test_json_structure(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "--json", "impact", "F-01"
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["node"] == "F-01"
+        assert data["type"] == "FEAT"
+        assert "descendants" in data
+        assert "ancestors" in data
+        assert "total" in data["descendants"]
+        assert "by_type" in data["descendants"]
+        assert "total" in data["ancestors"]
+        assert "by_type" in data["ancestors"]
+
+    def test_json_descendants_content(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "--json", "impact", "F-01"
+        ])
+        data = json.loads(result.output)
+        desc = data["descendants"]
+        assert desc["total"] > 0
+        # All descendant IDs across types should sum to total
+        all_ids = [nid for ids in desc["by_type"].values() for nid in ids]
+        assert len(all_ids) == desc["total"]
+
+    def test_json_no_impact(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "--json", "impact", "ST-01"
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["node"] == "ST-01"
+        assert data["descendants"]["total"] == 0
+        assert data["descendants"]["by_type"] == {}
+
+    def test_json_unknown_node(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "--json", "impact", "FAKE-99"
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "error" in data
+        assert data["node"] == "FAKE-99"
+
+    def test_json_ancestors_content(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "--json", "impact", "BP-01"
+        ])
+        data = json.loads(result.output)
+        anc = data["ancestors"]
+        assert anc["total"] > 0
+        all_ids = [nid for ids in anc["by_type"].values() for nid in ids]
+        assert len(all_ids) == anc["total"]
+
+    def test_json_ids_sorted(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "--json", "impact", "F-01"
+        ])
+        data = json.loads(result.output)
+        for type_name, ids in data["descendants"]["by_type"].items():
+            assert ids == sorted(ids), f"IDs for {type_name} not sorted"
+
 
 class TestSqlCmd:
     def test_valid_query(self, cli_env):
