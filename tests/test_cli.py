@@ -75,7 +75,7 @@ class TestNodeCmd:
             "--root", str(root), "--db", str(db_path), "node", "FAKE-99"
         ])
         assert result.exit_code == 0
-        assert "\u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d" in result.output  # не найден
+        assert "not found" in result.output
 
     def test_partial_match(self, cli_env):
         runner, root, db_path = cli_env
@@ -83,7 +83,7 @@ class TestNodeCmd:
             "--root", str(root), "--db", str(db_path), "node", "F-0"
         ])
         assert result.exit_code == 0
-        assert "\u041f\u043e\u0445\u043e\u0436\u0438\u0435" in result.output  # Похожие
+        assert "Similar" in result.output
 
 
 class TestPathCmd:
@@ -102,7 +102,7 @@ class TestPathCmd:
             "--root", str(root), "--db", str(db_path), "path", "ST-01", "F-01"
         ])
         assert result.exit_code == 0
-        assert "\u043d\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u0435\u0442" in result.output  # не существует
+        assert "No path between" in result.output
 
     def test_unknown_node(self, cli_env):
         runner, root, db_path = cli_env
@@ -110,7 +110,7 @@ class TestPathCmd:
             "--root", str(root), "--db", str(db_path), "path", "FAKE-1", "FAKE-2"
         ])
         assert result.exit_code == 0
-        assert "\u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d" in result.output
+        assert "not found" in result.output
 
 
 class TestImpactCmd:
@@ -120,7 +120,7 @@ class TestImpactCmd:
             "--root", str(root), "--db", str(db_path), "impact", "F-01"
         ])
         assert result.exit_code == 0
-        assert "\u041a\u0430\u0441\u043a\u0430\u0434\u043d\u043e\u0435" in result.output  # Каскадное
+        assert "Cascade impact" in result.output
 
     def test_no_impact(self, cli_env):
         runner, root, db_path = cli_env
@@ -128,7 +128,7 @@ class TestImpactCmd:
             "--root", str(root), "--db", str(db_path), "impact", "ST-01"
         ])
         assert result.exit_code == 0
-        assert "\u043d\u0435\u0442 \u043a\u0430\u0441\u043a\u0430\u0434\u043d\u043e\u0433\u043e" in result.output  # нет каскадного
+        assert "no cascade impact" in result.output
 
 
 class TestSqlCmd:
@@ -189,7 +189,7 @@ class TestReviewCmd:
             "review", "F-01", "--semantic", "--lines", "10"
         ])
         assert result.exit_code == 0
-        assert "\u0421\u0412\u042f\u0417\u0410\u041d\u041d\u042b\u0415" in result.output  # СВЯЗАННЫЕ
+        assert "LINKED ARTIFACTS" in result.output
 
     def test_not_found(self, cli_env):
         runner, root, db_path = cli_env
@@ -197,7 +197,7 @@ class TestReviewCmd:
             "--root", str(root), "--db", str(db_path), "review", "FAKE-99"
         ])
         assert result.exit_code == 0
-        assert "\u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d" in result.output
+        assert "not found" in result.output
 
     def test_missing_section_detected(self, cli_env):
         runner, root, db_path = cli_env

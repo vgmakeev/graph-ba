@@ -74,10 +74,9 @@ class TestFtsQuery:
     def test_wildcard_added(self):
         assert "*" in _fts_query("hello")
 
-    def test_russian_stemming(self):
-        result = _fts_query("\u043a\u0443\u0445\u043d\u044f")  # кухня
-        assert result.endswith("*")
-        assert len(result) < len("\u043a\u0443\u0445\u043d\u044f") + 1  # stem is shorter
+    def test_unicode_wildcard(self):
+        result = _fts_query("kitchen")
+        assert result == "kitchen*"
 
     def test_passthrough_quoted(self):
         assert _fts_query('"exact match"') == '"exact match"'
@@ -97,7 +96,7 @@ class TestFmtTable:
         assert "A" in result
 
     def test_empty(self):
-        assert fmt_table([], ["H1"]) == "(\u043f\u0443\u0441\u0442\u043e)"
+        assert fmt_table([], ["H1"]) == "(empty)"
 
     def test_alignment(self):
         result = fmt_table([("short", "x"), ("longer text", "y")], ["A", "B"])

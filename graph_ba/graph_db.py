@@ -6,7 +6,7 @@ search, and provides CLI commands for agent-friendly querying.
 
 Usage:
     graph-ba import              # scan & populate DB
-    graph-ba search "кухня"      # FTS5 search
+    graph-ba search "query"      # FTS5 search
     graph-ba node BP-03           # node details + neighbors
     graph-ba path F-04 M09        # shortest path
     graph-ba impact BR.19         # cascade analysis
@@ -213,8 +213,7 @@ def do_import(root: Path, db: sqlite3.Connection):
 
 def _fts_query(q: str) -> str:
     """Auto-add wildcard suffix to each token for prefix matching.
-    'кухня доставка' -> 'кухн* доставк*'
-    Strips 1-2 trailing Cyrillic chars for crude stemming, then adds *.
+    'order delivery' -> 'order* delivery*'
     Passes through if user already uses FTS5 syntax (*, OR, AND, quotes).
     """
     if any(c in q for c in ('*', '"', 'OR', 'AND', 'NOT', 'NEAR')):
@@ -224,21 +223,14 @@ def _fts_query(q: str) -> str:
     for t in tokens:
         if not t:
             continue
-        # Crude Russian stemming: strip 1-2 trailing Cyrillic chars if word is long enough
-        if len(t) >= 4 and t[-1].lower() in "аеёиоуыэюяьъйнмтсвк":
-            stem = t[:-1]
-            if len(stem) >= 4 and stem[-1].lower() in "аеёиоуыэюяьъйнмтсвк":
-                stem = stem[:-1]
-            result.append(stem + "*")
-        else:
-            result.append(t + "*")
+        result.append(t + "*")
     return " ".join(result)
 
 
 def fmt_table(rows: list, headers: list) -> str:
     """Format rows as a compact aligned table."""
     if not rows:
-        return "(пусто)"
+        return "(empty)"
     widths = [len(h) for h in headers]
     str_rows = []
     for r in rows:
@@ -437,24 +429,24 @@ def search(ctx, query, limit):
         return
 
     if rows:
-        print(f"── Артефакты ({len(rows)}) ──")
+        print(f"── Artifacts ({len(rows)}) ──")
         print(fmt_table(
             [(r["id"], r["type"], r["title"][:60], r["source_file"]) for r in rows],
-            ["ID", "Тип", "Название", "Файл"]
+            ["ID", "Type", "Title", "File"]
         ))
     else:
-        print("Артефакты: не найдено")
+        print("Artifacts: not found")
 
     if cl_rows:
-        print(f"\n── Кластеры ({len(cl_rows)}) ──")
+        print(f"\n── Clusters ({len(cl_rows)}) ──")
         for r in cl_rows:
             print(f"  • {r['cluster_name']}")
 
     if e_rows:
-        print(f"\n── Связи ({len(e_rows)}) ──")
+        print(f"\n── Edges ({len(e_rows)}) ──")
         print(fmt_table(
             [(r["source_id"], r["target_id"], r["context"][:60]) for r in e_rows],
-            ["Из", "В", "Контекст"]
+            ["From", "To", "Context"]
         ))
 
 
@@ -472,11 +464,11 @@ def node(ctx, node_id):
             (f"%{node_id}%",)
         ).fetchall()
         if rows:
-            print(f"Не найден '{node_id}'. Похожие:")
+            print(f"Not found '{node_id}'. Similar:")
             for r in rows:
                 print(f"  {r['id']} ({r['type']}) — {r['title'][:50]}")
         else:
-            print(f"Артефакт '{node_id}' не найден")
+            print(f"Artifact '{node_id}' not found")
         db.close()
         return
 
@@ -513,31 +505,31 @@ def node(ctx, node_id):
         db.close()
         return
 
-    print(f"ID:     {row['id']}")
-    print(f"Тип:    {row['type']}")
-    print(f"Файл:   {row['source_file']}:{row['line_number']}")
-    print(f"Defined: {'да' if row['defined'] else 'НЕТ (dangling)'}")
-    print(f"Название: {row['title']}")
+    print(f"ID:      {row['id']}")
+    print(f"Type:    {row['type']}")
+    print(f"File:    {row['source_file']}:{row['line_number']}")
+    print(f"Defined: {'yes' if row['defined'] else 'NO (dangling)'}")
+    print(f"Title:   {row['title']}")
 
     if clusters:
-        print(f"Кластеры: {', '.join(r['cluster_name'] for r in clusters)}")
+        print(f"Clusters: {', '.join(r['cluster_name'] for r in clusters)}")
 
-    print(f"\n→ Исходящие ({len(out)}):")
+    print(f"\n→ Outgoing ({len(out)}):")
     if out:
         print(fmt_table(
             [(r["target_id"], r["type"] or "?",
               f"{r['source_file']}:{r['line_number']}" if r["line_number"] else "",
               r["title"][:40] if r["title"] else "") for r in out],
-            ["ID", "Тип", "Где ссылка", "Название"]
+            ["ID", "Type", "Ref location", "Title"]
         ))
 
-    print(f"\n← Входящие ({len(inc)}):")
+    print(f"\n← Incoming ({len(inc)}):")
     if inc:
         print(fmt_table(
             [(r["source_id"], r["type"] or "?",
               f"{r['source_file']}:{r['line_number']}" if r["line_number"] else "",
               r["title"][:40] if r["title"] else "") for r in inc],
-            ["ID", "Тип", "Где ссылка", "Название"]
+            ["ID", "Type", "Ref location", "Title"]
         ))
     db.close()
 
@@ -556,17 +548,17 @@ def path(ctx, from_id, to_id):
     db.close()
 
     if from_id not in G:
-        print(f"Узел '{from_id}' не найден")
+        print(f"Node '{from_id}' not found")
         return
     if to_id not in G:
-        print(f"Узел '{to_id}' не найден")
+        print(f"Node '{to_id}' not found")
         return
 
     # Try directed first, then undirected
-    for label, graph in [("направленный", G), ("ненаправленный", G.to_undirected())]:
+    for label, graph in [("directed", G), ("undirected", G.to_undirected())]:
         try:
             p = nx.shortest_path(graph, from_id, to_id)
-            print(f"Кратчайший путь ({label}, {len(p)-1} шагов):")
+            print(f"Shortest path ({label}, {len(p)-1} steps):")
             for i, nid in enumerate(p):
                 data = G.nodes.get(nid, {})
                 arrow = "  →  " if i < len(p) - 1 else ""
@@ -575,7 +567,7 @@ def path(ctx, from_id, to_id):
         except nx.NetworkXNoPath:
             continue
 
-    print(f"Путь между {from_id} и {to_id} не существует")
+    print(f"No path between {from_id} and {to_id}")
 
 
 @cli.command()
@@ -591,13 +583,13 @@ def impact(ctx, node_id, depth):
     db.close()
 
     if node_id not in G:
-        print(f"Узел '{node_id}' не найден")
+        print(f"Node '{node_id}' not found")
         return
 
     # BFS from node, follow outgoing edges
     reachable = nx.descendants(G, node_id)
     if not reachable:
-        print(f"{node_id}: нет каскадного влияния (нет исходящих путей)")
+        print(f"{node_id}: no cascade impact (no outgoing paths)")
         return
 
     # Group by type
@@ -606,18 +598,18 @@ def impact(ctx, node_id, depth):
         t = G.nodes[nid].get("type", "?")
         by_type.setdefault(t, []).append(nid)
 
-    print(f"Каскадное влияние {node_id}: {len(reachable)} артефактов")
+    print(f"Cascade impact {node_id}: {len(reachable)} artifacts")
     print()
     for t in sorted(by_type):
         ids = sorted(by_type[t])
         print(f"  [{t}] ({len(ids)}): {', '.join(ids[:15])}")
         if len(ids) > 15:
-            print(f"         ... и ещё {len(ids)-15}")
+            print(f"         ... and {len(ids)-15} more")
 
     # Also show reverse: what affects this node?
     ancestors = nx.ancestors(G, node_id)
     if ancestors:
-        print(f"\nОбратное влияние (что затрагивает {node_id}): {len(ancestors)} артефактов")
+        print(f"\nReverse impact (what affects {node_id}): {len(ancestors)} artifacts")
         by_type2: dict = {}
         for nid in ancestors:
             t = G.nodes[nid].get("type", "?")
@@ -626,7 +618,7 @@ def impact(ctx, node_id, depth):
             ids = sorted(by_type2[t])
             print(f"  [{t}] ({len(ids)}): {', '.join(ids[:15])}")
             if len(ids) > 15:
-                print(f"         ... и ещё {len(ids)-15}")
+                print(f"         ... and {len(ids)-15} more")
 
 
 
@@ -642,7 +634,7 @@ def raw_sql(ctx, query):
     try:
         rows = db.execute(query).fetchall()
         if not rows:
-            print("(пусто)")
+            print("(empty)")
             db.close()
             return
         headers = rows[0].keys()
@@ -823,7 +815,7 @@ def _load_nx(db: sqlite3.Connection):
 
 @cli.command()
 @click.argument("node_id_or_file")
-@click.option("--lines", default=200, type=int, help="Max lines per artifact in --semantic mode (default 200)")
+@click.option("--lines", default=0, type=int, help="Max lines per artifact in --semantic mode (0 = no limit)")
 @click.option("--nums", is_flag=True, help="Enable numeric conflict detection")
 @click.option("--semantic", is_flag=True, help="Full text of each linked artifact for semantic validation")
 @click.option("--types", default=None, help="Comma-separated artifact types to include in --semantic (e.g. ST,BR_REQ,BR_RULE,BP)")
@@ -853,7 +845,7 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
         # Fallback: extract artifact ID from filename (e.g. F-01_xxx.md → F-01)
         if not row:
             fname_stem = Path(node_id_or_file).stem
-            id_match = re.match(r'^([A-ZА-Я]{1,3}-?\d{1,2}(?:\.\d+)*)', fname_stem)
+            id_match = re.match(r'^([A-Z]{1,4}-?\d{1,3}(?:\.\d+)*)', fname_stem)
             if id_match:
                 candidate = id_match.group(1)
                 row = db.execute("SELECT * FROM artifacts WHERE id = ?",
@@ -867,7 +859,7 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
                 (node_id_or_file, f"%{basename}")
             ).fetchone()
     if not row:
-        print(f"Артефакт '{node_id_or_file}' не найден (ни как ID, ни как файл)")
+        print(f"Artifact '{node_id_or_file}' not found (neither as ID nor as file)")
         db.close()
         return
     node_id = row["id"]
@@ -886,7 +878,7 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
     # ── Part 1: Validate ──
     print(f"{'═' * 70}")
     print(f"  REVIEW: {node_id} — {row['title']}")
-    print(f"  Тип: {row['type']}  |  Файл: {row['source_file']}:{row['line_number']}")
+    print(f"  Type: {row['type']}  |  File: {row['source_file']}:{row['line_number']}")
     print(f"{'═' * 70}")
 
     issues: List[Tuple[str, str, str]] = []
@@ -935,12 +927,12 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
     _check_layer_gaps(db, node_id, row["type"], issues, review_config)
 
     if issues:
-        print(f"\n┌─ Проблемы ({len(issues)}) ─────────────────────────────────")
+        print(f"\n┌─ Issues ({len(issues)}) ─────────────────────────────────")
         for sev, _, msg in issues:
             print(f"│ [{sev:6s}] {msg}")
         print(f"└{'─' * 55}")
     else:
-        print("\n✓ Проблем не найдено")
+        print("\n✓ No issues found")
 
     # ── Part 2: Context ──
 
@@ -950,7 +942,7 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
         (node_id,)
     ).fetchall()
     if clusters:
-        print(f"\nКластеры: {', '.join(r['cluster_name'] for r in clusters)}")
+        print(f"\nClusters: {', '.join(r['cluster_name'] for r in clusters)}")
 
     # Collect edges (skip FILE and CODE for outgoing, keep CODE for incoming)
     out_edges = db.execute(
@@ -992,24 +984,24 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
                 linked_ids.append(rid)
 
         print(f"\n{'═' * 70}")
-        print(f"  СВЯЗАННЫЕ АРТЕФАКТЫ ({len(linked_ids)})")
+        print(f"  LINKED ARTIFACTS ({len(linked_ids)})")
         print(f"{'═' * 70}")
 
         for rid in linked_ids:
             art = db.execute("SELECT * FROM artifacts WHERE id = ?", (rid,)).fetchone()
             if not art or not art["source_file"]:
-                print(f"\n  ▸ {rid} — определение не найдено в БД")
+                print(f"\n  ▸ {rid} — definition not found in DB")
                 continue
             def_path = _resolve_file(db, art["source_file"])
             if not def_path:
-                print(f"\n  ▸ {rid} — файл {art['source_file']} не найден")
+                print(f"\n  ▸ {rid} — file {art['source_file']} not found")
                 continue
             section = _read_artifact_section(def_path, art["line_number"] or 1,
                                                max_lines=lines)
             if section:
                 print(f"\n{'─' * 70}")
                 print(f"  {rid}: {art['title'] or ''}")
-                print(f"  Файл: {art['source_file']}:{art['line_number']}")
+                print(f"  File: {art['source_file']}:{art['line_number']}")
                 print(f"{'─' * 70}")
                 print(section)
     else:
@@ -1017,14 +1009,14 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
         if full_path and Path(full_path).exists():
             try:
                 own_lines = Path(full_path).read_text(encoding="utf-8").splitlines()[:30]
-                print(f"\n── Содержание {fname} (первые {len(own_lines)} строк) ──")
+                print(f"\n── Content of {fname} (first {len(own_lines)} lines) ──")
                 for i, line in enumerate(own_lines, 1):
                     print(f"  {i:4d}│ {line}")
             except Exception:
                 pass
 
         if out_edges:
-            print(f"\n── Исходящие ссылки ({len(out_edges)}) ──")
+            print(f"\n── Outgoing references ({len(out_edges)}) ──")
             for r in out_edges:
                 _print_edge_context(db, "→", r["ref_id"], r["type"],
                                     r["title"], r["source_file"],
@@ -1034,7 +1026,7 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
             ba_in = [r for r in in_edges if not r["ref_id"].startswith("CODE:")]
             code_in = [r for r in in_edges if r["ref_id"].startswith("CODE:")]
             if ba_in:
-                print(f"\n── Входящие ссылки ({len(ba_in)}) ──")
+                print(f"\n── Incoming references ({len(ba_in)}) ──")
                 for r in ba_in:
                     _print_edge_context(db, "←", r["ref_id"], r["type"],
                                         r["title"], r["source_file"],
@@ -1084,7 +1076,7 @@ def _check_layer_gaps(db, aid, atype, issues, config=None):
             (aid, target_type, aid, target_type)
         ).fetchone()
         if not linked:
-            issues.append(("GAP", aid, f"Нет связей с {target_type} ({label})"))
+            issues.append(("GAP", aid, f"No links to {target_type} ({label})"))
 
 
 # ── File / section reading helpers ────────────────────────────────
@@ -1190,14 +1182,11 @@ def _read_snippet(filepath: str, center_line: int, radius: int = 4) -> Optional[
 import re
 
 _NUM_PATTERNS = [
-    (re.compile(r'(\d+(?:[.,]\d+)?)\s*(мин\w*|минут\w*)'), "мин"),
-    (re.compile(r'(\d+(?:[.,]\d+)?)\s*(сек\w*)'), "сек"),
-    (re.compile(r'(\d+(?:[.,]\d+)?)\s*(час\w*)'), "час"),
-    (re.compile(r'(\d+(?:[.,]\d+)?)\s*₽'), "₽"),
-    (re.compile(r'(\d+(?:[.,]\d+)?)\s*(УЕТ)'), "УЕТ"),
     (re.compile(r'(\d+(?:[.,]\d+)?)\s*%'), "%"),
-    (re.compile(r'(\d+(?:[.,]\d+)?)\s*(заказ\w*|заказ)'), "заказ"),
-    (re.compile(r'(\d+(?:[.,]\d+)?)\s*(повар\w*|курьер\w*)'), "персонал"),
+    (re.compile(r'(\d+(?:[.,]\d+)?)\s*[$€£₽¥]'), "currency"),
+    (re.compile(r'(\d+(?:[.,]\d+)?)\s*(?:min(?:ute)?s?|sec(?:ond)?s?|hours?|days?)\b', re.IGNORECASE), "time"),
+    (re.compile(r'(\d+(?:[.,]\d+)?)\s*(?:ms|s|m|h|d)\b'), "time"),
+    (re.compile(r'(\d+(?:[.,]\d+)?)\s*(?:KB|MB|GB|TB)\b', re.IGNORECASE), "size"),
 ]
 
 
@@ -1219,9 +1208,9 @@ def _print_edge_context(db, arrow, ref_id, ref_type, ref_title,
     """Print a single edge with its source file snippet."""
     ref_title = ref_title or ""
     print(f"\n  {arrow} [{ref_type or '?'}] {ref_id} — {ref_title[:55]}")
-    print(f"    Ссылка в: {source_file}:{line_number}")
+    print(f"    Ref in: {source_file}:{line_number}")
     if edge_context:
-        print(f"    Контекст: {edge_context[:70]}")
+        print(f"    Context: {edge_context[:70]}")
 
     if line_number and source_file:
         full_path = _resolve_file(db, source_file)
@@ -1243,7 +1232,7 @@ def _check_numeric_conflicts(db, aid, fname, full_path,
     """Check if numeric values in this artifact conflict with directly connected artifacts.
 
     Only compares numbers that share the same unit AND have overlapping context words
-    (to avoid false positives like "таймер 30 мин" vs "доставка 10 мин").
+    (to avoid false positives like "timer 30 min" vs "delivery 10 min").
     Only checks direct neighbors, not FILE nodes.
     """
     if not nums:
@@ -1301,18 +1290,16 @@ def _check_numeric_conflicts(db, aid, fname, full_path,
                         shared = ", ".join(sorted(overlap)[:3])
                         issues.append(("NUM", aid,
                                        f"{s1}: {v1} {unit} vs {s2}: {v2} {unit}"
-                                       f" (общий контекст: {shared})"))
-
-
-_STOP_WORDS = frozenset("в на из по с к у о а и или не для при до за от".split())
+                                       f" (shared context: {shared})"))
 
 
 def _context_keywords(line: str) -> frozenset:
-    """Extract meaningful keywords from a context line for matching."""
+    """Extract meaningful keywords from a context line for matching.
+    Uses word length (>=4) to skip stop words in any language.
+    """
     words = set()
-    for w in re.findall(r'[а-яёА-ЯЁa-zA-Z_]{4,}', line.lower()):
-        if w not in _STOP_WORDS:
-            words.add(w[:6])  # truncate for crude stemming
+    for w in re.findall(r'[^\W\d]{4,}', line.lower(), re.UNICODE):
+        words.add(w[:6])  # truncate for crude stemming
     return frozenset(words)
 
 
@@ -1343,7 +1330,7 @@ def _check_bidirectional(db, aid, atype, issues, expected_bidir=None):
         ).fetchone()
         if not rev:
             issues.append(("REF", aid,
-                           f"{aid}→{tid} есть, но {tid}→{aid} отсутствует"))
+                           f"{aid}→{tid} exists, but {tid}→{aid} is missing"))
 
 
 def _check_empty_links(db, aid, issues):
@@ -1361,8 +1348,8 @@ def _check_empty_links(db, aid, issues):
                 snippet = _read_snippet(full_path, e["line_number"], 1)
                 if snippet and len(snippet.strip()) < 20:
                     issues.append(("EMPTY", aid,
-                                   f"→{e['target_id']} в {e['source_file']}:{e['line_number']}"
-                                   " — голая ссылка без контекста"))
+                                   f"→{e['target_id']} in {e['source_file']}:{e['line_number']}"
+                                   " — bare reference without context"))
 
 
 
@@ -1709,6 +1696,482 @@ def audit(ctx, top):
         prio = "HIGH" if c["priority"] == "high" else "    "
         reasons = ", ".join(c["reasons"])
         print(f"  {prio}  {c['id']:12s} [{c['type']:4s}]  {reasons}")
+
+
+# ── Lint command ──────────────────────────────────────────────────
+
+_TODO_DEFAULT = re.compile(
+    r'(?:TODO|TBD|FIXME|\?\?\?)', re.IGNORECASE
+)
+_HEADING_RE = re.compile(r'^(#{1,6})\s+(.+)')
+_GLOSSARY_ROW_RE = re.compile(
+    r'^\|\s*\*\*(.+?)\*\*\s*\|\s*(.+?)\s*\|'
+)
+_CODE_FENCE_RE = re.compile(r'^```')
+
+
+class _FileCache:
+    """Lazy file-content cache to avoid re-reading files across checks."""
+    def __init__(self):
+        self._cache: dict = {}
+
+    def get_lines(self, path: str) -> Optional[List[str]]:
+        if path not in self._cache:
+            try:
+                self._cache[path] = Path(path).read_text(encoding="utf-8").splitlines()
+            except Exception:
+                self._cache[path] = None
+        return self._cache[path]
+
+
+def _artifact_line_range(lines: List[str], start: int, heading_level: int) -> Tuple[int, int]:
+    """Return (start, end) line indices for an artifact section.
+
+    From `start` until the next heading of same or higher level, or EOF.
+    start is 1-based line number, returns 0-based (start_idx, end_idx).
+    """
+    start_idx = max(start - 1, 0)
+    end_idx = len(lines)
+    for i in range(start_idx + 1, len(lines)):
+        m = _HEADING_RE.match(lines[i])
+        if m and len(m.group(1)) <= heading_level:
+            end_idx = i
+            break
+    return start_idx, end_idx
+
+
+def _lint_todo_markers(db, fcache: _FileCache, todo_re: re.Pattern,
+                       node_id: Optional[str] = None) -> list:
+    """Check 1: find TODO/TBD/FIXME markers in artifact source files."""
+    findings = []
+    query = ("SELECT id, type, source_file, line_number FROM artifacts "
+             "WHERE defined = 1 AND type NOT IN ('FILE', 'CODE')")
+    params: list = []
+    if node_id:
+        query += " AND id = ?"
+        params.append(node_id)
+
+    for row in db.execute(query, params).fetchall():
+        fname = row["source_file"]
+        full_path = _resolve_file(db, fname)
+        if not full_path:
+            continue
+        lines = fcache.get_lines(full_path)
+        if not lines:
+            continue
+
+        art_line = row["line_number"] or 1
+        # Determine heading level from the definition line
+        m = _HEADING_RE.match(lines[art_line - 1]) if art_line <= len(lines) else None
+        hlevel = len(m.group(1)) if m else 2
+        start_idx, end_idx = _artifact_line_range(lines, art_line, hlevel)
+
+        for i in range(start_idx, end_idx):
+            match = todo_re.search(lines[i])
+            if match:
+                snippet = lines[i].strip()[:80]
+                findings.append({
+                    "severity": "WARN", "category": "TODO_TBD",
+                    "artifact_id": row["id"], "file": fname,
+                    "line": i + 1, "message": snippet,
+                })
+    return findings
+
+
+def _lint_empty_sections(db, fcache: _FileCache,
+                         node_id: Optional[str] = None) -> list:
+    """Check 2: detect markdown headings with no content below them."""
+    findings = []
+    # Collect unique source files for defined artifacts
+    query = ("SELECT DISTINCT source_file FROM artifacts "
+             "WHERE defined = 1 AND type NOT IN ('FILE', 'CODE')")
+    if node_id:
+        query = ("SELECT source_file FROM artifacts "
+                 "WHERE id = ? AND defined = 1 AND type NOT IN ('FILE', 'CODE')")
+
+    params = [node_id] if node_id else []
+    files_seen: set = set()
+
+    for row in db.execute(query, params).fetchall():
+        fname = row["source_file"]
+        if fname in files_seen:
+            continue
+        files_seen.add(fname)
+        full_path = _resolve_file(db, fname)
+        if not full_path:
+            continue
+        lines = fcache.get_lines(full_path)
+        if not lines:
+            continue
+
+        # Walk headings, check for empty content between consecutive headings
+        headings: list = []  # (line_idx, level, text)
+        for i, line in enumerate(lines):
+            m = _HEADING_RE.match(line)
+            if m:
+                headings.append((i, len(m.group(1)), m.group(2).strip()))
+
+        for idx, (line_idx, level, text) in enumerate(headings):
+            # Determine end of section
+            if idx + 1 < len(headings):
+                next_idx = headings[idx + 1][0]
+            else:
+                next_idx = len(lines)
+
+            # Check if section body is empty (only blank lines or nothing)
+            body = lines[line_idx + 1:next_idx]
+            has_content = any(l.strip() for l in body)
+            if not has_content and level >= 2:
+                # Find which artifact owns this section
+                owner = db.execute(
+                    "SELECT id FROM artifacts WHERE source_file = ? "
+                    "AND line_number <= ? AND defined = 1 "
+                    "AND type NOT IN ('FILE', 'CODE') "
+                    "ORDER BY line_number DESC LIMIT 1",
+                    (fname, line_idx + 1)
+                ).fetchone()
+                aid = owner["id"] if owner else "?"
+                findings.append({
+                    "severity": "WARN", "category": "EMPTY_SECTION",
+                    "artifact_id": aid, "file": fname,
+                    "line": line_idx + 1,
+                    "message": f"empty section \"{text}\"",
+                })
+    return findings
+
+
+def _parse_glossary(glossary_path: str) -> List[Tuple[str, str]]:
+    """Parse glossary.md, return list of (canonical, foreign_term) pairs."""
+    pairs: list = []
+    try:
+        text = Path(glossary_path).read_text(encoding="utf-8")
+    except Exception:
+        return pairs
+    for line in text.splitlines():
+        m = _GLOSSARY_ROW_RE.match(line)
+        if m:
+            ru = m.group(1).strip()
+            en = m.group(2).strip()
+            # Skip short all-caps abbreviations (KDS, ETA, etc.) —
+            # they are typically used as-is in Russian text
+            if en.isupper() and len(en) <= 6:
+                continue
+            if en and en != ru and '|' not in en:
+                pairs.append((ru, en))
+    return pairs
+
+
+def _lint_terminology(db, fcache: _FileCache, root: Path, config,
+                      node_id: Optional[str] = None) -> list:
+    """Check 3: flag non-canonical terms based on glossary."""
+    findings = []
+
+    # Find glossary file
+    lint_cfg = config.lint if config else None
+    glossary_path = None
+    if lint_cfg and lint_cfg.glossary_file:
+        candidate = root / lint_cfg.glossary_file
+        if candidate.exists():
+            glossary_path = str(candidate)
+    if not glossary_path:
+        # Auto-discover in scan dirs
+        for sd in (config.scan_dirs if config else []):
+            candidate = root / sd / "glossary.md"
+            if candidate.exists():
+                glossary_path = str(candidate)
+                break
+    if not glossary_path:
+        return findings
+
+    pairs = _parse_glossary(glossary_path)
+    if not pairs:
+        return findings
+
+    # Build regex: search for EN terms in artifact files
+    # We match whole words using word boundaries
+    en_to_ru = {}
+    patterns = []
+    for ru, en in pairs:
+        # Skip if EN term is a common short word
+        if len(en) < 3:
+            continue
+        en_to_ru[en.lower()] = ru
+        patterns.append(re.escape(en))
+
+    if not patterns:
+        return findings
+    term_re = re.compile(r'\b(' + '|'.join(patterns) + r')\b', re.IGNORECASE)
+
+    # Scan artifacts
+    query = ("SELECT id, source_file, line_number FROM artifacts "
+             "WHERE defined = 1 AND type NOT IN ('FILE', 'CODE')")
+    params: list = []
+    if node_id:
+        query += " AND id = ?"
+        params.append(node_id)
+
+    seen: set = set()  # (artifact_id, en_term) — one finding per term per artifact
+    for row in db.execute(query, params).fetchall():
+        fname = row["source_file"]
+        full_path = _resolve_file(db, fname)
+        if not full_path or full_path == glossary_path:
+            continue
+        lines = fcache.get_lines(full_path)
+        if not lines:
+            continue
+
+        art_line = row["line_number"] or 1
+        m = _HEADING_RE.match(lines[art_line - 1]) if art_line <= len(lines) else None
+        hlevel = len(m.group(1)) if m else 2
+        start_idx, end_idx = _artifact_line_range(lines, art_line, hlevel)
+
+        in_code_fence = False
+        for i in range(start_idx, end_idx):
+            line = lines[i]
+            if _CODE_FENCE_RE.match(line):
+                in_code_fence = not in_code_fence
+                continue
+            if in_code_fence:
+                continue
+            # Skip inline code
+            clean = re.sub(r'`[^`]+`', '', line)
+            for match in term_re.finditer(clean):
+                en_term = match.group(1)
+                canonical = en_to_ru.get(en_term.lower(), "?")
+                key = (row["id"], en_term.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                findings.append({
+                    "severity": "INFO", "category": "TERMINOLOGY",
+                    "artifact_id": row["id"], "file": fname,
+                    "line": i + 1,
+                    "message": f"\"{en_term}\" → canonical \"{canonical}\"",
+                })
+    return findings
+
+
+def _lint_stale(db, root: Path, config,
+                node_id: Optional[str] = None) -> list:
+    """Check 4: find artifacts whose source file hasn't been updated since the latest meeting."""
+    import subprocess
+    from datetime import datetime, timedelta
+
+    findings = []
+    lint_cfg = config.lint if config else None
+    meetings_dir = root / (lint_cfg.meetings_dir if lint_cfg else "00_Inputs/meetings_refined")
+    threshold_days = lint_cfg.stale_threshold_days if lint_cfg else 30
+
+    if not meetings_dir.exists():
+        return findings
+
+    # Extract meeting dates from filenames
+    date_re = re.compile(r'(\d{4}-\d{2}-\d{2})')
+    meeting_dates: list = []
+    for f in meetings_dir.iterdir():
+        m = date_re.search(f.name)
+        if m:
+            try:
+                meeting_dates.append(datetime.strptime(m.group(1), "%Y-%m-%d"))
+            except ValueError:
+                pass
+    if not meeting_dates:
+        return findings
+    latest_meeting = max(meeting_dates)
+    cutoff = latest_meeting - timedelta(days=threshold_days)
+
+    # Get unique source files for artifacts
+    query = ("SELECT id, source_file FROM artifacts "
+             "WHERE defined = 1 AND type NOT IN ('FILE', 'CODE')")
+    params: list = []
+    if node_id:
+        query += " AND id = ?"
+        params.append(node_id)
+
+    file_to_arts: dict = {}
+    for row in db.execute(query, params).fetchall():
+        fname = row["source_file"]
+        full_path = _resolve_file(db, fname)
+        if full_path:
+            file_to_arts.setdefault(full_path, []).append(row["id"])
+
+    # Get git last-modified date for each file
+    for full_path, art_ids in file_to_arts.items():
+        try:
+            result = subprocess.run(
+                ["git", "log", "-1", "--format=%aI", "--", full_path],
+                capture_output=True, text=True, cwd=str(root), timeout=10,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                continue
+            # Parse ISO date (e.g. 2026-03-10T14:30:00+03:00)
+            date_str = result.stdout.strip()[:10]
+            file_date = datetime.strptime(date_str, "%Y-%m-%d")
+        except Exception:
+            continue
+
+        if file_date < cutoff:
+            days_ago = (latest_meeting - file_date).days
+            for aid in art_ids:
+                findings.append({
+                    "severity": "WARN", "category": "STALE",
+                    "artifact_id": aid, "file": Path(full_path).name,
+                    "line": 0,
+                    "message": (f"git: {file_date.strftime('%Y-%m-%d')}, "
+                                f"latest meeting: {latest_meeting.strftime('%Y-%m-%d')} "
+                                f"({days_ago}d behind)"),
+                })
+    return findings
+
+
+def _lint_code_coverage(db, config,
+                        node_id: Optional[str] = None) -> list:
+    """Check 5: find artifacts with no @trace references from code."""
+    findings = []
+    if not config or not config.code or not config.code.coverage_types:
+        return findings
+
+    for art_type in config.code.coverage_types:
+        query = ("SELECT a.id, a.title FROM artifacts a "
+                 "WHERE a.type = ? AND a.defined = 1 "
+                 "AND NOT EXISTS ("
+                 "  SELECT 1 FROM edges e "
+                 "  WHERE e.target_id = a.id AND e.source_id LIKE 'CODE:%'"
+                 ")")
+        params: list = [art_type]
+        if node_id:
+            query += " AND a.id = ?"
+            params.append(node_id)
+
+        for row in db.execute(query, params).fetchall():
+            findings.append({
+                "severity": "INFO", "category": "CODE_COVERAGE",
+                "artifact_id": row["id"], "file": "",
+                "line": 0,
+                "message": "no @trace references from code",
+            })
+    return findings
+
+
+def do_lint(db, root: Path, config, node_id: Optional[str] = None,
+            quick: bool = False) -> list:
+    """Run all lint checks and return a list of findings."""
+    fcache = _FileCache()
+    findings: list = []
+
+    # Build TODO regex from config
+    lint_cfg = config.lint if config else None
+    patterns = lint_cfg.todo_patterns if lint_cfg else _TODO_DEFAULT.pattern
+    if isinstance(patterns, list):
+        todo_re = re.compile(r'(?:' + '|'.join(re.escape(p) for p in patterns) + r')',
+                             re.IGNORECASE)
+    else:
+        todo_re = _TODO_DEFAULT
+
+    findings.extend(_lint_todo_markers(db, fcache, todo_re, node_id))
+    findings.extend(_lint_empty_sections(db, fcache, node_id))
+    findings.extend(_lint_terminology(db, fcache, root, config, node_id))
+
+    if not quick:
+        findings.extend(_lint_stale(db, root, config, node_id))
+
+    findings.extend(_lint_code_coverage(db, config, node_id))
+
+    # Sort: ERR first, then WARN, then INFO; within same severity — by artifact
+    sev_order = {"ERR": 0, "WARN": 1, "INFO": 2}
+    findings.sort(key=lambda f: (sev_order.get(f["severity"], 9),
+                                 f["category"], f["artifact_id"]))
+    return findings
+
+
+@cli.command()
+@click.argument("node_id", required=False, default=None)
+@click.option("--quick", is_flag=True, help="Skip git-based checks (stale)")
+@click.pass_context
+def lint(ctx, node_id, quick):
+    """Content quality lint: TODO markers, empty sections, terminology, staleness, code coverage."""
+    from graph_ba.config import load_config, LintConfig
+
+    db = _conn(ctx)
+    root = Path(ctx.obj.get("root", ".")).resolve()
+
+    try:
+        config = load_config(root)
+    except FileNotFoundError:
+        config = None
+
+    findings = do_lint(db, root, config, node_id, quick)
+    db.close()
+
+    # Count by severity
+    counts = {"ERR": 0, "WARN": 0, "INFO": 0}
+    for f in findings:
+        counts[f["severity"]] = counts.get(f["severity"], 0) + 1
+
+    # JSON output
+    if _json_out(ctx, {
+        "summary": {
+            "total": len(findings),
+            "errors": counts["ERR"],
+            "warnings": counts["WARN"],
+            "info": counts["INFO"],
+        },
+        "findings": findings,
+    }):
+        if counts["ERR"] > 0:
+            sys.exit(1)
+        return
+
+    # Human-readable output
+    scope = f" ({node_id})" if node_id else ""
+    print(f"BA Lint{scope}")
+    print(f"{'═' * 50}")
+
+    if not findings:
+        print("\n✓ No issues found")
+        return
+
+    # Group by category
+    by_cat: dict = {}
+    for f in findings:
+        by_cat.setdefault(f["category"], []).append(f)
+
+    cat_order = ["TODO_TBD", "EMPTY_SECTION", "TERMINOLOGY", "STALE", "CODE_COVERAGE"]
+    cat_labels = {
+        "TODO_TBD": "Incompleteness markers",
+        "EMPTY_SECTION": "Empty sections",
+        "TERMINOLOGY": "Terminology vs glossary",
+        "STALE": "Stale artifacts",
+        "CODE_COVERAGE": "Code coverage",
+    }
+
+    for cat in cat_order:
+        items = by_cat.get(cat, [])
+        if not items:
+            continue
+        label = cat_labels.get(cat, cat)
+        print(f"\n── {label} ({len(items)}) ──")
+        for f in items:
+            loc = f["file"]
+            if f["line"]:
+                loc += f":{f['line']}"
+            sev = f["severity"]
+            print(f"  [{sev:4s}]  {f['artifact_id']:12s}  {loc}")
+            print(f"          {f['message']}")
+
+    # Summary
+    print(f"\n{'─' * 50}")
+    parts = []
+    if counts["ERR"]:
+        parts.append(f"{counts['ERR']} ERR")
+    if counts["WARN"]:
+        parts.append(f"{counts['WARN']} WARN")
+    if counts["INFO"]:
+        parts.append(f"{counts['INFO']} INFO")
+    print(f"Lint: {', '.join(parts)}  (total {len(findings)})")
+
+    if counts["ERR"] > 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

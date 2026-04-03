@@ -74,6 +74,17 @@ class CodeConfig:
 
 
 @dataclass
+class LintConfig:
+    """Configuration for the lint command."""
+    glossary_file: Optional[str] = None
+    meetings_dir: str = "00_Inputs/meetings_refined"
+    stale_threshold_days: int = 30
+    todo_patterns: List[str] = field(default_factory=lambda: [
+        "TODO", "TBD", "FIXME", "???",
+    ])
+
+
+@dataclass
 class ProjectConfig:
     """Full project configuration."""
     scan_dirs: List[str]
@@ -91,6 +102,8 @@ class ProjectConfig:
     expected_cross_layer: Dict[str, List[Tuple[str, str]]]  # type -> [(target_type, label)]
     # Code traceability
     code: Optional[CodeConfig] = None
+    # Lint
+    lint: Optional[LintConfig] = None
 
 
 def load_config(root: Path) -> ProjectConfig:
@@ -208,6 +221,17 @@ def load_config(root: Path) -> ProjectConfig:
             coverage_types=code_data.get("coverage_types", []),
         )
 
+    # ── Lint config ──
+    lint_data = data.get("lint")
+    lint_config = None
+    if lint_data:
+        lint_config = LintConfig(
+            glossary_file=lint_data.get("glossary_file"),
+            meetings_dir=lint_data.get("meetings_dir", "00_Inputs/meetings_refined"),
+            stale_threshold_days=lint_data.get("stale_threshold_days", 30),
+            todo_patterns=lint_data.get("todo_patterns", LintConfig().todo_patterns),
+        )
+
     return ProjectConfig(
         scan_dirs=scan_dirs,
         types=types,
@@ -222,6 +246,7 @@ def load_config(root: Path) -> ProjectConfig:
         expected_bidir=expected_bidir,
         expected_cross_layer=expected_cross_layer,
         code=code_config,
+        lint=lint_config,
     )
 
 

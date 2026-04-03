@@ -836,9 +836,9 @@ def export_html(G: nx.DiGraph, config: ProjectConfig, path: Path):
         tip_parts = [f"<b>{n}</b>"]
         if title_text:
             tip_parts.append(title_text)
-        tip_parts.append(f"<i>Тип:</i> {group_label}")
+        tip_parts.append(f"<i>Type:</i> {group_label}")
         if source_file:
-            tip_parts.append(f"<i>Файл:</i> {source_file}")
+            tip_parts.append(f"<i>File:</i> {source_file}")
         tip_parts.append(f"<i>In:</i> {in_deg} | <i>Out:</i> {out_deg}")
         if not defined:
             tip_parts.append("<b style='color:red'>Not defined</b>")

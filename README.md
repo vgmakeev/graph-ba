@@ -1,404 +1,140 @@
 # Graph BA
 
-Config-driven traceability graph for business analysis artifacts. Scans markdown documents, builds a cross-reference graph in SQLite, and provides CLI commands for navigation, validation, and anomaly detection.
+Traceability graph for business analysis artifacts. Scans markdown files and source code, builds a cross-reference graph in SQLite, and provides CLI for search, validation, and linting.
 
-## The problem
+## Why
 
-A typical BA project has hundreds of markdown documents: requirements, features, business rules, processes, domain models. They reference each other — `REQ-01` mentions `F-01`, `BP-03` references `BR.2`, and so on.
+BA projects have hundreds of interlinked markdown documents. Cross-references between them break silently — renamed IDs, missing links, conflicting numbers, stale content. Manual checking doesn't scale.
 
-Over time, these cross-references break silently:
-- Someone renames `REQ-05` to `REQ-5` and 12 links go dangling
-- A new feature `F-08` has no requirements linked — nobody notices for weeks
-- `BP-03` says "delivery within 30 min", but `BR.7` says "45 min" — the conflict hides across two files
-- Requirement `REQ-12` becomes a bottleneck with 40 inbound links — a change there cascades everywhere
-
-Manual cross-checking doesn't scale past ~50 documents. You need a graph.
+Graph BA turns your documents into a queryable graph and lints them automatically. Artifact types and ID patterns are defined in a TOML config — the tool works with any naming convention.
 
 ## What it does
 
-Graph BA scans your markdown files and source code, extracts artifact definitions and cross-references using regex patterns from a TOML config, and builds a queryable graph in SQLite.
-
 ```
 $ graph-ba import
-Imported: 214 artifacts, 847 edges, 12 semantic clusters
+Imported: 356 artifacts, 2059 edges, 16 semantic clusters
 
-$ graph-ba anomalies
-Graph anomalies (214 nodes, 847 edges):
+$ graph-ba lint
+── Маркеры незавершённости (24) ──
+  [WARN]  BP-08   ...md:80   <УТОЧНИТЬ> Ручной стоп-лист ...
+── Пустые секции (29) ──
+  [WARN]  BP-02   ...md:112  пустая секция "Исключения"
+── Терминология vs глоссарий (81) ──
+  [INFO]  BP-09   ...md:22   "Courier" → каноническое "Курьер"
+Lint: 134 WARN, 81 INFO
 
-── CYCLE ──
-  2 cycle(s) found
-    Cycle: BP-01 → F-01 → REQ-01 → REQ-02
-    Cycle: BR.3 → F-05 → REQ-11
-── ROOT ──
-  3 root node(s) (no incoming edges)
-    [FEAT] (1): F-08
-    [REQ] (2): REQ-03, REQ-12
-── BRIDGE ──
-  2 bridge edge(s) (critical connections)
-    F-01 — REQ-02
-    BP-05 — BR.9
-
-$ graph-ba coverage
-Cross-layer coverage matrix:
-
-  FEAT     ↔ REQ         8/10   ████████████████░░░░   80.0%  [WARN]
-  REQ      ↔ BP         12/15   ████████████████░░░░   80.0%  [WARN]
-  REQ      ↔ BR         11/15   ██████████████░░░░░░   73.3%  [WARN]
-
-$ graph-ba impact REQ-01
-Каскадное влияние REQ-01: 8 артефактов
-  [BP] (2): BP-01, BP-03
-  [BR] (3): BR.1, BR.2, BR.5
-  [FEAT] (3): F-01, F-02, F-04
-```
-
-The main use case is **semantic review** — gathering the full text of all linked artifacts to check for completeness, contradictions, and missing links:
-
-```
-$ graph-ba review F-01 --semantic --lines 20
-══════════════════════════════════════════════════════════════════════
-  REVIEW: F-01 — Order Management
-  Тип: FEAT  |  Файл: features.md:3
-══════════════════════════════════════════════════════════════════════
-
-⚠ [STRUCT] Missing section: Scope
-⚠ [GAP] No links to type: BR (business rules)
-
-── СВЯЗАННЫЕ АРТЕФАКТЫ ──
-
-  → [REQ] REQ-01 — Must manage orders
-    ...first 20 lines of REQ-01 content...
-
-  ← [BR] BR.1 — Base Pricing
-    ...first 20 lines of BR.1 content...
-```
-
-For a full project audit, `audit` combines all checks and produces a prioritized review list:
-
-```
 $ graph-ba audit
-Global Audit (214 nodes, 847 edges)
+── Issues (47) ──
+  DANGLING (3), COVERAGE_GAP (8), MISSING_BIDIR (12) ...
+── Review Candidates (15) ──
+  HIGH  REQ-99  DANGLING
+  HIGH  F-01    BRIDGE, CYCLE
 
-── Issues (12) ──
-
-  CYCLE (2):
-    BP-01 → F-01 → REQ-01 → REQ-02
-    BR.3 → F-05 → REQ-11
-  DANGLING (1):
-    REQ-99 ← F-01, BP-03
-  COVERAGE_GAP (2):
-    FEAT→REQ: 80.0% (missing: F-08, F-09)
-    REQ→BR: 73.3% (missing: REQ-03, REQ-07, REQ-12, REQ-14)
-  MISSING_CROSS_LAYER (3):
-    F-08 → needs REQ (requirements)
-    F-09 → needs REQ (requirements)
-    F-10 → needs REQ (requirements)
-
-── Review Candidates (9) ──
-  HIGH  F-01         [FEAT]  BRIDGE, CYCLE
-  HIGH  REQ-99       [REQ ]  DANGLING
-  HIGH  REQ-01       [REQ ]  CYCLE
-        F-08         [FEAT]  COVERAGE_GAP, MISSING_CROSS_LAYER, ROOT
-        F-09         [FEAT]  COVERAGE_GAP, MISSING_CROSS_LAYER
-        REQ-03       [REQ ]  COVERAGE_GAP, ROOT, SINK
+$ graph-ba review F-01 --semantic
+  REVIEW: F-01 — Order Management
+  ⚠ [GAP] No links to type: BR (business rules)
+  ── СВЯЗАННЫЕ АРТЕФАКТЫ (8) ──
+  → REQ-01 — Must manage orders ...
 ```
-
-All output is designed for both human reading and [Claude Code](https://claude.ai/claude-code) agent pipelines (`--json` flag returns structured JSON).
 
 ## Install
 
-Requires Python 3.11+.
+Python 3.11+.
 
 ```bash
-# Run directly with uvx (no install needed)
 uvx --from git+https://github.com/vgmakeev/graph-ba graph-ba --help
-
-# Or install as a tool
+# or
 uv tool install git+https://github.com/vgmakeev/graph-ba
-
-# Or add to a project
-uv add --dev git+https://github.com/vgmakeev/graph-ba
 ```
 
 ## Quick start
 
 ```bash
-# 1. Create a config in your project root
-graph-ba init
-
-# 2. Edit graph-ba.toml — define artifact types, scan rules, validation
-
-# 3. Scan documents and build the graph
-graph-ba import
-
-# 4. Semantic review of an artifact (the main use case)
-graph-ba review F-01 --semantic --lines 20
-
-# 5. Explore
-graph-ba search "delivery"
-graph-ba anomalies
-graph-ba impact REQ-01
+graph-ba init          # create graph-ba.toml template
+# edit graph-ba.toml — define your artifact types and scan rules
+graph-ba import        # scan docs → build graph
+graph-ba lint          # content quality: TODOs, empty sections, terminology, staleness
+graph-ba audit         # structure quality: dangling refs, cycles, coverage gaps
 ```
 
 ## Commands
 
-| Command | Description |
+| Command | What it does |
 |---|---|
-| `import` | Scan artifacts and populate the SQLite DB |
-| `init` | Create a template `graph-ba.toml` |
-| `search <query>` | FTS5 full-text search across titles and IDs |
-| `node <id>` | Show node details and immediate neighbors |
-| `path <from> <to>` | Shortest path between two artifacts |
-| `impact <id>` | Cascade analysis — what does changing this affect? |
-| `review <id>` | Validate structure + show context from linked artifacts |
-| `review <id> --semantic` | Full text of linked artifacts (default 20 lines each) |
-| `review <id> --semantic --lines 0` | Full text with no line limit per artifact |
-| `anomalies` | Detect islands, cycles, bridges, bottlenecks, dangling refs |
+| `import` | Scan artifacts and build SQLite DB |
+| **`lint [ID]`** | Content lint: TODO markers, empty sections, terminology, staleness, code coverage |
+| **`audit`** | Structural audit: dangling refs, cycles, coverage gaps, bottlenecks |
+| `review <ID> --semantic` | Full text of all linked artifacts for deep validation |
+| `search <query>` | FTS5 full-text search |
+| `node <ID>` | Node details + neighbors |
+| `path <from> <to>` | Shortest path between artifacts |
+| `impact <ID>` | Cascade analysis |
 | `coverage` | Cross-layer coverage matrix |
-| `code-refs` | Show code-to-artifact traceability links |
-| `code-refs --by-artifact` | Group by artifact instead of by file |
-| `code-refs --type FEAT` | Filter by artifact type |
-| `audit` | Global audit: anomalies + coverage + prioritized review candidates |
-| `sql <query>` | Raw SQL against the DB |
+| `code-refs` | Code → artifact links (`@trace` comments) |
+| `sql <query>` | Raw SQL |
 
-Global options: `--root <path>` (project root, default `.`), `--db <path>` (SQLite DB path), `--json` (output as JSON for programmatic use).
+All commands: `--json` for machine output, `--root`/`--db` for paths.
 
 ## Configuration
 
-All artifact types, scan rules, and validation expectations are defined in `graph-ba.toml` at the project root. Run `graph-ba init` to generate a template.
-
-### Step 1: Define artifact types (`[types.*]`)
-
-Each artifact type needs a regex for finding references in text and a regex for classifying ID strings. This is the foundation — graph-ba uses these patterns to discover cross-references automatically.
+Everything is config-driven via `graph-ba.toml`. Define your own artifact types, ID patterns, scan rules, and validation expectations. The tool doesn't assume any specific naming convention.
 
 ```toml
-# Simple numeric IDs: REQ-01, REQ-123
+[scan]
+dirs = ["docs"]
+
+# Define artifact types with regex patterns
 [types.REQ]
 label = "Requirements"
-ref = '(?<![A-Za-z])(REQ-\d{2,4})(?!\d)'     # regex for finding references (group 1 = full ID)
-classify = 'REQ-\d{2,4}'                       # regex for classifying an ID string (fullmatch)
+ref = '(?<![A-Za-z])(REQ-\d{2,4})(?!\d)'
+classify = 'REQ-\d{2,4}'
 
-# Dotted IDs: BR.1, BR.2.1
-[types.BR]
-label = "Business Rules"
-ref = '(?<![A-Za-z.])(BR\.\d+(?:\.\d+)?)(?!\d)'
-classify = 'BR\.\d+(?:\.\d+)?'
-
-# Prefixed with letters: FEAT-01, BP-03
-[types.FEAT]
-label = "Features"
-ref = '(?<![A-Za-z])(FEAT-\d{2,4})(?!\d)'
-classify = 'FEAT-\d{2,4}'
-
-# Restrict pattern to specific dirs (avoids false matches)
-[types.M]
-label = "Modules"
-ref = '(?<![A-Za-z])(M\d{2})(?!\d)'
-classify = 'M\d{2}'
-restrict_to = ["docs/modules"]
-```
-
-**How references work:** When graph-ba scans a markdown file and finds text like `"see REQ-01 and BR.2"`, it matches these against the `ref` patterns and creates edges from the current artifact to `REQ-01` and `BR.2`.
-
-### Step 2: Define where artifacts are declared (`[[definitions]]`)
-
-Tell graph-ba where each artifact is **defined** — in a table row or a heading:
-
-```toml
-# Table mode: artifacts defined as rows in a markdown table
-# | REQ-01 | User authentication | Must support SSO |
+# Where artifacts are defined (heading or table)
 [[definitions]]
 type = "REQ"
-file = "docs/requirements.md"                  # supports glob: "docs/reqs/REQ-*.md"
-mode = "table"
-pattern = '^\|\s*(REQ-\d{2,4})\s*\|'           # group 1 = ID, group 2 = title (optional)
+file = "docs/requirements.md"       # supports globs
+mode = "table"                       # or "heading"
+pattern = '^\|\s*(REQ-\d{2,4})\s*\|'
 
-# Heading mode: artifacts defined as markdown headings
-# ## FEAT-01 — Online Ordering
-[[definitions]]
-type = "FEAT"
-file = "docs/features/*.md"                    # glob pattern
-mode = "heading"
-pattern = '^##\s+(FEAT-\d{2,4})\s*[—–\-]\s*(.*)'  # group 1 = ID, group 2 = title
-```
-
-### Step 3: Configure cross-reference extraction (`[[index_tables]]`)
-
-For tables where each row contains an artifact ID and references to other artifacts:
-
-```toml
-# Extracts cross-refs from rows like: | FEAT-01 | REQ-01, REQ-02 | BR.1 |
-[[index_tables]]
-file = "docs/traceability-matrix.md"
-first_col = '^\|\s*(FEAT-\d{2,4})\s*\|'       # regex for the source ID in column 1
-```
-
-### Step 4: Set validation rules (`[review]`, `[[coverage]]`)
-
-These rules are used by `graph-ba review --semantic` and `graph-ba coverage`:
-
-```toml
-# Expected cross-layer links (for coverage matrix)
+# Expected coverage between layers
 [[coverage]]
 source = "FEAT"
 target = "REQ"
 label = "FEAT → REQ"
 
-[[coverage]]
-source = "REQ"
-target = "BR"
-label = "REQ → BR"
-
-# Validation rules for review
+# Validation rules
 [review]
-# Required sections per artifact type
-required_sections = { "FEAT" = ["Goal", "Scope", "Acceptance Criteria"] }
-# Which link types should be bidirectional
-expected_bidir = { "FEAT" = ["REQ", "BR"] }
+required_sections = { "FEAT" = ["Goal", "Scope"] }
+expected_bidir = { "FEAT" = ["REQ"] }
 
-# Expected cross-layer links for review validation
-# [[review.expected_cross_layer.FEAT]]
-# type = "REQ"
-# label = "requirements"
-```
-
-### Step 5: Configure code traceability (`[code]`)
-
-Link source code back to BA artifacts using `@trace` comments:
-
-```toml
+# Code traceability (// @trace: F-01, REQ-01)
 [code]
-dirs = ["src", "app"]                    # directories to scan
-extensions = ["ts", "tsx", "py", "go"]   # file extensions (defaults to 30+ languages)
-marker = "@trace"                        # comment marker (default)
-coverage_types = ["FEAT", "REQ"]         # artifact types to check for code coverage
-```
+dirs = ["src"]
+coverage_types = ["FEAT", "REQ"]
 
-In your source code, add `@trace` comments referencing artifact IDs:
+# Content linting
+[lint]
+glossary_file = "docs/glossary.md"
+meetings_dir = "inputs/meetings_refined"
+stale_threshold_days = 30
+todo_patterns = ["TODO", "TBD", "FIXME", "???"]
 
-```typescript
-// @trace: F-01, REQ-01
-export function processOrder(order: Order) {
-  // @trace: BR.1
-  const price = calculatePrice(order);
-  return price;
-}
-```
-
-```python
-# @trace: F-02, BP-01
-def deliver(order):
-    # @trace: BR.2
-    validate_sla(order)
-```
-
-Supported comment syntaxes: `//`, `#`, `/* */`, `--` (covers TypeScript, Python, Go, Rust, SQL, Lua, and most common languages).
-
-Each file with `@trace` comments becomes a `CODE:path/to/file.ts` node in the graph. All existing commands — `impact`, `path`, `review`, `anomalies` — work with code nodes automatically.
-
-```
-$ graph-ba code-refs
-Code References:
-
-  src/order.ts
-    F-01, REQ-01            line 2
-    BR.1                    line 4
-
-  src/delivery.py
-    F-02, BP-01             line 2
-    BR.2                    line 4
-
-$ graph-ba code-refs --by-artifact
-  F-01    src/order.ts:2
-  F-02    src/delivery.py:2
-  REQ-01  src/order.ts:2
-  ...
-
-$ graph-ba coverage
-  ...
-  Code coverage:
-    FEAT  2/10  ████░░░░░░░░░░░░░░░░  20.0%
-    REQ   1/15  █░░░░░░░░░░░░░░░░░░░   6.7%
-```
-
-### Other sections
-
-**`[scan]`** — directories to scan:
-```toml
-[scan]
-dirs = ["docs", "specs"]
-```
-
-**`[clusters]`** — semantic grouping:
-```toml
+# Semantic clusters (for grouping)
 [clusters]
-"Order Management" = ["REQ-01", "REQ-02", "FEAT-01", "BR.5"]
-```
+"Order Management" = ["REQ-01", "F-01", "BP-01"]
 
-**`[normalize]`** — ID normalization:
-```toml
+# ID normalization
 [normalize]
-char_map = { "М" = "M" }  # Cyrillic → Latin
-zero_pad = [{ pattern = 'M(\d{1,2})', format = "M{:02d}" }]
+char_map = { "М" = "M" }
 ```
 
-## How it works
-
-1. **Scan definitions** — reads markdown files, finds artifact definitions (headings or table rows) using regex patterns from config
-2. **Scan references** — finds cross-references to known artifact IDs in all markdown files
-3. **Scan code** — finds `@trace` comments in source code files, linking code to artifacts
-4. **Build graph** — constructs a NetworkX directed graph with file:line attribution on every edge
-5. **Import to SQLite** — stores the graph in SQLite with FTS5 indexes for fast search
-6. **Query & validate** — CLI commands query the DB for navigation, coverage analysis, and anomaly detection
-
-## Architecture
-
-```
-graph_ba/
-├── config.py         — loads and validates graph-ba.toml
-├── traceability.py   — scanner, graph builder, verification, export (JSON/DOT/HTML)
-└── graph_db.py       — SQLite + FTS5 storage, CLI (click), anomaly detection
-tests/
-├── conftest.py       — synthetic BA project (fixtures)
-├── test_config.py    — config loading, normalization, classification
-├── test_scanning.py  — definition/reference scanning
-├── test_graph.py     — graph construction, verification
-├── test_code_refs.py — code-to-artifact traceability (@trace)
-├── test_db.py        — SQLite import, FTS, helpers
-└── test_cli.py       — CLI commands + JSON output
-```
+Run `graph-ba init` for a full template with comments.
 
 ## Tests
 
 ```bash
-uv run pytest tests/ -v
+uv run pytest tests/ -v    # 170 tests
 ```
-
-142 tests cover every layer: config → scanning → graph → code refs → DB → CLI → audit. A synthetic BA project (5 artifact types, 11 definitions, cross-references, code traceability, dangling refs, coverage gaps) is built in session-scoped fixtures.
-
-## Claude Code integration
-
-The `.claude/skills/` directory contains skills for [Claude Code](https://claude.ai/claude-code). Auto-activated by the agent when relevant — no setup needed.
-
-| Skill | Description |
-|---|---|
-| **`/review <ID>`** | Semantic review — full text of linked artifacts, validate completeness and consistency |
-| **`/reindex`** | Re-scan artifacts and rebuild the graph DB |
-| **`/find-anomalies`** | Detect and explain graph anomalies (islands, cycles, dangling refs) |
-| **`/audit`** | Global audit with parallel subagents (see below) |
-
-### `/audit` — full project audit
-
-The audit skill uses a funnel strategy to handle projects of any size:
-
-1. **Structural pass** — `graph-ba --json audit` finds anomalies, coverage gaps, and missing links across the entire graph (fast, no LLM needed)
-2. **Prioritize** — produces a ranked list of review candidates with reasons (CYCLE, DANGLING, COVERAGE_GAP, etc.)
-3. **Parallel semantic review** — launches subagents (3-5 artifacts each) that run `graph-ba review <ID> --semantic` and check completeness, numeric consistency, and bidirectional traceability
-4. **Aggregate** — collects subagent findings into a single report with prioritized recommendations
-
-This keeps the work within context limits: structural analysis covers all 200+ artifacts, but deep semantic review targets only the 10-15 most problematic ones.
-
-All commands support `--json` output, making them suitable for agent pipelines.
 
 ## License
 
