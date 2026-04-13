@@ -99,6 +99,8 @@ def _scan_heading(registry, filepath, pattern, type_id, config):
         m = pattern.match(line)
         if m:
             raw_id = m.group(1)
+            if raw_id is None:
+                continue
             title = m.group(2).strip() if m.lastindex >= 2 else ""
             _register(registry, Artifact(raw_id, type_id, filepath, i, title), config)
 
@@ -110,6 +112,8 @@ def _scan_table_first_col(registry, filepath, pattern, type_id, config):
         m = pattern.match(line)
         if m:
             raw_id = m.group(1)
+            if raw_id is None:
+                continue
             cols = [c.strip() for c in line.split("|")]
             title = cols[2] if len(cols) > 2 else ""
             _register(registry, Artifact(raw_id, type_id, filepath, i, title), config)
@@ -628,7 +632,9 @@ def export_json(G: nx.DiGraph, registry: Dict[str, Artifact],
 # Default colors for common types; config can extend/override
 _DEFAULT_COLORS = {
     "ST":      {"bg": "#FFF3C4", "border": "#D69E2E"},
+    "BR":      {"bg": "#C3DAF9", "border": "#2B6CB0"},
     "BR_REQ":  {"bg": "#C3DAF9", "border": "#2B6CB0"},
+    "BRL":     {"bg": "#FCCFCF", "border": "#C53030"},
     "BR_RULE": {"bg": "#FCCFCF", "border": "#C53030"},
     "BP":      {"bg": "#C6F6D5", "border": "#276749"},
     "BD":      {"bg": "#FEEBC8", "border": "#C05621"},
@@ -646,7 +652,7 @@ _DEFAULT_COLORS = {
 }
 
 _DEFAULT_SHAPES = {
-    "ST": "house", "BR_REQ": "box", "BR_RULE": "octagon",
+    "ST": "house", "BR": "box", "BR_REQ": "box", "BRL": "octagon", "BR_RULE": "octagon",
     "BP": "cds", "BD": "diamond", "BF": "component",
     "F": "note", "VAD": "hexagon", "M": "box3d",
     "DM": "box", "SM": "box", "EN": "box", "RL": "box",
@@ -654,7 +660,7 @@ _DEFAULT_SHAPES = {
 }
 
 _HTML_SHAPES = {
-    "ST": "triangle", "BR_REQ": "box", "BR_RULE": "diamond",
+    "ST": "triangle", "BR": "box", "BR_REQ": "box", "BRL": "diamond", "BR_RULE": "diamond",
     "BP": "ellipse", "BD": "hexagon", "BF": "box",
     "F": "star", "VAD": "hexagon", "M": "database",
     "DM": "box", "SM": "box", "EN": "box", "RL": "box",
@@ -662,7 +668,7 @@ _HTML_SHAPES = {
 }
 
 _HTML_SIZES = {
-    "ST": 25, "BR_REQ": 18, "BR_RULE": 16, "BP": 22, "BD": 20,
+    "ST": 25, "BR": 18, "BR_REQ": 18, "BRL": 16, "BR_RULE": 16, "BP": 22, "BD": 20,
     "BF": 14, "F": 24, "VAD": 22, "M": 26,
     "DM": 16, "SM": 16, "EN": 14, "RL": 16,
     "FILE": 10, "UNKNOWN": 10,
@@ -1003,14 +1009,24 @@ function onSearch(q) {{
     allNodes.update({{id:n.id, opacity: match ? 1 : 0.15, font:{{size: match ? 14 : 8}}}});
   }});
 }}
+var origNodes = {{}};
+allNodes.forEach(function(n) {{ origNodes[n.id] = JSON.parse(JSON.stringify(n)); }});
 var hiddenGroups = {{}};
 function toggleGroup(cb) {{
   var g = cb.dataset.group;
   if (cb.checked) {{ delete hiddenGroups[g]; }} else {{ hiddenGroups[g] = true; }}
+  var updates = [];
   allNodes.forEach(function(n) {{
-    var hidden = !!hiddenGroups[n.group];
-    allNodes.update({{id:n.id, hidden:hidden}});
+    if (n.group === g) {{
+      if (cb.checked) {{
+        var o = origNodes[n.id];
+        updates.push({{id:n.id, hidden:false, color:o.color, shape:o.shape, size:o.size}});
+      }} else {{
+        updates.push({{id:n.id, hidden:true}});
+      }}
+    }}
   }});
+  allNodes.update(updates);
 }}
 </script>
 </body>

@@ -305,7 +305,7 @@ char_map = {}
 zero_pad = []
 
 # Range expansion pattern (for references like REQ.1.1–REQ.1.5)
-range_pattern = '((?:REQ|FUNC)\\\\.\\\\.d+\\\\.)(\\\\d+)\\\\s*[–\\\\-]\\\\s*(?:(?:REQ|FUNC)\\\\.\\\\d+\\\\.)(\\\\d+)'
+range_pattern = '((?:REQ|FUNC)\\.\\d+\\.)(\\d+)\\s*[–\\-]\\s*(?:(?:REQ|FUNC)\\.\\d+\\.)(\\d+)'
 
 # ── Artifact types ──
 # Each type needs:
@@ -316,13 +316,13 @@ range_pattern = '((?:REQ|FUNC)\\\\.\\\\.d+\\\\.)(\\\\d+)\\\\s*[–\\\\-]\\\\s*(?
 
 [types.REQ]
 label = "Requirements"
-ref = '(?<![A-Za-z])(REQ-\\\\d{2,4})(?!\\\\d)'
-classify = 'REQ-\\\\d{2,4}'
+ref = '(?<![A-Za-z])(REQ-\\d{2,4})(?!\\d)'
+classify = 'REQ-\\d{2,4}'
 
 [types.FEAT]
 label = "Features"
-ref = '(?<![A-Za-z])(FEAT-\\\\d{2,4})(?!\\\\d)'
-classify = 'FEAT-\\\\d{2,4}'
+ref = '(?<![A-Za-z])(FEAT-\\d{2,4})(?!\\d)'
+classify = 'FEAT-\\d{2,4}'
 
 # ── Definition scan rules ──
 # type = artifact type ID
@@ -334,13 +334,13 @@ classify = 'FEAT-\\\\d{2,4}'
 type = "REQ"
 file = "docs/requirements.md"
 mode = "table"
-pattern = '^\\\\|\\\\s*(REQ-\\\\d{2,4})\\\\s*\\\\|'
+pattern = '^\\|\\s*(REQ-\\d{2,4})\\s*\\|'
 
 [[definitions]]
 type = "FEAT"
 file = "docs/features.md"
 mode = "heading"
-pattern = '^##\\\\s+(FEAT-\\\\d{2,4})\\\\s*[—–\\\\-]\\\\s*(.*)'
+pattern = '^##\\s+(FEAT-\\d{2,4})\\s*[—–\\-]\\s*(.*)'
 
 # ── Index tables (extract cross-refs from table rows) ──
 # file = path to index file
@@ -348,7 +348,7 @@ pattern = '^##\\\\s+(FEAT-\\\\d{2,4})\\\\s*[—–\\\\-]\\\\s*(.*)'
 
 # [[index_tables]]
 # file = "docs/features.md"
-# first_col = '^\\\\|\\\\s*(FEAT-\\\\d{2,4})\\\\s*\\\\|'
+# first_col = '^\\|\\s*(FEAT-\\d{2,4})\\s*\\|'
 
 # ── Coverage expectations ──
 # source/target = type IDs, label = display name
