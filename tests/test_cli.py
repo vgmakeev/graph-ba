@@ -489,15 +489,35 @@ def _all_output(result) -> str:
 
 
 class TestRequireGraph:
-    def test_read_commands_fail_on_empty_db(self, ba_project, tmp_path):
+    def test_read_commands_fail_on_empty_db_without_auto(self, ba_project, tmp_path):
         runner = CliRunner()
         db = tmp_path / "empty.db"
         for cmd in (["audit"], ["lint"], ["anomalies"], ["coverage"],
                     ["search", "Order"], ["node", "F-01"]):
             result = runner.invoke(cli, [
-                "--root", str(ba_project), "--db", str(db)] + cmd)
+                "--root", str(ba_project), "--db", str(db), "--no-auto-import"] + cmd)
             assert result.exit_code != 0, cmd
             assert "Graph is empty" in _all_output(result), cmd
+
+    def test_empty_db_auto_imports(self, ba_project, tmp_path):
+        runner = CliRunner()
+        db = tmp_path / "empty_auto.db"
+        result = runner.invoke(cli, [
+            "--root", str(ba_project), "--db", str(db), "node", "F-01"
+        ])
+        assert result.exit_code == 0
+        assert "auto-import" in _all_output(result)
+        assert "F-01" in result.output
+
+    def test_empty_db_no_config_still_fails(self, tmp_path):
+        # no graph-ba.toml → auto-import impossible → hard error
+        runner = CliRunner()
+        db = tmp_path / "empty.db"
+        result = runner.invoke(cli, [
+            "--root", str(tmp_path), "--db", str(db), "node", "F-01"
+        ])
+        assert result.exit_code != 0
+        assert "Graph is empty" in _all_output(result)
 
     def test_import_not_guarded_by_empty_db(self, ba_project, tmp_path):
         runner = CliRunner()
@@ -508,7 +528,30 @@ class TestRequireGraph:
         assert result.exit_code == 0
         assert "Imported:" in result.output
 
-    def test_stale_sources_warn(self, cli_env_rw):
+    def test_stale_sources_auto_reimport(self, cli_env_rw):
+        import os
+        runner, root, db_path = cli_env_rw
+        f = root / "docs" / "features.md"
+        st = f.stat()
+        try:
+            # touch to "now": newer than fixture import, but not in the future,
+            # so the rebuild's fresh import_time supersedes it
+            os.utime(f, None)
+            result = runner.invoke(cli, [
+                "--root", str(root), "--db", str(db_path), "coverage"
+            ])
+            assert result.exit_code == 0
+            assert "auto-import" in _all_output(result)
+            # rebuilt graph is fresh now: second run must not re-trigger
+            result2 = runner.invoke(cli, [
+                "--root", str(root), "--db", str(db_path), "coverage"
+            ])
+            assert result2.exit_code == 0
+            assert "auto-import" not in _all_output(result2)
+        finally:
+            os.utime(f, (st.st_atime, st.st_mtime))
+
+    def test_stale_sources_warn_without_auto(self, cli_env_rw):
         import os
         import time
         runner, root, db_path = cli_env_rw
@@ -518,7 +561,8 @@ class TestRequireGraph:
             future = time.time() + 120
             os.utime(f, (future, future))
             result = runner.invoke(cli, [
-                "--root", str(root), "--db", str(db_path), "coverage"
+                "--root", str(root), "--db", str(db_path),
+                "--no-auto-import", "coverage"
             ])
             assert result.exit_code == 0
             assert "stale" in _all_output(result)
@@ -532,6 +576,7 @@ class TestRequireGraph:
         ])
         assert result.exit_code == 0
         assert "stale" not in _all_output(result)
+        assert "auto-import" not in _all_output(result)
 
 
 class TestAuditCycles:

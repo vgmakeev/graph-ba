@@ -76,6 +76,12 @@ graph-ba audit         # structure quality: dangling refs, cycles, coverage gaps
 
 All commands: `--json` for machine output, `--root`/`--db` for paths.
 
+Read commands keep themselves honest: on an empty or stale database they
+rebuild the graph automatically before answering (import is cheap). Disable
+with `--no-auto-import` to get a hard error on empty and a stderr warning on
+stale instead — a silently clean result on a graph that was never imported is
+the worst failure mode for agent workflows.
+
 ### validate — deterministic gate for one artifact
 
 ```bash

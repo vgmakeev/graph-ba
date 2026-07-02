@@ -132,7 +132,7 @@ def get_db(path: Optional[Path] = None) -> sqlite3.Connection:
 
 # ── Import ────────────────────────────────────────────────────────
 
-def do_import(root: Path, db: sqlite3.Connection):
+def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False):
     """Import graph by running traceability scan and loading into SQLite."""
     from graph_ba import traceability as t
     from graph_ba.config import load_config
@@ -210,6 +210,9 @@ def do_import(root: Path, db: sqlite3.Connection):
 
     db.commit()
 
+    if quiet:
+        return
+
     n_nodes = db.execute("SELECT count(*) FROM artifacts").fetchone()[0]
     n_edges = db.execute("SELECT count(*) FROM edges").fetchone()[0]
     n_clusters = db.execute("SELECT count(DISTINCT cluster_name) FROM semantic_clusters").fetchone()[0]
@@ -272,33 +275,59 @@ def fmt_table(rows: list, headers: list) -> str:
 @click.option("--root", type=click.Path(exists=True, path_type=Path),
               default=".", help="Project root directory")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
+@click.option("--no-auto-import", is_flag=True,
+              help="Do not rebuild the graph automatically when it is empty or stale")
 @click.pass_context
-def cli(ctx, db, root, json_output):
+def cli(ctx, db, root, json_output, no_auto_import):
     """Graph BA — query the artifact traceability graph."""
     ctx.ensure_object(dict)
     ctx.obj["db_path"] = db
     ctx.obj["root"] = str(Path(root).resolve())
     ctx.obj["json"] = json_output
+    ctx.obj["no_auto_import"] = no_auto_import
 
 
 def _conn(ctx) -> sqlite3.Connection:
     return get_db(ctx.obj.get("db_path"))
 
 
+def _auto_import(ctx, db: sqlite3.Connection, reason: str) -> bool:
+    """Rebuild the graph in place when the config is available."""
+    from graph_ba.config import load_config
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    try:
+        load_config(root)
+    except Exception:
+        return False
+    click.echo(f"auto-import: graph {reason} — rebuilding", err=True)
+    do_import(root, db, quiet=True)
+    return True
+
+
 def _require_graph(ctx, db: sqlite3.Connection) -> None:
-    """Fail fast on an empty graph; warn when sources changed after import.
+    """Keep read commands honest: rebuild or fail on an empty/stale graph.
 
     An empty DB makes every read command return a clean result, which reads
-    as "no issues" when the real problem is that import was never run.
+    as "no issues" when the real problem is that import was never run. By
+    default the graph is rebuilt automatically (import is cheap); with
+    --no-auto-import the old fail/warn behavior applies.
     """
+    auto = not ctx.obj.get("no_auto_import")
+
     n = db.execute("SELECT count(*) FROM artifacts").fetchone()[0]
     if n == 0:
-        db_path = db.execute("PRAGMA database_list").fetchone()[2]
-        raise click.ClickException(
-            f"Graph is empty (db: {db_path}). Run `graph-ba import` first.")
+        if auto and _auto_import(ctx, db, "was empty"):
+            n = db.execute("SELECT count(*) FROM artifacts").fetchone()[0]
+        if n == 0:
+            db_path = db.execute("PRAGMA database_list").fetchone()[2]
+            raise click.ClickException(
+                f"Graph is empty (db: {db_path}). Run `graph-ba import` first.")
+        return
 
     row = db.execute("SELECT value FROM meta WHERE key = 'import_time'").fetchone()
     if not row:
+        if auto and _auto_import(ctx, db, "predates staleness tracking"):
+            return
         click.echo("warning: DB predates staleness tracking — "
                    "re-run `graph-ba import` to enable it", err=True)
         return
@@ -314,6 +343,8 @@ def _require_graph(ctx, db: sqlite3.Connection) -> None:
                 continue
             for f in p.rglob("*.md"):
                 if f.stat().st_mtime > import_time:
+                    if auto and _auto_import(ctx, db, "is stale"):
+                        return
                     click.echo("warning: graph is stale — sources modified "
                                "after last import; run `graph-ba import`", err=True)
                     return
