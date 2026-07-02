@@ -64,6 +64,7 @@ graph-ba audit         # structure quality: dangling refs, cycles, coverage gaps
 | `import` | Scan artifacts and build SQLite DB |
 | **`lint [ID]`** | Content lint: TODO markers, empty sections, terminology, staleness, code coverage |
 | **`audit`** | Structural audit: dangling refs, cycles, coverage gaps, bottlenecks |
+| **`validate <ID>`** | Deterministic per-artifact gate: PASS/FAIL verdict, exit 1 on FAIL |
 | `review <ID> --semantic` | Full text of all linked artifacts for deep validation |
 | `search <query>` | FTS5 full-text search |
 | `node <ID>` | Node details + neighbors |
@@ -74,6 +75,36 @@ graph-ba audit         # structure quality: dangling refs, cycles, coverage gaps
 | `sql <query>` | Raw SQL |
 
 All commands: `--json` for machine output, `--root`/`--db` for paths.
+
+Read commands keep themselves honest: on an empty or stale database they
+rebuild the graph automatically before answering (import is cheap). Disable
+with `--no-auto-import` to get a hard error on empty and a stderr warning on
+stale instead — a silently clean result on a graph that was never imported is
+the worst failure mode for agent workflows.
+
+### validate — deterministic gate for one artifact
+
+```bash
+graph-ba validate F-01           # ✓/✗/⚠ checks + VERDICT: PASS|FAIL
+graph-ba --json validate F-01    # {"id", "verdict", "checks": [...]}
+```
+
+Fail-level checks: artifact is defined, all outgoing refs resolve, required
+sections present, expected cross-layer links exist. Warn-level (don't fail):
+missing bidirectional links, TODO markers, missing test evidence. Exit code 0
+on PASS, 1 on FAIL — usable directly in CI and agent loops.
+
+### audit --baseline — ratchet for brownfield corpora
+
+```bash
+graph-ba audit --write-baseline baseline.json   # snapshot current issues
+graph-ba audit --baseline baseline.json         # exit 1 only on NEW issues
+```
+
+Every issue gets a stable fingerprint (`DANGLING:REQ-99`,
+`COVERAGE_GAP:FEAT:REQ:F-02`, ...). With `--baseline`, known issues are
+tolerated, resolved ones reported, and only new regressions fail the run —
+so audit stays useful on corpora with hundreds of legacy issues.
 
 ## Configuration
 
@@ -112,6 +143,14 @@ expected_bidir = { "FEAT" = ["REQ"] }
 dirs = ["src"]
 coverage_types = ["FEAT", "REQ"]
 
+# Test traceability — test files become TEST: nodes; any artifact ID
+# in a test file (comments, names, asserts) counts as test evidence.
+# `coverage` shows a "Test coverage" block per listed type.
+[tests]
+dirs = ["tests"]
+extensions = ["py", "ts", "tsx", "js", "dart"]  # default
+coverage_types = ["REQ"]
+
 # Content linting
 [lint]
 glossary_file = "docs/glossary.md"
@@ -133,7 +172,7 @@ Run `graph-ba init` for a full template with comments.
 ## Tests
 
 ```bash
-uv run pytest tests/ -v    # 170 tests
+uv run pytest tests/ -v    # 200+ tests
 ```
 
 ## License

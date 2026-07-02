@@ -7,7 +7,7 @@ from click.testing import CliRunner
 from graph_ba.config import load_config
 from graph_ba.traceability import (
     scan_definitions, scan_references, scan_index_cross_refs,
-    scan_code_references, build_graph,
+    scan_code_references, scan_test_references, build_graph,
 )
 from graph_ba.graph_db import get_db, do_import, cli
 
@@ -111,6 +111,10 @@ dirs = ["src"]
 extensions = ["ts", "py", "go"]
 marker = "@trace"
 coverage_types = ["FEAT", "REQ"]
+
+[tests]
+dirs = ["tests"]
+coverage_types = ["REQ"]
 """
 
 # ── Synthetic markdown files ──────────────────────────────────────
@@ -208,6 +212,15 @@ package main
 func main() {}
 """
 
+# ── Synthetic test files (TEST: layer) ───────────────────────────
+
+TEST_ORDERS_PY = """\
+# Tests for order requirements
+# REQ-01
+def test_req_01_orders():
+    assert True
+"""
+
 INDEX_MD = """\
 # Cross-Reference Index
 
@@ -246,6 +259,11 @@ def ba_project(tmp_path_factory):
     (src / "delivery.py").write_text(DELIVERY_PY, encoding="utf-8")
     (src / "main.go").write_text(NO_TRACE_GO, encoding="utf-8")
 
+    # Test files for the TEST: traceability layer
+    tests_dir = root / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_orders.py").write_text(TEST_ORDERS_PY, encoding="utf-8")
+
     return root
 
 
@@ -264,9 +282,15 @@ def scan_result(ba_project, project_config):
 
 
 @pytest.fixture(scope="session")
-def built_graph(scan_result, project_config):
+def test_refs(ba_project, project_config):
+    return scan_test_references(ba_project, project_config)
+
+
+@pytest.fixture(scope="session")
+def built_graph(scan_result, test_refs, project_config):
     registry, references, index_xrefs, code_refs = scan_result
-    G = build_graph(registry, references, project_config, index_xrefs, code_refs)
+    G = build_graph(registry, references, project_config, index_xrefs, code_refs,
+                    test_refs)
     return G, registry
 
 

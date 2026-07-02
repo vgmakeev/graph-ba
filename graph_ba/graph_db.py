@@ -26,8 +26,9 @@ DB_PATH = Path.cwd() / "reports" / "graph.db"
 
 
 def _is_meta_node(node_id: str) -> bool:
-    """Check if node is a meta-node (FILE: or CODE:) rather than a BA artifact."""
-    return node_id.startswith("FILE:") or node_id.startswith("CODE:")
+    """Check if node is a meta-node (FILE:, CODE: or TEST:) rather than a BA artifact."""
+    return (node_id.startswith("FILE:") or node_id.startswith("CODE:")
+            or node_id.startswith("TEST:"))
 
 
 def _json_out(ctx, data):
@@ -131,7 +132,7 @@ def get_db(path: Optional[Path] = None) -> sqlite3.Connection:
 
 # ── Import ────────────────────────────────────────────────────────
 
-def do_import(root: Path, db: sqlite3.Connection):
+def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False):
     """Import graph by running traceability scan and loading into SQLite."""
     from graph_ba import traceability as t
     from graph_ba.config import load_config
@@ -143,7 +144,8 @@ def do_import(root: Path, db: sqlite3.Connection):
     references = t.scan_references(root, registry, config)
     index_xrefs = t.scan_index_cross_refs(root, config)
     code_refs = t.scan_code_references(root, config)
-    G = t.build_graph(registry, references, config, index_xrefs, code_refs)
+    test_refs = t.scan_test_references(root, config)
+    G = t.build_graph(registry, references, config, index_xrefs, code_refs, test_refs)
 
     # Clear existing data
     db.executescript("""
@@ -190,6 +192,8 @@ def do_import(root: Path, db: sqlite3.Connection):
         file_map[ref.source_file.name] = str(ref.source_file)
     for cref in code_refs:
         file_map[cref.code_file.name] = str(cref.code_file)
+    for tref in test_refs:
+        file_map[tref.code_file.name] = str(tref.code_file)
     for fname, fpath in file_map.items():
         db.execute("INSERT OR IGNORE INTO file_paths (filename, full_path) VALUES (?, ?)",
                    (fname, fpath))
@@ -206,15 +210,22 @@ def do_import(root: Path, db: sqlite3.Connection):
 
     db.commit()
 
+    if quiet:
+        return
+
     n_nodes = db.execute("SELECT count(*) FROM artifacts").fetchone()[0]
     n_edges = db.execute("SELECT count(*) FROM edges").fetchone()[0]
     n_clusters = db.execute("SELECT count(DISTINCT cluster_name) FROM semantic_clusters").fetchone()[0]
     n_code = db.execute(
         "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'CODE:%'"
     ).fetchone()[0]
+    n_test = db.execute(
+        "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'TEST:%'"
+    ).fetchone()[0]
     db_path = db.execute("PRAGMA database_list").fetchone()[2]
     print(f"Imported: {n_nodes} artifacts, {n_edges} edges, "
-          f"{n_clusters} semantic clusters, {n_code} code files")
+          f"{n_clusters} semantic clusters, {n_code} code files, "
+          f"{n_test} test files")
     print(f"DB: {db_path}")
 
 
@@ -264,33 +275,59 @@ def fmt_table(rows: list, headers: list) -> str:
 @click.option("--root", type=click.Path(exists=True, path_type=Path),
               default=".", help="Project root directory")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
+@click.option("--no-auto-import", is_flag=True,
+              help="Do not rebuild the graph automatically when it is empty or stale")
 @click.pass_context
-def cli(ctx, db, root, json_output):
+def cli(ctx, db, root, json_output, no_auto_import):
     """Graph BA — query the artifact traceability graph."""
     ctx.ensure_object(dict)
     ctx.obj["db_path"] = db
     ctx.obj["root"] = str(Path(root).resolve())
     ctx.obj["json"] = json_output
+    ctx.obj["no_auto_import"] = no_auto_import
 
 
 def _conn(ctx) -> sqlite3.Connection:
     return get_db(ctx.obj.get("db_path"))
 
 
+def _auto_import(ctx, db: sqlite3.Connection, reason: str) -> bool:
+    """Rebuild the graph in place when the config is available."""
+    from graph_ba.config import load_config
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    try:
+        load_config(root)
+    except Exception:
+        return False
+    click.echo(f"auto-import: graph {reason} — rebuilding", err=True)
+    do_import(root, db, quiet=True)
+    return True
+
+
 def _require_graph(ctx, db: sqlite3.Connection) -> None:
-    """Fail fast on an empty graph; warn when sources changed after import.
+    """Keep read commands honest: rebuild or fail on an empty/stale graph.
 
     An empty DB makes every read command return a clean result, which reads
-    as "no issues" when the real problem is that import was never run.
+    as "no issues" when the real problem is that import was never run. By
+    default the graph is rebuilt automatically (import is cheap); with
+    --no-auto-import the old fail/warn behavior applies.
     """
+    auto = not ctx.obj.get("no_auto_import")
+
     n = db.execute("SELECT count(*) FROM artifacts").fetchone()[0]
     if n == 0:
-        db_path = db.execute("PRAGMA database_list").fetchone()[2]
-        raise click.ClickException(
-            f"Graph is empty (db: {db_path}). Run `graph-ba import` first.")
+        if auto and _auto_import(ctx, db, "was empty"):
+            n = db.execute("SELECT count(*) FROM artifacts").fetchone()[0]
+        if n == 0:
+            db_path = db.execute("PRAGMA database_list").fetchone()[2]
+            raise click.ClickException(
+                f"Graph is empty (db: {db_path}). Run `graph-ba import` first.")
+        return
 
     row = db.execute("SELECT value FROM meta WHERE key = 'import_time'").fetchone()
     if not row:
+        if auto and _auto_import(ctx, db, "predates staleness tracking"):
+            return
         click.echo("warning: DB predates staleness tracking — "
                    "re-run `graph-ba import` to enable it", err=True)
         return
@@ -306,6 +343,8 @@ def _require_graph(ctx, db: sqlite3.Connection) -> None:
                 continue
             for f in p.rglob("*.md"):
                 if f.stat().st_mtime > import_time:
+                    if auto and _auto_import(ctx, db, "is stale"):
+                        return
                     click.echo("warning: graph is stale — sources modified "
                                "after last import; run `graph-ba import`", err=True)
                     return
@@ -428,6 +467,14 @@ pattern = '^##\\s+(FEAT-\\d{2,4})\\s*[—–\\-]\\s*(.*)'
 # extensions = ["ts", "tsx", "py", "go"]
 # marker = "@trace"
 # coverage_types = ["FEAT", "REQ"]
+
+# ── Test traceability ──
+# Test files become TEST: nodes; any artifact ID found in a test file
+# counts as test evidence (no marker needed).
+# [tests]
+# dirs = ["tests"]
+# extensions = ["py", "ts", "tsx", "js", "dart"]
+# coverage_types = ["REQ"]
 '''
     config_path.write_text(template, encoding="utf-8")
     print(f"Created template config: {config_path}")
@@ -729,7 +776,8 @@ def coverage(ctx):
     _require_graph(ctx, db)
     pairs = [(cp.source, cp.target) for cp in config.coverage_pairs]
     has_code_coverage = config.code and config.code.coverage_types
-    if not pairs and not has_code_coverage:
+    has_test_coverage = config.tests and config.tests.coverage_types
+    if not pairs and not has_code_coverage and not has_test_coverage:
         print("No coverage pairs defined in graph-ba.toml [coverage]")
         db.close()
         return
@@ -757,10 +805,9 @@ def coverage(ctx):
                         "linked": linked, "total": total,
                         "pct": round(pct, 1), "status": status})
 
-    # Code reference coverage
-    code_results = []
-    if has_code_coverage:
-        for art_type in config.code.coverage_types:
+    def _meta_coverage(art_types, prefix):
+        out = []
+        for art_type in art_types:
             total = db.execute(
                 "SELECT count(*) as c FROM artifacts WHERE type = ? AND defined = 1",
                 (art_type,)
@@ -770,18 +817,30 @@ def coverage(ctx):
                 WHERE a.type = ? AND a.defined = 1
                 AND EXISTS (
                     SELECT 1 FROM edges e
-                    WHERE e.target_id = a.id AND e.source_id LIKE 'CODE:%'
+                    WHERE e.target_id = a.id AND e.source_id LIKE ?
                 )
-            """, (art_type,)).fetchone()["c"]
+            """, (art_type, f"{prefix}%")).fetchone()["c"]
             pct = (linked / total * 100) if total else 0
             status = "OK" if pct >= 90 else "WARN" if pct >= 50 else "GAP"
-            code_results.append({"type": art_type, "linked": linked,
-                                 "total": total, "pct": round(pct, 1),
-                                 "status": status})
+            out.append({"type": art_type, "linked": linked,
+                        "total": total, "pct": round(pct, 1),
+                        "status": status})
+        return out
+
+    # Code reference coverage
+    code_results = []
+    if has_code_coverage:
+        code_results = _meta_coverage(config.code.coverage_types, "CODE:")
+
+    # Test coverage
+    test_results = []
+    if has_test_coverage:
+        test_results = _meta_coverage(config.tests.coverage_types, "TEST:")
 
     db.close()
 
-    if _json_out(ctx, {"pairs": results, "code_coverage": code_results}):
+    if _json_out(ctx, {"pairs": results, "code_coverage": code_results,
+                       "test_coverage": test_results}):
         return
 
     if results:
@@ -798,6 +857,14 @@ def coverage(ctx):
         for r in code_results:
             bar = "█" * int(r["pct"] / 5) + "░" * (20 - int(r["pct"] / 5))
             print(f"  CODE → {r['type']:8s}  {r['linked']:3d}/{r['total']:<3d}  "
+                  f"{bar}  {r['pct']:5.1f}%  [{r['status']}]")
+
+    if test_results:
+        print("\nTest coverage:")
+        print()
+        for r in test_results:
+            bar = "█" * int(r["pct"] / 5) + "░" * (20 - int(r["pct"] / 5))
+            print(f"  TEST → {r['type']:8s}  {r['linked']:3d}/{r['total']:<3d}  "
                   f"{bar}  {r['pct']:5.1f}%  [{r['status']}]")
 
 
@@ -1020,7 +1087,7 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
     out_edges = db.execute(
         "SELECT e.target_id as ref_id, a.type, a.title, e.source_file, e.line_number, e.context "
         "FROM edges e LEFT JOIN artifacts a ON e.target_id = a.id "
-        "WHERE e.source_id = ? AND COALESCE(a.type,'') NOT IN ('FILE', 'CODE') "
+        "WHERE e.source_id = ? AND COALESCE(a.type,'') NOT IN ('FILE', 'CODE', 'TEST') "
         "ORDER BY a.type, e.target_id",
         (node_id,)
     ).fetchall()
@@ -1314,11 +1381,11 @@ def _check_numeric_conflicts(db, aid, fname, full_path,
     connected = db.execute(
         "SELECT DISTINCT a.id as ref_id, a.source_file "
         "FROM edges e JOIN artifacts a ON e.target_id = a.id "
-        "WHERE e.source_id = ? AND a.type != 'FILE' "
+        "WHERE e.source_id = ? AND a.type NOT IN ('FILE', 'TEST') "
         "UNION "
         "SELECT DISTINCT a.id as ref_id, a.source_file "
         "FROM edges e JOIN artifacts a ON e.source_id = a.id "
-        "WHERE e.target_id = ? AND a.type != 'FILE'",
+        "WHERE e.target_id = ? AND a.type NOT IN ('FILE', 'TEST')",
         (aid, aid)
     ).fetchall()
 
@@ -1423,6 +1490,168 @@ def _check_empty_links(db, aid, issues):
                                    f"→{e['target_id']} in {e['source_file']}:{e['line_number']}"
                                    " — bare reference without context"))
 
+
+
+# ── Validate command (deterministic per-artifact gate) ──────────
+
+def _artifact_section_text(full_path: str, art_line: int) -> str:
+    """Text of an artifact's own section (heading to next same/higher heading)."""
+    lines = _FileCache().get_lines(full_path)
+    if not lines:
+        return ""
+    m = _HEADING_RE.match(lines[art_line - 1]) if 0 < art_line <= len(lines) else None
+    hlevel = len(m.group(1)) if m else 2
+    start_idx, end_idx = _artifact_line_range(lines, art_line, hlevel)
+    return "\n".join(lines[start_idx:end_idx])
+
+
+def _emit_validate(ctx, artifact_id: str, checks: list):
+    """Print validate result (human or JSON) and exit 1 on FAIL."""
+    verdict = "FAIL" if any(c["status"] == "fail" for c in checks) else "PASS"
+    if not _json_out(ctx, {"id": artifact_id, "verdict": verdict, "checks": checks}):
+        symbols = {"pass": "✓", "fail": "✗", "warn": "⚠"}
+        print(f"Validate: {artifact_id}")
+        for c in checks:
+            print(f"  {symbols[c['status']]} {c['name']} — {c['detail']}")
+        print(f"\nVERDICT: {verdict}")
+    if verdict == "FAIL":
+        ctx.exit(1)
+
+
+@cli.command()
+@click.argument("artifact_id")
+@click.pass_context
+def validate(ctx, artifact_id):
+    """Deterministic quality gate for one artifact (exit 0=PASS, 1=FAIL).
+
+    Checks: defined, dangling outgoing refs, required sections, expected
+    cross-layer links (fail); bidir links, TODO markers, test evidence (warn).
+    """
+    from graph_ba.config import load_config, LintConfig
+
+    db = _conn(ctx)
+    _require_graph(ctx, db)
+
+    checks: list = []
+
+    # a. defined — hard gate, everything else is skipped on failure
+    row = db.execute("SELECT * FROM artifacts WHERE id = ?", (artifact_id,)).fetchone()
+    if not row or not row["defined"]:
+        detail = ("not found in graph" if not row
+                  else "referenced but never defined (dangling)")
+        checks.append({"name": "defined", "status": "fail", "detail": detail})
+        db.close()
+        _emit_validate(ctx, artifact_id, checks)
+        return
+    checks.append({"name": "defined", "status": "pass",
+                   "detail": f"defined in {row['source_file']}:{row['line_number']}"})
+
+    atype = row["type"]
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    try:
+        config = load_config(root)
+    except FileNotFoundError:
+        config = None
+
+    # b. dangling_out — all outgoing edges must point to defined nodes
+    undefined = db.execute(
+        "SELECT DISTINCT e.target_id FROM edges e "
+        "LEFT JOIN artifacts a ON e.target_id = a.id "
+        "WHERE e.source_id = ? AND COALESCE(a.defined, 0) = 0",
+        (artifact_id,)
+    ).fetchall()
+    bad = sorted(r["target_id"] for r in undefined
+                 if not _is_meta_node(r["target_id"]))
+    if bad:
+        checks.append({"name": "dangling_out", "status": "fail",
+                       "detail": "outgoing refs to undefined: " + ", ".join(bad)})
+    else:
+        checks.append({"name": "dangling_out", "status": "pass",
+                       "detail": "all outgoing references resolve to defined artifacts"})
+
+    # c. required_sections — from [review.required_sections]
+    req_sections = config.required_sections if config else {}
+    if atype in req_sections:
+        full_path = _resolve_file(db, row["source_file"])
+        section_text = ""
+        if full_path:
+            section_text = _artifact_section_text(full_path, row["line_number"] or 1)
+        missing = [s for s in req_sections[atype]
+                   if s.lower() not in section_text.lower()]
+        if missing:
+            checks.append({"name": "required_sections", "status": "fail",
+                           "detail": "missing sections: " + ", ".join(missing)})
+        else:
+            checks.append({"name": "required_sections", "status": "pass",
+                           "detail": "all required sections present: "
+                                     + ", ".join(req_sections[atype])})
+
+    # d. expected_cross_layer — each expected target type needs >=1 edge
+    ecl = config.expected_cross_layer if config else {}
+    if atype in ecl:
+        missing_types = []
+        for target_type, label in ecl[atype]:
+            linked = db.execute(
+                "SELECT 1 FROM edges e JOIN artifacts a ON e.target_id = a.id "
+                "WHERE e.source_id = ? AND a.type = ? "
+                "UNION SELECT 1 FROM edges e JOIN artifacts a ON e.source_id = a.id "
+                "WHERE e.target_id = ? AND a.type = ?",
+                (artifact_id, target_type, artifact_id, target_type)
+            ).fetchone()
+            if not linked:
+                missing_types.append(f"{target_type} ({label})")
+        if missing_types:
+            checks.append({"name": "expected_cross_layer", "status": "fail",
+                           "detail": "no links to expected types: "
+                                     + ", ".join(missing_types)})
+        else:
+            checks.append({"name": "expected_cross_layer", "status": "pass",
+                           "detail": "all expected cross-layer links present"})
+
+    # e. expected_bidir — one-way links are a warning, not a failure
+    ebd = config.expected_bidir if config else {}
+    if atype in ebd:
+        bidir_issues: List[Tuple[str, str, str]] = []
+        _check_bidirectional(db, artifact_id, atype, bidir_issues, ebd)
+        if bidir_issues:
+            checks.append({"name": "expected_bidir", "status": "warn",
+                           "detail": "; ".join(msg for _, _, msg in bidir_issues)})
+        else:
+            checks.append({"name": "expected_bidir", "status": "pass",
+                           "detail": "expected bidirectional links present"})
+
+    # f. todo_markers — incompleteness markers inside the artifact section
+    lint_cfg = config.lint if config else None
+    patterns = lint_cfg.todo_patterns if lint_cfg else LintConfig().todo_patterns
+    todo_re = re.compile(
+        r'(?:' + '|'.join(re.escape(p) for p in patterns) + r')', re.IGNORECASE)
+    todo_findings = _lint_todo_markers(db, _FileCache(), todo_re, artifact_id)
+    if todo_findings:
+        first = todo_findings[0]
+        checks.append({"name": "todo_markers", "status": "warn",
+                       "detail": f"{len(todo_findings)} marker(s), e.g. "
+                                 f"{first['file']}:{first['line']}: {first['message']}"})
+    else:
+        checks.append({"name": "todo_markers", "status": "pass",
+                       "detail": "no TODO/TBD markers"})
+
+    # g. test_evidence — coverage by TEST: nodes (warn for brownfield corpora)
+    tests_cfg = config.tests if config else None
+    if tests_cfg and atype in tests_cfg.coverage_types:
+        test_files = db.execute(
+            "SELECT count(DISTINCT source_id) as c FROM edges "
+            "WHERE target_id = ? AND source_id LIKE 'TEST:%'",
+            (artifact_id,)
+        ).fetchone()["c"]
+        if test_files:
+            checks.append({"name": "test_evidence", "status": "pass",
+                           "detail": f"referenced by {test_files} test file(s)"})
+        else:
+            checks.append({"name": "test_evidence", "status": "warn",
+                           "detail": "no TEST references (no test evidence)"})
+
+    db.close()
+    _emit_validate(ctx, artifact_id, checks)
 
 
 # ── Anomaly detection ─────────────────────────────────────────────
@@ -1550,10 +1779,40 @@ def anomalies(ctx, min_component):
 
 # ── Global audit ──────────────────────────────────────────────────
 
+def _issue_fingerprints(issue: dict) -> List[str]:
+    """Stable fingerprint strings for an audit issue (for baseline ratchet)."""
+    t = issue["type"]
+    if t == "DANGLING":
+        return [f"DANGLING:{issue['id']}"]
+    if t == "CYCLE":
+        ids = sorted(issue["ids"])
+        return [f"CYCLE:{len(ids)}:{','.join(ids[:3])}"]
+    if t == "BRIDGE":
+        u, v = sorted(issue["ids"])
+        return [f"BRIDGE:{u}|{v}"]
+    if t == "BOTTLENECK":
+        return [f"BOTTLENECK:{issue['id']}"]
+    if t == "COVERAGE_GAP":
+        return [f"COVERAGE_GAP:{issue['source']}:{issue['target']}:{mid}"
+                for mid in issue["missing"]]
+    if t == "MISSING_CROSS_LAYER":
+        return [f"MISSING_CROSS_LAYER:{issue['id']}:{issue['expected']}"]
+    if t == "MISSING_BIDIR":
+        return [f"MISSING_BIDIR:{issue['id']}:{issue['target']}"]
+    # Unknown issue type: fall back to a canonical JSON dump
+    return [f"{t}:{json.dumps(issue, sort_keys=True, ensure_ascii=False, default=str)}"]
+
+
 @cli.command()
 @click.option("--top", default=30, help="Max review candidates to return")
+@click.option("--baseline", "baseline_path",
+              type=click.Path(exists=True, path_type=Path), default=None,
+              help="Compare issues against a baseline; exit 1 only on NEW issues")
+@click.option("--write-baseline", "write_baseline_path",
+              type=click.Path(path_type=Path), default=None,
+              help="Write current issue fingerprints to a baseline file")
 @click.pass_context
-def audit(ctx, top):
+def audit(ctx, top, baseline_path, write_baseline_path):
     """Global audit: anomalies + coverage gaps + prioritized review list."""
     import networkx as nx
     from graph_ba.config import load_config
@@ -1702,6 +1961,33 @@ def audit(ctx, top):
 
     db.close()
 
+    # ── Baseline ratchet ──
+
+    if write_baseline_path:
+        fps = sorted({fp for iss in issues for fp in _issue_fingerprints(iss)})
+        write_baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        write_baseline_path.write_text(
+            json.dumps({"version": 1, "fingerprints": fps},
+                       ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+        print(f"Baseline written: {write_baseline_path} ({len(fps)} fingerprints)")
+        return
+
+    baseline_cmp = None
+    if baseline_path:
+        try:
+            baseline_data = json.loads(
+                Path(baseline_path).read_text(encoding="utf-8"))
+            baseline_set = set(baseline_data.get("fingerprints", []))
+        except (OSError, json.JSONDecodeError) as e:
+            raise click.ClickException(f"Cannot read baseline {baseline_path}: {e}")
+        current = {fp for iss in issues for fp in _issue_fingerprints(iss)}
+        baseline_cmp = {
+            "new": sorted(current - baseline_set),
+            "known": sorted(current & baseline_set),
+            "resolved": sorted(baseline_set - current),
+        }
+
     # ── Build sorted candidate list ──
 
     sorted_list = []
@@ -1726,8 +2012,30 @@ def audit(ctx, top):
         "issues": issues,
         "candidates": sorted_list,
     }
+    if baseline_cmp:
+        result["new"] = baseline_cmp["new"]
+        result["known"] = baseline_cmp["known"]
+        result["resolved"] = baseline_cmp["resolved"]
 
     if _json_out(ctx, result):
+        if baseline_cmp and baseline_cmp["new"]:
+            ctx.exit(1)
+        return
+
+    # ── Baseline human-readable output ──
+
+    if baseline_cmp:
+        new, known, resolved = (baseline_cmp["new"], baseline_cmp["known"],
+                                baseline_cmp["resolved"])
+        print(f"Global Audit ({G.number_of_nodes()} nodes, "
+              f"{G.number_of_edges()} edges) vs baseline {baseline_path}")
+        print(f"Baseline: {len(new)} new / {len(known)} known / "
+              f"{len(resolved)} resolved")
+        if new:
+            print(f"\n── New issues ({len(new)}) ──")
+            for fp in new:
+                print(f"  {fp}")
+            ctx.exit(1)
         return
 
     # ── Human-readable output ──
@@ -1822,7 +2130,7 @@ def _lint_todo_markers(db, fcache: _FileCache, todo_re: re.Pattern,
     """Check 1: find TODO/TBD/FIXME markers in artifact source files."""
     findings = []
     query = ("SELECT id, type, source_file, line_number FROM artifacts "
-             "WHERE defined = 1 AND type NOT IN ('FILE', 'CODE')")
+             "WHERE defined = 1 AND type NOT IN ('FILE', 'CODE', 'TEST')")
     params: list = []
     if node_id:
         query += " AND id = ?"
@@ -1861,10 +2169,10 @@ def _lint_empty_sections(db, fcache: _FileCache,
     findings = []
     # Collect unique source files for defined artifacts
     query = ("SELECT DISTINCT source_file FROM artifacts "
-             "WHERE defined = 1 AND type NOT IN ('FILE', 'CODE')")
+             "WHERE defined = 1 AND type NOT IN ('FILE', 'CODE', 'TEST')")
     if node_id:
         query = ("SELECT source_file FROM artifacts "
-                 "WHERE id = ? AND defined = 1 AND type NOT IN ('FILE', 'CODE')")
+                 "WHERE id = ? AND defined = 1 AND type NOT IN ('FILE', 'CODE', 'TEST')")
 
     params = [node_id] if node_id else []
     files_seen: set = set()
@@ -1903,7 +2211,7 @@ def _lint_empty_sections(db, fcache: _FileCache,
                 owner = db.execute(
                     "SELECT id FROM artifacts WHERE source_file = ? "
                     "AND line_number <= ? AND defined = 1 "
-                    "AND type NOT IN ('FILE', 'CODE') "
+                    "AND type NOT IN ('FILE', 'CODE', 'TEST') "
                     "ORDER BY line_number DESC LIMIT 1",
                     (fname, line_idx + 1)
                 ).fetchone()
@@ -1981,7 +2289,7 @@ def _lint_terminology(db, fcache: _FileCache, root: Path, config,
 
     # Scan artifacts
     query = ("SELECT id, source_file, line_number FROM artifacts "
-             "WHERE defined = 1 AND type NOT IN ('FILE', 'CODE')")
+             "WHERE defined = 1 AND type NOT IN ('FILE', 'CODE', 'TEST')")
     params: list = []
     if node_id:
         query += " AND id = ?"
@@ -2059,7 +2367,7 @@ def _lint_stale(db, root: Path, config,
 
     # Get unique source files for artifacts
     query = ("SELECT id, source_file FROM artifacts "
-             "WHERE defined = 1 AND type NOT IN ('FILE', 'CODE')")
+             "WHERE defined = 1 AND type NOT IN ('FILE', 'CODE', 'TEST')")
     params: list = []
     if node_id:
         query += " AND id = ?"
