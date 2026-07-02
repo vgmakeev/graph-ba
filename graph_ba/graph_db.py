@@ -78,6 +78,11 @@ CREATE TABLE IF NOT EXISTS file_paths (
     full_path   TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 -- FTS5 virtual table for full-text search over artifacts
 CREATE VIRTUAL TABLE IF NOT EXISTS artifacts_fts USING fts5(
     id, type, title, source_file,
@@ -195,6 +200,10 @@ def do_import(root: Path, db: sqlite3.Connection):
     db.execute("INSERT INTO clusters_fts(cluster_name, artifact_id) "
                "SELECT cluster_name, artifact_id FROM semantic_clusters")
 
+    import time
+    db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('import_time', ?)",
+               (str(time.time()),))
+
     db.commit()
 
     n_nodes = db.execute("SELECT count(*) FROM artifacts").fetchone()[0]
@@ -266,6 +275,42 @@ def cli(ctx, db, root, json_output):
 
 def _conn(ctx) -> sqlite3.Connection:
     return get_db(ctx.obj.get("db_path"))
+
+
+def _require_graph(ctx, db: sqlite3.Connection) -> None:
+    """Fail fast on an empty graph; warn when sources changed after import.
+
+    An empty DB makes every read command return a clean result, which reads
+    as "no issues" when the real problem is that import was never run.
+    """
+    n = db.execute("SELECT count(*) FROM artifacts").fetchone()[0]
+    if n == 0:
+        db_path = db.execute("PRAGMA database_list").fetchone()[2]
+        raise click.ClickException(
+            f"Graph is empty (db: {db_path}). Run `graph-ba import` first.")
+
+    row = db.execute("SELECT value FROM meta WHERE key = 'import_time'").fetchone()
+    if not row:
+        click.echo("warning: DB predates staleness tracking — "
+                   "re-run `graph-ba import` to enable it", err=True)
+        return
+    import_time = float(row["value"])
+
+    try:
+        from graph_ba.config import load_config
+        root = Path(ctx.obj.get("root", ".")).resolve()
+        config = load_config(root)
+        for d in config.scan_dirs:
+            p = root / d
+            if not p.exists():
+                continue
+            for f in p.rglob("*.md"):
+                if f.stat().st_mtime > import_time:
+                    click.echo("warning: graph is stale — sources modified "
+                               "after last import; run `graph-ba import`", err=True)
+                    return
+    except Exception:
+        pass
 
 
 @cli.command("import")
@@ -396,6 +441,7 @@ pattern = '^##\\s+(FEAT-\\d{2,4})\\s*[—–\\-]\\s*(.*)'
 def search(ctx, query, limit):
     """Full-text search across artifact titles and IDs."""
     db = _conn(ctx)
+    _require_graph(ctx, db)
     fq = _fts_query(query)
 
     # Search artifacts
@@ -456,6 +502,7 @@ def search(ctx, query, limit):
 def node(ctx, node_id):
     """Show node details and immediate neighbors."""
     db = _conn(ctx)
+    _require_graph(ctx, db)
     row = db.execute("SELECT * FROM artifacts WHERE id = ?", (node_id,)).fetchone()
     if not row:
         # Try case-insensitive / partial match
@@ -544,6 +591,7 @@ def path(ctx, from_id, to_id):
     import networkx as nx
 
     db = _conn(ctx)
+    _require_graph(ctx, db)
     G = _load_nx(db)
     db.close()
 
@@ -579,6 +627,7 @@ def impact(ctx, node_id, depth):
     import networkx as nx
 
     db = _conn(ctx)
+    _require_graph(ctx, db)
     G = _load_nx(db)
     db.close()
 
@@ -677,6 +726,7 @@ def coverage(ctx):
     config = load_config(root)
 
     db = _conn(ctx)
+    _require_graph(ctx, db)
     pairs = [(cp.source, cp.target) for cp in config.coverage_pairs]
     has_code_coverage = config.code and config.code.coverage_types
     if not pairs and not has_code_coverage:
@@ -760,6 +810,7 @@ def coverage(ctx):
 def code_refs(ctx, by_artifact, art_type):
     """Show code-to-artifact traceability links."""
     db = _conn(ctx)
+    _require_graph(ctx, db)
 
     query = (
         "SELECT e.source_id as code_node, e.target_id as artifact_id, "
@@ -848,6 +899,7 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
     Use --lines N to limit each artifact to N lines in semantic mode.
     """
     db = _conn(ctx)
+    _require_graph(ctx, db)
 
     # Resolve: accept ID or file path
     explicit_file = None  # file path passed by user (show as main document)
@@ -1383,6 +1435,7 @@ def anomalies(ctx, min_component):
     import networkx as nx
 
     db = _conn(ctx)
+    _require_graph(ctx, db)
     G = _load_nx(db)
     db.close()
 
@@ -1506,6 +1559,7 @@ def audit(ctx, top):
     from graph_ba.config import load_config
 
     db = _conn(ctx)
+    _require_graph(ctx, db)
     root = Path(ctx.obj.get("root", ".")).resolve()
     G = _load_nx(db)
 
@@ -1523,14 +1577,17 @@ def audit(ctx, top):
 
     # ── Structural anomalies ──
 
-    # Cycles
-    try:
-        for c in nx.simple_cycles(G, length_bound=10):
-            issues.append({"type": "CYCLE", "ids": list(c)})
-            for n in c:
-                flag(n, "CYCLE", "high")
-    except Exception:
-        pass
+    # Cycles via SCC: simple_cycles enumeration is combinatorial on dense
+    # graphs (hangs indefinitely with high-degree nodes); SCC is linear and
+    # flags the same nodes.
+    for scc in nx.strongly_connected_components(G):
+        if len(scc) == 1:
+            n = next(iter(scc))
+            if not G.has_edge(n, n):
+                continue
+        issues.append({"type": "CYCLE", "ids": sorted(scc)})
+        for n in scc:
+            flag(n, "CYCLE", "high")
 
     # Dangling (undefined nodes)
     for n in G.nodes():
@@ -2113,6 +2170,7 @@ def lint(ctx, node_id, quick):
     from graph_ba.config import load_config, LintConfig
 
     db = _conn(ctx)
+    _require_graph(ctx, db)
     root = Path(ctx.obj.get("root", ".")).resolve()
 
     try:

@@ -479,3 +479,68 @@ class TestJsonOutput:
         data = json.loads(result.output)
         assert "pairs" in data
         assert len(data["pairs"]) == 2
+
+
+def _all_output(result) -> str:
+    try:
+        return result.output + result.stderr
+    except (ValueError, AttributeError):
+        return result.output
+
+
+class TestRequireGraph:
+    def test_read_commands_fail_on_empty_db(self, ba_project, tmp_path):
+        runner = CliRunner()
+        db = tmp_path / "empty.db"
+        for cmd in (["audit"], ["lint"], ["anomalies"], ["coverage"],
+                    ["search", "Order"], ["node", "F-01"]):
+            result = runner.invoke(cli, [
+                "--root", str(ba_project), "--db", str(db)] + cmd)
+            assert result.exit_code != 0, cmd
+            assert "Graph is empty" in _all_output(result), cmd
+
+    def test_import_not_guarded_by_empty_db(self, ba_project, tmp_path):
+        runner = CliRunner()
+        db = tmp_path / "fresh.db"
+        result = runner.invoke(cli, [
+            "--root", str(ba_project), "--db", str(db), "import"
+        ])
+        assert result.exit_code == 0
+        assert "Imported:" in result.output
+
+    def test_stale_sources_warn(self, cli_env_rw):
+        import os
+        import time
+        runner, root, db_path = cli_env_rw
+        f = root / "docs" / "features.md"
+        st = f.stat()
+        try:
+            future = time.time() + 120
+            os.utime(f, (future, future))
+            result = runner.invoke(cli, [
+                "--root", str(root), "--db", str(db_path), "coverage"
+            ])
+            assert result.exit_code == 0
+            assert "stale" in _all_output(result)
+        finally:
+            os.utime(f, (st.st_atime, st.st_mtime))
+
+    def test_fresh_import_no_stale_warning(self, cli_env_rw):
+        runner, root, db_path = cli_env_rw
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "coverage"
+        ])
+        assert result.exit_code == 0
+        assert "stale" not in _all_output(result)
+
+
+class TestAuditCycles:
+    def test_audit_reports_scc_cycle(self, cli_env):
+        # F-01 -> REQ-01 (features.md) and REQ-01 -> F-01 (requirements table)
+        # form an SCC; audit must flag CYCLE without enumerating simple cycles.
+        runner, root, db_path = cli_env
+        result = runner.invoke(cli, [
+            "--root", str(root), "--db", str(db_path), "audit"
+        ])
+        assert result.exit_code == 0
+        assert "CYCLE" in result.output
