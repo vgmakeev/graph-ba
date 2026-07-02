@@ -242,32 +242,31 @@ def scan_references(
     return all_refs
 
 
-# ── Phase 2b: Code reference extraction ──────────────────────────
+# ── Phase 2b: Code / test reference extraction ───────────────────
 
-def scan_code_references(
+def _scan_source_references(
     root: Path,
+    dirs: List[str],
+    extensions: List[str],
+    extract_raw_ids,
     config: ProjectConfig,
 ) -> List[CodeReference]:
-    """Scan source code files for @trace comments referencing BA artifacts."""
-    if not config.code:
-        return []
+    """Generic per-line scanner over source files.
 
-    code_cfg = config.code
-    comment_re = code_cfg.comment_pattern
-    if not comment_re:
-        return []
-
+    `extract_raw_ids(line) -> List[str]` returns raw artifact ID candidates
+    for a line; they are normalized and kept only if classifiable.
+    """
     results: List[CodeReference] = []
 
-    code_files: List[Path] = []
-    for dir_str in code_cfg.dirs:
+    files: List[Path] = []
+    for dir_str in dirs:
         d = root / dir_str
         if not d.exists():
             continue
-        for ext in code_cfg.extensions:
-            code_files.extend(sorted(d.rglob(f"*.{ext}")))
+        for ext in extensions:
+            files.extend(sorted(d.rglob(f"*.{ext}")))
 
-    for filepath in code_files:
+    for filepath in files:
         try:
             lines = filepath.read_text(encoding="utf-8").splitlines()
         except (UnicodeDecodeError, OSError):
@@ -279,15 +278,8 @@ def scan_code_references(
             rel_path = str(filepath)
 
         for line_num, line in enumerate(lines, 1):
-            m = comment_re.match(line)
-            if not m:
-                continue
-
-            raw_ids_str = m.group(1).strip()
-            raw_ids = [s.strip() for s in re.split(r'[,\s]+', raw_ids_str) if s.strip()]
-
             target_ids = []
-            for raw_id in raw_ids:
+            for raw_id in extract_raw_ids(line):
                 raw_id = raw_id.strip(".,;:")
                 if not raw_id:
                     continue
@@ -305,6 +297,52 @@ def scan_code_references(
                 ))
 
     return results
+
+
+def scan_code_references(
+    root: Path,
+    config: ProjectConfig,
+) -> List[CodeReference]:
+    """Scan source code files for @trace comments referencing BA artifacts."""
+    if not config.code or not config.code.comment_pattern:
+        return []
+
+    comment_re = config.code.comment_pattern
+
+    def extract(line: str) -> List[str]:
+        m = comment_re.match(line)
+        if not m:
+            return []
+        raw_ids_str = m.group(1).strip()
+        return [s.strip() for s in re.split(r'[,\s]+', raw_ids_str) if s.strip()]
+
+    return _scan_source_references(
+        root, config.code.dirs, config.code.extensions, extract, config)
+
+
+def scan_test_references(
+    root: Path,
+    config: ProjectConfig,
+) -> List[CodeReference]:
+    """Scan test files for artifact ID references (TEST: nodes).
+
+    Unlike code scanning, no @trace marker is required: any artifact ID
+    matching a configured type ref pattern counts as test evidence.
+    """
+    if not config.tests:
+        return []
+
+    type_patterns = [tdef.ref_pattern for tdef in config.types.values()]
+
+    def extract(line: str) -> List[str]:
+        ids: List[str] = []
+        for pattern in type_patterns:
+            for m in pattern.finditer(line):
+                ids.append(m.group(1))
+        return ids
+
+    return _scan_source_references(
+        root, config.tests.dirs, config.tests.extensions, extract, config)
 
 
 # ── Phase 3: Graph construction ──────────────────────────────────
@@ -332,6 +370,7 @@ def build_graph(
     config: ProjectConfig,
     index_xrefs: Optional[List[Tuple[str, str, Path, int]]] = None,
     code_refs: Optional[List[CodeReference]] = None,
+    test_refs: Optional[List[CodeReference]] = None,
 ) -> nx.DiGraph:
     G = nx.DiGraph()
 
@@ -381,22 +420,9 @@ def build_graph(
                 G.add_edge(src, tgt, context="index_table",
                            source_file=str(fpath.name), line=lnum)
 
-    # ── Code references → CODE nodes ──
-    if code_refs:
-        for cref in code_refs:
-            code_node_id = f"CODE:{cref.rel_path}"
-            if not G.has_node(code_node_id):
-                G.add_node(code_node_id, type="CODE", title=cref.rel_path,
-                           source_file=cref.rel_path, defined=True)
-            for target_id in cref.target_ids:
-                if target_id not in G:
-                    atype = classify_id(target_id, config)
-                    G.add_node(target_id, type=atype or "UNKNOWN",
-                               title="", source_file="", defined=False)
-                G.add_edge(code_node_id, target_id,
-                           context=cref.context,
-                           source_file=cref.rel_path,
-                           line=cref.line_number)
+    # ── Code references → CODE nodes, test references → TEST nodes ──
+    _add_source_ref_nodes(G, code_refs, "CODE:", "CODE", config)
+    _add_source_ref_nodes(G, test_refs, "TEST:", "TEST", config)
 
     for aid in registry:
         G.nodes[aid]["defined"] = True
@@ -404,6 +430,32 @@ def build_graph(
     _resolve_dangling_variants(G, registry)
 
     return G
+
+
+def _add_source_ref_nodes(
+    G: nx.DiGraph,
+    refs: Optional[List[CodeReference]],
+    prefix: str,
+    node_type: str,
+    config: ProjectConfig,
+):
+    """Add meta-nodes (CODE:/TEST:) with edges to referenced artifacts."""
+    if not refs:
+        return
+    for cref in refs:
+        node_id = f"{prefix}{cref.rel_path}"
+        if not G.has_node(node_id):
+            G.add_node(node_id, type=node_type, title=cref.rel_path,
+                       source_file=cref.rel_path, defined=True)
+        for target_id in cref.target_ids:
+            if target_id not in G:
+                atype = classify_id(target_id, config)
+                G.add_node(target_id, type=atype or "UNKNOWN",
+                           title="", source_file="", defined=False)
+            G.add_edge(node_id, target_id,
+                       context=cref.context,
+                       source_file=cref.rel_path,
+                       line=cref.line_number)
 
 
 def _resolve_dangling_variants(G: nx.DiGraph, registry: Dict[str, Artifact]):
@@ -648,6 +700,7 @@ _DEFAULT_COLORS = {
     "RL":      {"bg": "#C6F6D5", "border": "#22543D"},
     "FILE":    {"bg": "#F7FAFC", "border": "#A0AEC0"},
     "CODE":    {"bg": "#E6FFFA", "border": "#319795"},
+    "TEST":    {"bg": "#FAF5FF", "border": "#805AD5"},
     "UNKNOWN": {"bg": "#FED7D7", "border": "#E53E3E"},
 }
 
@@ -1106,11 +1159,12 @@ def main(root: Path, json_out: Optional[Path], dot_out: Optional[Path],
     references = scan_references(root, registry, config)
     index_xrefs = scan_index_cross_refs(root, config)
     code_refs = scan_code_references(root, config)
+    test_refs = scan_test_references(root, config)
     if verbose:
         print(f"[scan] {len(references)} references found, {len(index_xrefs)} index cross-refs, "
-              f"{len(code_refs)} code trace refs")
+              f"{len(code_refs)} code trace refs, {len(test_refs)} test refs")
 
-    G = build_graph(registry, references, config, index_xrefs, code_refs)
+    G = build_graph(registry, references, config, index_xrefs, code_refs, test_refs)
     report = verify(G, registry, references, config)
     print_report(report, registry, config, verbose)
 

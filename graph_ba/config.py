@@ -74,6 +74,16 @@ class CodeConfig:
 
 
 @dataclass
+class TestsConfig:
+    """Configuration for scanning test files for artifact ID references."""
+    dirs: List[str]
+    extensions: List[str] = field(default_factory=lambda: [
+        "py", "ts", "tsx", "js", "dart",
+    ])
+    coverage_types: List[str] = field(default_factory=list)
+
+
+@dataclass
 class LintConfig:
     """Configuration for the lint command."""
     glossary_file: Optional[str] = None
@@ -102,6 +112,8 @@ class ProjectConfig:
     expected_cross_layer: Dict[str, List[Tuple[str, str]]]  # type -> [(target_type, label)]
     # Code traceability
     code: Optional[CodeConfig] = None
+    # Test traceability
+    tests: Optional[TestsConfig] = None
     # Lint
     lint: Optional[LintConfig] = None
 
@@ -221,6 +233,16 @@ def load_config(root: Path) -> ProjectConfig:
             coverage_types=code_data.get("coverage_types", []),
         )
 
+    # ── Tests scan config ──
+    tests_data = data.get("tests")
+    tests_config = None
+    if tests_data:
+        tests_config = TestsConfig(
+            dirs=tests_data.get("dirs", []),
+            extensions=tests_data.get("extensions", TestsConfig(dirs=[]).extensions),
+            coverage_types=tests_data.get("coverage_types", []),
+        )
+
     # ── Lint config ──
     lint_data = data.get("lint")
     lint_config = None
@@ -246,6 +268,7 @@ def load_config(root: Path) -> ProjectConfig:
         expected_bidir=expected_bidir,
         expected_cross_layer=expected_cross_layer,
         code=code_config,
+        tests=tests_config,
         lint=lint_config,
     )
 
