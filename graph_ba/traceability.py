@@ -337,6 +337,11 @@ def scan_test_references(
 
     Unlike code scanning, no @trace marker is required: any artifact ID
     matching a configured type ref pattern counts as test evidence.
+
+    Files come from `dirs` (recursive, filtered by `extensions`) plus
+    `files` glob patterns — the latter for colocated tests (e.g.
+    `src/**/*.test.ts`) where scanning the whole dir would count ordinary
+    source mentions as evidence.
     """
     if not config.tests:
         return []
@@ -350,8 +355,18 @@ def scan_test_references(
                 ids.append(m.group(1))
         return ids
 
-    return _scan_source_references(
+    refs = _scan_source_references(
         root, config.tests.dirs, config.tests.extensions, extract, config)
+
+    if config.tests.files:
+        glob_files: List[Path] = []
+        for pattern in config.tests.files:
+            glob_files.extend(sorted(root.glob(pattern)))
+        seen = {r.code_file for r in refs}
+        glob_files = [f for f in glob_files if f not in seen]
+        refs.extend(_scan_file_references(root, glob_files, extract, config))
+
+    return refs
 
 
 def scan_ui_references(

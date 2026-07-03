@@ -248,4 +248,5 @@ class TestTestLayer:
             "--root", str(root), "--db", str(db_path), "import"
         ])
         assert result.exit_code == 0
-        assert "1 test files" in result.output
+        # tests/test_orders.py (dir scan) + src/mappers.test.ts ([tests].files glob)
+        assert "2 test files" in result.output
