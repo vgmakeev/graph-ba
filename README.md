@@ -151,6 +151,14 @@ dirs = ["tests"]
 extensions = ["py", "ts", "tsx", "js", "dart"]  # default
 coverage_types = ["REQ"]
 
+# UI traceability — machine-readable trace sidecars (e.g. a feature-level
+# trace.json mapping data-testid → AC IDs) become UI: nodes; any artifact ID
+# in them counts as a UI-to-artifact link. `coverage` shows a
+# "UI trace coverage" block per listed type.
+[ui]
+files = ["app/src/features/*/api/trace.json"]  # root-relative globs
+coverage_types = ["REQ"]
+
 # Content linting
 [lint]
 glossary_file = "docs/glossary.md"

@@ -7,7 +7,7 @@ from click.testing import CliRunner
 from graph_ba.config import load_config
 from graph_ba.traceability import (
     scan_definitions, scan_references, scan_index_cross_refs,
-    scan_code_references, scan_test_references, build_graph,
+    scan_code_references, scan_test_references, scan_ui_references, build_graph,
 )
 from graph_ba.graph_db import get_db, do_import, cli
 
@@ -115,6 +115,10 @@ coverage_types = ["FEAT", "REQ"]
 [tests]
 dirs = ["tests"]
 coverage_types = ["REQ"]
+
+[ui]
+files = ["ui/*/trace.json"]
+coverage_types = ["REQ"]
 """
 
 # ── Synthetic markdown files ──────────────────────────────────────
@@ -221,6 +225,15 @@ def test_req_01_orders():
     assert True
 """
 
+# ── Synthetic UI trace sidecar (UI: layer) ────────────────────────
+
+UI_TRACE_JSON = """\
+{
+  "orders-table": { "acIds": ["REQ-01", "REQ-02"], "source": "orders" },
+  "orders-empty-state": { "traceGap": "no canonical criterion yet" }
+}
+"""
+
 INDEX_MD = """\
 # Cross-Reference Index
 
@@ -264,6 +277,11 @@ def ba_project(tmp_path_factory):
     tests_dir.mkdir()
     (tests_dir / "test_orders.py").write_text(TEST_ORDERS_PY, encoding="utf-8")
 
+    # UI trace sidecar for the UI: traceability layer
+    ui_dir = root / "ui" / "orders"
+    ui_dir.mkdir(parents=True)
+    (ui_dir / "trace.json").write_text(UI_TRACE_JSON, encoding="utf-8")
+
     return root
 
 
@@ -287,10 +305,15 @@ def test_refs(ba_project, project_config):
 
 
 @pytest.fixture(scope="session")
-def built_graph(scan_result, test_refs, project_config):
+def ui_refs(ba_project, project_config):
+    return scan_ui_references(ba_project, project_config)
+
+
+@pytest.fixture(scope="session")
+def built_graph(scan_result, test_refs, ui_refs, project_config):
     registry, references, index_xrefs, code_refs = scan_result
     G = build_graph(registry, references, project_config, index_xrefs, code_refs,
-                    test_refs)
+                    test_refs, ui_refs)
     return G, registry
 
 
