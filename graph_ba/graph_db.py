@@ -26,9 +26,9 @@ DB_PATH = Path.cwd() / "reports" / "graph.db"
 
 
 def _is_meta_node(node_id: str) -> bool:
-    """Check if node is a meta-node (FILE:, CODE: or TEST:) rather than a BA artifact."""
+    """Check if node is a meta-node (FILE:, CODE:, TEST: or UI:) rather than a BA artifact."""
     return (node_id.startswith("FILE:") or node_id.startswith("CODE:")
-            or node_id.startswith("TEST:"))
+            or node_id.startswith("TEST:") or node_id.startswith("UI:"))
 
 
 def _json_out(ctx, data):
@@ -145,7 +145,9 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False):
     index_xrefs = t.scan_index_cross_refs(root, config)
     code_refs = t.scan_code_references(root, config)
     test_refs = t.scan_test_references(root, config)
-    G = t.build_graph(registry, references, config, index_xrefs, code_refs, test_refs)
+    ui_refs = t.scan_ui_references(root, config)
+    G = t.build_graph(registry, references, config, index_xrefs, code_refs, test_refs,
+                      ui_refs)
 
     # Clear existing data
     db.executescript("""
@@ -194,6 +196,8 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False):
         file_map[cref.code_file.name] = str(cref.code_file)
     for tref in test_refs:
         file_map[tref.code_file.name] = str(tref.code_file)
+    for uref in ui_refs:
+        file_map[uref.code_file.name] = str(uref.code_file)
     for fname, fpath in file_map.items():
         db.execute("INSERT OR IGNORE INTO file_paths (filename, full_path) VALUES (?, ?)",
                    (fname, fpath))
@@ -222,10 +226,13 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False):
     n_test = db.execute(
         "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'TEST:%'"
     ).fetchone()[0]
+    n_ui = db.execute(
+        "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'UI:%'"
+    ).fetchone()[0]
     db_path = db.execute("PRAGMA database_list").fetchone()[2]
     print(f"Imported: {n_nodes} artifacts, {n_edges} edges, "
           f"{n_clusters} semantic clusters, {n_code} code files, "
-          f"{n_test} test files")
+          f"{n_test} test files, {n_ui} ui trace files")
     print(f"DB: {db_path}")
 
 
@@ -474,6 +481,13 @@ pattern = '^##\\s+(FEAT-\\d{2,4})\\s*[—–\\-]\\s*(.*)'
 # [tests]
 # dirs = ["tests"]
 # extensions = ["py", "ts", "tsx", "js", "dart"]
+# coverage_types = ["REQ"]
+
+# ── UI traceability ──
+# UI trace sidecars (e.g. trace.json mapping data-testid -> AC IDs) become
+# UI: nodes; any artifact ID found in them counts as a UI link.
+# [ui]
+# files = ["app/src/features/*/api/trace.json"]
 # coverage_types = ["REQ"]
 '''
     config_path.write_text(template, encoding="utf-8")
@@ -777,7 +791,9 @@ def coverage(ctx):
     pairs = [(cp.source, cp.target) for cp in config.coverage_pairs]
     has_code_coverage = config.code and config.code.coverage_types
     has_test_coverage = config.tests and config.tests.coverage_types
-    if not pairs and not has_code_coverage and not has_test_coverage:
+    has_ui_coverage = config.ui and config.ui.coverage_types
+    if not pairs and not has_code_coverage and not has_test_coverage \
+            and not has_ui_coverage:
         print("No coverage pairs defined in graph-ba.toml [coverage]")
         db.close()
         return
@@ -837,10 +853,16 @@ def coverage(ctx):
     if has_test_coverage:
         test_results = _meta_coverage(config.tests.coverage_types, "TEST:")
 
+    # UI coverage
+    ui_results = []
+    if has_ui_coverage:
+        ui_results = _meta_coverage(config.ui.coverage_types, "UI:")
+
     db.close()
 
     if _json_out(ctx, {"pairs": results, "code_coverage": code_results,
-                       "test_coverage": test_results}):
+                       "test_coverage": test_results,
+                       "ui_coverage": ui_results}):
         return
 
     if results:
@@ -865,6 +887,14 @@ def coverage(ctx):
         for r in test_results:
             bar = "█" * int(r["pct"] / 5) + "░" * (20 - int(r["pct"] / 5))
             print(f"  TEST → {r['type']:8s}  {r['linked']:3d}/{r['total']:<3d}  "
+                  f"{bar}  {r['pct']:5.1f}%  [{r['status']}]")
+
+    if ui_results:
+        print("\nUI trace coverage:")
+        print()
+        for r in ui_results:
+            bar = "█" * int(r["pct"] / 5) + "░" * (20 - int(r["pct"] / 5))
+            print(f"  UI   → {r['type']:8s}  {r['linked']:3d}/{r['total']:<3d}  "
                   f"{bar}  {r['pct']:5.1f}%  [{r['status']}]")
 
 

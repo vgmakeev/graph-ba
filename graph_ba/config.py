@@ -84,6 +84,19 @@ class TestsConfig:
 
 
 @dataclass
+class UiConfig:
+    """Configuration for scanning UI trace sidecar files (UI: nodes).
+
+    `files` are root-relative glob patterns pointing at machine-readable
+    trace files (e.g. feature-level trace.json mapping data-testid -> AC IDs).
+    Any artifact ID matching a configured type ref pattern counts as a
+    UI-to-artifact link.
+    """
+    files: List[str]
+    coverage_types: List[str] = field(default_factory=list)
+
+
+@dataclass
 class LintConfig:
     """Configuration for the lint command."""
     glossary_file: Optional[str] = None
@@ -114,6 +127,8 @@ class ProjectConfig:
     code: Optional[CodeConfig] = None
     # Test traceability
     tests: Optional[TestsConfig] = None
+    # UI traceability
+    ui: Optional[UiConfig] = None
     # Lint
     lint: Optional[LintConfig] = None
 
@@ -243,6 +258,15 @@ def load_config(root: Path) -> ProjectConfig:
             coverage_types=tests_data.get("coverage_types", []),
         )
 
+    # ── UI scan config ──
+    ui_data = data.get("ui")
+    ui_config = None
+    if ui_data:
+        ui_config = UiConfig(
+            files=ui_data.get("files", []),
+            coverage_types=ui_data.get("coverage_types", []),
+        )
+
     # ── Lint config ──
     lint_data = data.get("lint")
     lint_config = None
@@ -269,6 +293,7 @@ def load_config(root: Path) -> ProjectConfig:
         expected_cross_layer=expected_cross_layer,
         code=code_config,
         tests=tests_config,
+        ui=ui_config,
         lint=lint_config,
     )
 

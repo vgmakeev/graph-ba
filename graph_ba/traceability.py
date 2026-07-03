@@ -256,8 +256,6 @@ def _scan_source_references(
     `extract_raw_ids(line) -> List[str]` returns raw artifact ID candidates
     for a line; they are normalized and kept only if classifiable.
     """
-    results: List[CodeReference] = []
-
     files: List[Path] = []
     for dir_str in dirs:
         d = root / dir_str
@@ -265,6 +263,17 @@ def _scan_source_references(
             continue
         for ext in extensions:
             files.extend(sorted(d.rglob(f"*.{ext}")))
+
+    return _scan_file_references(root, files, extract_raw_ids, config)
+
+
+def _scan_file_references(
+    root: Path,
+    files: List[Path],
+    extract_raw_ids,
+    config: ProjectConfig,
+) -> List[CodeReference]:
+    results: List[CodeReference] = []
 
     for filepath in files:
         try:
@@ -345,6 +354,35 @@ def scan_test_references(
         root, config.tests.dirs, config.tests.extensions, extract, config)
 
 
+def scan_ui_references(
+    root: Path,
+    config: ProjectConfig,
+) -> List[CodeReference]:
+    """Scan UI trace sidecar files for artifact ID references (UI: nodes).
+
+    Files come from root-relative glob patterns in [ui].files. Like test
+    scanning, no marker is required: any artifact ID matching a configured
+    type ref pattern counts as a UI-to-artifact link.
+    """
+    if not config.ui:
+        return []
+
+    files: List[Path] = []
+    for pattern in config.ui.files:
+        files.extend(sorted(root.glob(pattern)))
+
+    type_patterns = [tdef.ref_pattern for tdef in config.types.values()]
+
+    def extract(line: str) -> List[str]:
+        ids: List[str] = []
+        for pattern in type_patterns:
+            for m in pattern.finditer(line):
+                ids.append(m.group(1))
+        return ids
+
+    return _scan_file_references(root, files, extract, config)
+
+
 # ── Phase 3: Graph construction ──────────────────────────────────
 
 def _find_owner(
@@ -371,6 +409,7 @@ def build_graph(
     index_xrefs: Optional[List[Tuple[str, str, Path, int]]] = None,
     code_refs: Optional[List[CodeReference]] = None,
     test_refs: Optional[List[CodeReference]] = None,
+    ui_refs: Optional[List[CodeReference]] = None,
 ) -> nx.DiGraph:
     G = nx.DiGraph()
 
@@ -420,9 +459,11 @@ def build_graph(
                 G.add_edge(src, tgt, context="index_table",
                            source_file=str(fpath.name), line=lnum)
 
-    # ── Code references → CODE nodes, test references → TEST nodes ──
+    # ── Code references → CODE nodes, test references → TEST nodes,
+    #    UI trace references → UI nodes ──
     _add_source_ref_nodes(G, code_refs, "CODE:", "CODE", config)
     _add_source_ref_nodes(G, test_refs, "TEST:", "TEST", config)
+    _add_source_ref_nodes(G, ui_refs, "UI:", "UI", config)
 
     for aid in registry:
         G.nodes[aid]["defined"] = True
