@@ -80,6 +80,8 @@ class TestsConfig:
     extensions: List[str] = field(default_factory=lambda: [
         "py", "ts", "tsx", "js", "dart",
     ])
+    # Root-relative glob patterns for colocated tests (e.g. "src/**/*.test.ts")
+    files: List[str] = field(default_factory=list)
     coverage_types: List[str] = field(default_factory=list)
 
 
@@ -255,6 +257,7 @@ def load_config(root: Path) -> ProjectConfig:
         tests_config = TestsConfig(
             dirs=tests_data.get("dirs", []),
             extensions=tests_data.get("extensions", TestsConfig(dirs=[]).extensions),
+            files=tests_data.get("files", []),
             coverage_types=tests_data.get("coverage_types", []),
         )
 

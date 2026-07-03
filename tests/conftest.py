@@ -114,6 +114,7 @@ coverage_types = ["FEAT", "REQ"]
 
 [tests]
 dirs = ["tests"]
+files = ["src/**/*.test.ts"]
 coverage_types = ["REQ"]
 
 [ui]
@@ -225,6 +226,13 @@ def test_req_01_orders():
     assert True
 """
 
+# Colocated test picked up via [tests].files glob (not under tests/ dir).
+# References REQ-01 so REQ-02 stays evidence-free for validate warn tests.
+TEST_MAPPERS_TS = """\
+// REQ-01 mapper contract
+test("REQ-01 maps order rows", () => {});
+"""
+
 # ── Synthetic UI trace sidecar (UI: layer) ────────────────────────
 
 UI_TRACE_JSON = """\
@@ -276,6 +284,7 @@ def ba_project(tmp_path_factory):
     tests_dir = root / "tests"
     tests_dir.mkdir()
     (tests_dir / "test_orders.py").write_text(TEST_ORDERS_PY, encoding="utf-8")
+    (src / "mappers.test.ts").write_text(TEST_MAPPERS_TS, encoding="utf-8")
 
     # UI trace sidecar for the UI: traceability layer
     ui_dir = root / "ui" / "orders"
