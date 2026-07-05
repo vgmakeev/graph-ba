@@ -4,7 +4,7 @@ import json
 from click.testing import CliRunner
 
 from graph_ba.config import load_config
-from graph_ba.graph_db import cli
+from graph_ba.cli import cli
 
 
 UI_NODE = "UI:ui/orders/trace.json"

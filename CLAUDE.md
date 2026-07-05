@@ -79,7 +79,12 @@ graph-ba --json coverage
 graph_ba/
 ├── config.py         — загрузка и валидация graph-ba.toml
 ├── traceability.py   — сканер артефактов, построение графа, экспорт
-└── graph_db.py       — SQLite + FTS5 БД, CLI (click), anomaly detection
+├── db.py             — SQLite schema, import, FTS, NetworkX loader, file cache
+├── review.py         — review/validate logic
+├── lint.py           — content lint checks
+├── audit.py          — coverage, anomalies, global audit logic
+├── cli.py            — Click commands and text/JSON rendering
+└── mcp_server.py     — MCP stdio server over the same run_* functions
 tests/
 ├── conftest.py       — синтетический BA-проект (фикстуры)
 ├── test_config.py    — config loading, normalization, classification
@@ -90,8 +95,34 @@ tests/
 ```
 
 - `traceability.py` — ядро: скан определений, ссылок, построение NetworkX-графа, верификация, экспорт (JSON, DOT, HTML, ARTIFACT_INDEX.md)
-- `graph_db.py` — импорт графа в SQLite, FTS5-поиск, CLI команды для навигации и анализа
+- `db.py` — импорт графа в SQLite, FTS5-поиск, schema version, scanned_files snapshot
+- `cli.py` — CLI-команды, JSON/text рендеринг, auto-import guard
+- `review.py`, `lint.py`, `audit.py` — чистые функции анализа, пригодные для CLI и MCP
 - `config.py` — загрузка TOML конфига, нормализация ID, классификация
+
+## MCP
+
+Optional extra:
+
+```bash
+uv tool install --with mcp .
+```
+
+Claude Code:
+
+```bash
+claude mcp add graph-ba -- uvx --from ~/dev/graph-ba --with mcp graph-ba-mcp
+```
+
+Codex config example:
+
+```toml
+[mcp_servers.graph-ba]
+command = "uvx"
+args = ["--from", "~/dev/graph-ba", "--with", "mcp", "graph-ba-mcp"]
+```
+
+Tools: `ba_search`, `ba_node`, `ba_review`, `ba_impact`, `ba_coverage`, `ba_anomalies`, `ba_audit`, `ba_path`, `ba_sql`.
 
 ## Тесты
 

@@ -9,7 +9,8 @@ from graph_ba.traceability import (
     scan_definitions, scan_references, scan_index_cross_refs,
     scan_code_references, scan_test_references, scan_ui_references, build_graph,
 )
-from graph_ba.graph_db import get_db, do_import, cli
+from graph_ba.cli import cli
+from graph_ba.db import get_db, do_import
 
 
 # ── Synthetic TOML config ─────────────────────────────────────────

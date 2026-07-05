@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from graph_ba.graph_db import cli
+from graph_ba.cli import cli
 
 
 class TestValidateCmd:

@@ -4,7 +4,7 @@ import json
 import pytest
 from click.testing import CliRunner
 
-from graph_ba.graph_db import cli
+from graph_ba.cli import cli
 
 
 class TestImportCmd:
@@ -577,6 +577,31 @@ class TestRequireGraph:
         assert result.exit_code == 0
         assert "stale" not in _all_output(result)
         assert "auto-import" not in _all_output(result)
+
+    def test_schema_version_mismatch_rebuilds(self, ba_project, tmp_path):
+        import sqlite3
+
+        from graph_ba.db import get_db, do_import
+
+        runner = CliRunner()
+        db_path = tmp_path / "old_schema.db"
+        db = get_db(db_path)
+        do_import(ba_project, db, quiet=True)
+        db.execute("PRAGMA user_version = 0")
+        db.close()
+
+        result = runner.invoke(cli, [
+            "--root", str(ba_project), "--db", str(db_path), "node", "F-01"
+        ])
+        assert result.exit_code == 0, _all_output(result)
+        assert "schema changed" in _all_output(result)
+        assert "F-01" in result.output
+        check = sqlite3.connect(db_path)
+        try:
+            version = check.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            check.close()
+        assert version == 1
 
 
 class TestAuditCycles:

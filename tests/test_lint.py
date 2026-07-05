@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from graph_ba.graph_db import cli, get_db, do_import, do_lint
+from graph_ba.cli import cli
+from graph_ba.db import get_db, do_import
+from graph_ba.lint import do_lint
 
 
 # ── Synthetic project with lint-relevant content ─────────────────

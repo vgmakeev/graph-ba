@@ -1,8 +1,9 @@
-"""Tests for graph_db.py: SQLite schema, import, query helpers."""
+"""Tests for SQLite schema, import, query helpers."""
 import pytest
 import sqlite3
 
-from graph_ba.graph_db import get_db, _fts_query, fmt_table, _load_nx
+from graph_ba.cli import fmt_table
+from graph_ba.db import get_db, _fts_query, _load_nx
 
 
 class TestSchema:
@@ -61,12 +62,28 @@ class TestImport:
         """Running import twice doesn't crash or duplicate."""
         path = tmp_path / "idem.db"
         db = get_db(path)
-        from graph_ba.graph_db import do_import
+        from graph_ba.db import do_import
         do_import(ba_project, db)
         count1 = db.execute("SELECT count(*) FROM artifacts").fetchone()[0]
         do_import(ba_project, db)
         count2 = db.execute("SELECT count(*) FROM artifacts").fetchone()[0]
         assert count1 == count2
+        db.close()
+
+    def test_noop_import_preserves_import_time(self, ba_project, tmp_path):
+        path = tmp_path / "noop.db"
+        db = get_db(path)
+        from graph_ba.db import do_import
+        do_import(ba_project, db, quiet=True)
+        import_time1 = db.execute(
+            "SELECT value FROM meta WHERE key = 'import_time'"
+        ).fetchone()["value"]
+        changed = do_import(ba_project, db, quiet=True)
+        import_time2 = db.execute(
+            "SELECT value FROM meta WHERE key = 'import_time'"
+        ).fetchone()["value"]
+        assert changed is False
+        assert import_time1 == import_time2
         db.close()
 
 

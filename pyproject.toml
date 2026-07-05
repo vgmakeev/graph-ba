@@ -8,8 +8,12 @@ dependencies = [
     "click>=8.0",
 ]
 
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+
 [project.scripts]
-graph-ba = "graph_ba.graph_db:cli"
+graph-ba = "graph_ba.cli:cli"
+graph-ba-mcp = "graph_ba.mcp_server:main"
 trace-ba = "graph_ba.traceability:main"
 
 [dependency-groups]
