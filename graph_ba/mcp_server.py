@@ -42,7 +42,7 @@ def ba_search(query: str, root: str = ".", db_path: Optional[str] = None,
     _, _, db = _open(root, db_path)
     fq = _fts_query(query)
     artifacts = db.execute(
-        "SELECT a.id, a.type, a.title, a.source_file "
+        "SELECT a.id, a.type, a.origin, a.title, a.source_file "
         "FROM artifacts_fts f JOIN artifacts a ON f.rowid = a.rowid "
         "WHERE artifacts_fts MATCH ? ORDER BY rank LIMIT ?",
         (fq, limit)
@@ -53,7 +53,7 @@ def ba_search(query: str, root: str = ".", db_path: Optional[str] = None,
         (fq, limit)
     ).fetchall()
     edges = db.execute(
-        "SELECT source_id, target_id, context FROM edges_fts "
+        "SELECT source_id, target_id, relation_type, context FROM edges_fts "
         "WHERE edges_fts MATCH ? LIMIT ?",
         (fq, limit)
     ).fetchall()
@@ -62,6 +62,36 @@ def ba_search(query: str, root: str = ".", db_path: Optional[str] = None,
         "artifacts": [dict(r) for r in artifacts],
         "clusters": [dict(r) for r in clusters],
         "edges": [dict(r) for r in edges],
+    }
+
+
+@mcp.tool()
+def ba_schema(root: str = ".", db_path: Optional[str] = None) -> dict:
+    """Return configured artifact types, origin enum and relation type enum."""
+    _, config, db = _open(root, db_path)
+    origins = db.execute(
+        "SELECT id, label, description FROM artifact_origins ORDER BY id"
+    ).fetchall()
+    relations = db.execute(
+        "SELECT id, label, description, direction FROM relation_types ORDER BY id"
+    ).fetchall()
+    db.close()
+    return {
+        "types": [
+            {
+                "id": tid,
+                "label": tdef.label,
+                "origin": tdef.origin,
+                "restrict_to": tdef.restrict_to or [],
+            }
+            for tid, tdef in config.types.items()
+        ],
+        "origins": [dict(r) for r in origins],
+        "relation_types": [dict(r) for r in relations],
+        "coverage": [
+            {"source": c.source, "target": c.target, "label": c.label}
+            for c in config.coverage_pairs
+        ],
     }
 
 
@@ -78,13 +108,15 @@ def ba_node(node_id: str, root: str = ".", db_path: Optional[str] = None) -> dic
         (node_id,)
     ).fetchall()
     outgoing = db.execute(
-        "SELECT e.target_id, a.type, a.title, e.source_file, e.line_number, e.context "
+        "SELECT e.target_id, a.type, a.title, e.relation_type, "
+        "e.source_file, e.line_number, e.context "
         "FROM edges e LEFT JOIN artifacts a ON e.target_id = a.id "
         "WHERE e.source_id = ? ORDER BY a.type, e.target_id",
         (node_id,)
     ).fetchall()
     incoming = db.execute(
-        "SELECT e.source_id, a.type, a.title, e.source_file, e.line_number, e.context "
+        "SELECT e.source_id, a.type, a.title, e.relation_type, "
+        "e.source_file, e.line_number, e.context "
         "FROM edges e LEFT JOIN artifacts a ON e.source_id = a.id "
         "WHERE e.target_id = ? ORDER BY a.type, e.source_id",
         (node_id,)
@@ -93,6 +125,7 @@ def ba_node(node_id: str, root: str = ".", db_path: Optional[str] = None) -> dic
     return {
         "id": row["id"],
         "type": row["type"],
+        "origin": row["origin"],
         "title": row["title"],
         "source_file": row["source_file"],
         "line_number": row["line_number"],

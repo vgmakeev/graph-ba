@@ -13,8 +13,18 @@ class TestSchema:
         ).fetchall()}
         assert "artifacts" in tables
         assert "edges" in tables
+        assert "artifact_origins" in tables
+        assert "relation_types" in tables
         assert "semantic_clusters" in tables
         assert "file_paths" in tables
+
+    def test_artifacts_have_origin_column(self, db_conn):
+        cols = {r["name"] for r in db_conn.execute("PRAGMA table_info(artifacts)")}
+        assert "origin" in cols
+
+    def test_edges_have_relation_type_column(self, db_conn):
+        cols = {r["name"] for r in db_conn.execute("PRAGMA table_info(edges)")}
+        assert "relation_type" in cols
 
     def test_fts_tables_created(self, db_conn):
         tables = {r[0] for r in db_conn.execute(
@@ -58,6 +68,33 @@ class TestImport:
         # 11 BA artifacts + FILE:index.md
         assert defined >= 11
 
+    def test_artifact_origin_persisted(self, db_conn):
+        row = db_conn.execute(
+            "SELECT origin FROM artifacts WHERE id = 'ST-01'"
+        ).fetchone()
+        assert row["origin"] == "human"
+
+    def test_edge_relation_type_persisted(self, db_conn):
+        row = db_conn.execute(
+            "SELECT relation_type FROM edges "
+            "WHERE source_id LIKE 'TEST:%' AND target_id = 'REQ-01'"
+        ).fetchone()
+        assert row["relation_type"] == "TEST_EVIDENCE"
+
+    def test_origin_enum_dictionary_persisted(self, db_conn):
+        row = db_conn.execute(
+            "SELECT label, description FROM artifact_origins WHERE id = 'reviewed_derived'"
+        ).fetchone()
+        assert row["label"] == "Reviewed derived artifact"
+        assert "reviewed" in row["description"]
+
+    def test_relation_type_enum_dictionary_persisted(self, db_conn):
+        row = db_conn.execute(
+            "SELECT label, direction FROM relation_types WHERE id = 'NORMALIZES'"
+        ).fetchone()
+        assert row["label"] == "Normalizes raw input"
+        assert row["direction"] == "canonical_to_raw"
+
     def test_idempotent(self, ba_project, tmp_path):
         """Running import twice doesn't crash or duplicate."""
         path = tmp_path / "idem.db"
@@ -94,6 +131,9 @@ class TestFtsQuery:
     def test_unicode_wildcard(self):
         result = _fts_query("kitchen")
         assert result == "kitchen*"
+
+    def test_hyphenated_id_is_tokenized(self):
+        assert _fts_query("RAC-KITCHEN") == "RAC* KITCHEN*"
 
     def test_passthrough_quoted(self):
         assert _fts_query('"exact match"') == '"exact match"'

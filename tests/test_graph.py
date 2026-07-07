@@ -30,8 +30,13 @@ class TestBuildGraph:
         G, _ = built_graph
         data = G.nodes["F-01"]
         assert data["type"] == "FEAT"
+        assert data["origin"] == "reviewed_derived"
         assert "Order Management" in data.get("title", "")
         assert data.get("source_file")
+
+    def test_human_origin_from_type(self, built_graph):
+        G, _ = built_graph
+        assert G.nodes["ST-01"]["origin"] == "human"
 
     def test_expected_edges(self, built_graph):
         G, _ = built_graph
@@ -56,6 +61,16 @@ class TestBuildGraph:
         G, _ = built_graph
         data = G.edges["F-01", "REQ-01"]
         assert "source_file" in data
+        assert data["relation_type"] in {"MENTIONS", "INDEX"}
+
+    def test_meta_edge_relation_types(self, built_graph):
+        G, _ = built_graph
+        code_node = next(n for n in G.nodes() if n.startswith("CODE:") and "order.ts" in n)
+        test_node = next(n for n in G.nodes() if n.startswith("TEST:"))
+        ui_node = next(n for n in G.nodes() if n.startswith("UI:"))
+        assert G.edges[code_node, "REQ-01"]["relation_type"] == "CODE_TRACE"
+        assert G.edges[test_node, "REQ-01"]["relation_type"] == "TEST_EVIDENCE"
+        assert G.edges[ui_node, "REQ-01"]["relation_type"] == "UI_TRACE"
 
 
 class TestFindOwner:

@@ -1,6 +1,7 @@
 """SQLite storage and import helpers for Graph BA."""
 from __future__ import annotations
 
+import re
 import sqlite3
 import sys
 import time
@@ -8,7 +9,7 @@ from pathlib import Path
 from typing import Optional, List, Tuple
 
 DB_PATH = Path.cwd() / "reports" / "graph.db"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -17,24 +18,41 @@ PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS artifacts (
     id          TEXT PRIMARY KEY,
     type        TEXT NOT NULL,
+    origin      TEXT NOT NULL DEFAULT '',
     title       TEXT NOT NULL DEFAULT '',
     source_file TEXT NOT NULL DEFAULT '',
     line_number INTEGER NOT NULL DEFAULT 0,
     defined     INTEGER NOT NULL DEFAULT 1
 );
 
+CREATE TABLE IF NOT EXISTS artifact_origins (
+    id          TEXT PRIMARY KEY,
+    label       TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS edges (
     source_id   TEXT NOT NULL,
     target_id   TEXT NOT NULL,
+    relation_type TEXT NOT NULL DEFAULT 'MENTIONS',
     context     TEXT NOT NULL DEFAULT '',
     source_file TEXT NOT NULL DEFAULT '',
     line_number INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (source_id, target_id, source_file, line_number)
+    PRIMARY KEY (source_id, target_id, relation_type, source_file, line_number)
+);
+
+CREATE TABLE IF NOT EXISTS relation_types (
+    id          TEXT PRIMARY KEY,
+    label       TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    direction   TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
+CREATE INDEX IF NOT EXISTS idx_edges_relation_type ON edges(relation_type);
 CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts(type);
+CREATE INDEX IF NOT EXISTS idx_artifacts_origin ON artifacts(origin);
 
 CREATE TABLE IF NOT EXISTS semantic_clusters (
     cluster_name TEXT NOT NULL,
@@ -61,14 +79,14 @@ CREATE TABLE IF NOT EXISTS scanned_files (
 
 -- FTS5 virtual table for full-text search over artifacts
 CREATE VIRTUAL TABLE IF NOT EXISTS artifacts_fts USING fts5(
-    id, type, title, source_file,
+    id, type, origin, title, source_file,
     content=artifacts,
     content_rowid=rowid
 );
 
 -- FTS5 for edge context search
 CREATE VIRTUAL TABLE IF NOT EXISTS edges_fts USING fts5(
-    source_id, target_id, context,
+    source_id, target_id, relation_type, context,
     tokenize='unicode61'
 );
 
@@ -80,18 +98,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS clusters_fts USING fts5(
 
 -- Triggers to keep FTS in sync with artifacts
 CREATE TRIGGER IF NOT EXISTS artifacts_ai AFTER INSERT ON artifacts BEGIN
-    INSERT INTO artifacts_fts(rowid, id, type, title, source_file)
-    VALUES (new.rowid, new.id, new.type, new.title, new.source_file);
+    INSERT INTO artifacts_fts(rowid, id, type, origin, title, source_file)
+    VALUES (new.rowid, new.id, new.type, new.origin, new.title, new.source_file);
 END;
 CREATE TRIGGER IF NOT EXISTS artifacts_ad AFTER DELETE ON artifacts BEGIN
-    INSERT INTO artifacts_fts(artifacts_fts, rowid, id, type, title, source_file)
-    VALUES ('delete', old.rowid, old.id, old.type, old.title, old.source_file);
+    INSERT INTO artifacts_fts(artifacts_fts, rowid, id, type, origin, title, source_file)
+    VALUES ('delete', old.rowid, old.id, old.type, old.origin, old.title, old.source_file);
 END;
 CREATE TRIGGER IF NOT EXISTS artifacts_au AFTER UPDATE ON artifacts BEGIN
-    INSERT INTO artifacts_fts(artifacts_fts, rowid, id, type, title, source_file)
-    VALUES ('delete', old.rowid, old.id, old.type, old.title, old.source_file);
-    INSERT INTO artifacts_fts(rowid, id, type, title, source_file)
-    VALUES (new.rowid, new.id, new.type, new.title, new.source_file);
+    INSERT INTO artifacts_fts(artifacts_fts, rowid, id, type, origin, title, source_file)
+    VALUES ('delete', old.rowid, old.id, old.type, old.origin, old.title, old.source_file);
+    INSERT INTO artifacts_fts(rowid, id, type, origin, title, source_file)
+    VALUES (new.rowid, new.id, new.type, new.origin, new.title, new.source_file);
 END;
 """
 
@@ -107,7 +125,9 @@ def _drop_schema(conn: sqlite3.Connection) -> None:
         DROP TABLE IF EXISTS scanned_files;
         DROP TABLE IF EXISTS semantic_clusters;
         DROP TABLE IF EXISTS edges;
+        DROP TABLE IF EXISTS relation_types;
         DROP TABLE IF EXISTS artifacts;
+        DROP TABLE IF EXISTS artifact_origins;
         DROP TABLE IF EXISTS file_paths;
         DROP TABLE IF EXISTS meta;
     """)
@@ -210,18 +230,34 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
         DELETE FROM clusters_fts;
         DELETE FROM semantic_clusters;
         DELETE FROM edges;
+        DELETE FROM relation_types;
         DELETE FROM artifacts;
+        DELETE FROM artifact_origins;
         DELETE FROM file_paths;
         DELETE FROM scanned_files;
     """)
+
+    # Insert project enum dictionaries for agent/SQL consumers.
+    for origin in config.origins.values():
+        db.execute(
+            "INSERT OR REPLACE INTO artifact_origins (id, label, description) "
+            "VALUES (?, ?, ?)",
+            (origin.id, origin.label, origin.description)
+        )
+    for relation in config.relation_types.values():
+        db.execute(
+            "INSERT OR REPLACE INTO relation_types (id, label, description, direction) "
+            "VALUES (?, ?, ?, ?)",
+            (relation.id, relation.label, relation.description, relation.direction)
+        )
 
     # Insert artifacts
     for n, d in G.nodes(data=True):
         art = registry.get(n)
         db.execute(
-            "INSERT OR REPLACE INTO artifacts (id, type, title, source_file, line_number, defined) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (n, d.get("type", "UNKNOWN"), d.get("title", ""),
+            "INSERT OR REPLACE INTO artifacts (id, type, origin, title, source_file, line_number, defined) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (n, d.get("type", "UNKNOWN"), d.get("origin", ""), d.get("title", ""),
              d.get("source_file", ""), art.line_number if art else 0,
              1 if d.get("defined", False) else 0)
         )
@@ -229,9 +265,11 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
     # Insert edges
     for u, v, d in G.edges(data=True):
         db.execute(
-            "INSERT OR IGNORE INTO edges (source_id, target_id, context, source_file, line_number) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (u, v, d.get("context", ""), d.get("source_file", ""), d.get("line", 0))
+            "INSERT OR IGNORE INTO edges "
+            "(source_id, target_id, relation_type, context, source_file, line_number) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (u, v, d.get("relation_type", "MENTIONS"), d.get("context", ""),
+             d.get("source_file", ""), d.get("line", 0))
         )
 
     # Insert semantic clusters from config
@@ -259,8 +297,8 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
                    (fname, fpath))
 
     # Populate FTS for edges and clusters
-    db.execute("INSERT INTO edges_fts(source_id, target_id, context) "
-               "SELECT source_id, target_id, context FROM edges")
+    db.execute("INSERT INTO edges_fts(source_id, target_id, relation_type, context) "
+               "SELECT source_id, target_id, relation_type, context FROM edges")
     db.execute("INSERT INTO clusters_fts(cluster_name, artifact_id) "
                "SELECT cluster_name, artifact_id FROM semantic_clusters")
 
@@ -304,7 +342,8 @@ def _fts_query(q: str) -> str:
     """
     if any(c in q for c in ('*', '"', 'OR', 'AND', 'NOT', 'NEAR')):
         return q
-    tokens = q.strip().split()
+    safe_q = re.sub(r"[^\w]+", " ", q, flags=re.UNICODE)
+    tokens = safe_q.strip().split()
     result = []
     for t in tokens:
         if not t:
@@ -318,10 +357,12 @@ def _load_nx(db: sqlite3.Connection):
     G = nx.DiGraph()
     for r in db.execute("SELECT * FROM artifacts").fetchall():
         G.add_node(r["id"], type=r["type"], title=r["title"],
-                   source_file=r["source_file"], defined=bool(r["defined"]))
+                   origin=r["origin"], source_file=r["source_file"],
+                   defined=bool(r["defined"]))
     for r in db.execute("SELECT * FROM edges").fetchall():
         G.add_edge(r["source_id"], r["target_id"],
-                   context=r["context"], source_file=r["source_file"])
+                   relation_type=r["relation_type"], context=r["context"],
+                   source_file=r["source_file"])
     return G
 
 

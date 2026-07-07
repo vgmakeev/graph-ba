@@ -26,28 +26,51 @@ char_map = {"_" = "-"}
 pattern = 'REQ-(\\d+)'
 format = 'REQ-{:02d}'
 
+[origins.human]
+label = "Human source"
+description = "Direct stakeholder input."
+
+[origins.reviewed_derived]
+label = "Reviewed derived artifact"
+description = "Agent output reviewed by an analyst."
+
+[relations.NORMALIZES]
+label = "Normalizes raw input"
+description = "Canonical AC normalizes raw source material."
+direction = "canonical_to_raw"
+
+[relations.REVIEWS]
+label = "Reviews"
+description = "Human review validates or comments on a derived artifact."
+direction = "review_to_artifact"
+
 [types.ST]
 label = "Stakeholders"
+origin = "human"
 ref = '(?<![A-Za-z])(ST-\\d{2})(?!\\d)'
 classify = 'ST-\\d{2}'
 
 [types.FEAT]
 label = "Features"
+origin = "reviewed_derived"
 ref = '(?<![A-Za-z])(F-\\d{2})(?!\\d)'
 classify = 'F-\\d{2}'
 
 [types.REQ]
 label = "Requirements"
+origin = "canonical"
 ref = '(?<![A-Za-z])(REQ-\\d{2,4})(?!\\d)'
 classify = 'REQ-\\d{2,4}'
 
 [types.BP]
 label = "Business Processes"
+origin = "derived"
 ref = '(?<![A-Za-z])(BP-\\d{2})(?!\\d)'
 classify = 'BP-\\d{2}'
 
 [types.BR]
 label = "Business Rules"
+origin = "derived"
 ref = '(?<![A-Za-z])(BR\\.\\d+)(?!\\d)'
 classify = 'BR\\.\\d+'
 

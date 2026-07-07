@@ -3,7 +3,8 @@ import pytest
 
 pytest.importorskip("mcp")
 
-from graph_ba.mcp_server import ba_sql
+from graph_ba.mcp_server import ba_schema, ba_sql
+from graph_ba.db import SCHEMA_VERSION
 
 
 def test_ba_sql_allows_select(ba_project, db_path):
@@ -34,4 +35,13 @@ def test_ba_sql_rejects_writable_pragma(ba_project, db_path):
 
     check = ba_sql("PRAGMA user_version",
                    root=str(ba_project), db_path=str(db_path))
-    assert check["rows"][0]["user_version"] == 1
+    assert check["rows"][0]["user_version"] == SCHEMA_VERSION
+
+
+def test_ba_schema_returns_agent_contract(ba_project, db_path):
+    data = ba_schema(root=str(ba_project), db_path=str(db_path))
+    assert any(t["id"] == "FEAT" and t["origin"] == "reviewed_derived"
+               for t in data["types"])
+    assert any(o["id"] == "reviewed_derived" for o in data["origins"])
+    assert any(r["id"] == "NORMALIZES" and r["direction"] == "canonical_to_raw"
+               for r in data["relation_types"])

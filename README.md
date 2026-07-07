@@ -8,6 +8,19 @@ BA projects have hundreds of interlinked markdown documents. Cross-references be
 
 Graph BA turns your documents into a queryable graph and lints them automatically. Artifact types and ID patterns are defined in a TOML config — the tool works with any naming convention.
 
+The graph keeps two kinds of metadata useful for agent workflows:
+
+- artifact `origin` comes from `types.<TYPE>.origin` and can classify whole
+  artifact classes as `human`, `derived`, `canonical`, `evidence`, etc.;
+- edge `relation_type` distinguishes raw text mentions from stronger links such
+  as `INDEX`, `CODE_TRACE`, `TEST_EVIDENCE` and `UI_TRACE`.
+
+Both are project-configurable enums in `graph-ba.toml`. Built-in suggestions
+cover common AI SDLC flows: human source, derived artifact, canonical contract,
+evidence, implementation, and relation types such as `DERIVES_FROM`,
+`NORMALIZES`, `IMPLEMENTS`, `VERIFIES`, `CONFLICTS_WITH`, `SUPERSEDES` and
+`TRACE_GAP`.
+
 ## What it does
 
 ```
@@ -115,10 +128,30 @@ Everything is config-driven via `graph-ba.toml`. Define your own artifact types,
 dirs = ["docs"]
 
 # Define artifact types with regex patterns
+[origins.human]
+label = "Human primary source"
+description = "Client, stakeholder, refined meeting or human dictation input."
+
+[origins.reviewed_derived]
+label = "Reviewed derived artifact"
+description = "Agent output reviewed by a human analyst."
+
+[relations.NORMALIZES]
+label = "Normalizes"
+description = "Canonical AC normalizes raw source material."
+direction = "canonical_to_source"
+
 [types.REQ]
 label = "Requirements"
+origin = "canonical"  # optional provenance class for all REQ nodes
 ref = '(?<![A-Za-z])(REQ-\d{2,4})(?!\d)'
 classify = 'REQ-\d{2,4}'
+
+[types.RAW]
+label = "Raw Criteria"
+origin = "human"
+ref = '(?<![A-Za-z])(RAW-\d{2,4})(?!\d)'
+classify = 'RAW-\d{2,4}'
 
 # Where artifacts are defined (heading or table)
 [[definitions]]

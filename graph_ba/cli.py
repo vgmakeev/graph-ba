@@ -194,20 +194,45 @@ zero_pad = []
 # Range expansion pattern (for references like REQ.1.1–REQ.1.5)
 range_pattern = '((?:REQ|FUNC)\\.\\d+\\.)(\\d+)\\s*[–\\-]\\s*(?:(?:REQ|FUNC)\\.\\d+\\.)(\\d+)'
 
+# ── Artifact origin enum ──
+# graph-ba ships defaults: human, derived, canonical, evidence,
+# implementation, container, unknown. Projects can override labels or add
+# stricter provenance classes.
+# [origins.human]
+# label = "Human primary source"
+# description = "Client, stakeholder, refined meeting or human dictation input."
+#
+# [origins.reviewed_derived]
+# label = "Reviewed derived artifact"
+# description = "Agent or analyst output reviewed by a human analyst."
+
+# ── Edge relation enum ──
+# graph-ba emits MENTIONS, INDEX, CODE_TRACE, TEST_EVIDENCE and UI_TRACE.
+# It also suggests semantic relation names for agent-first traceability:
+# DERIVES_FROM, NORMALIZES, IMPLEMENTS, VERIFIES, RENDERS, CONFLICTS_WITH,
+# SUPERSEDES, TRACE_GAP. Projects can add their own relation types.
+# [relations.NORMALIZES]
+# label = "Normalizes"
+# description = "Canonical AC normalizes raw source material."
+# direction = "canonical_to_source"
+
 # ── Artifact types ──
 # Each type needs:
 #   ref = regex to find references in text (group 1 = full ID)
 #   classify = regex to classify an ID string (used with fullmatch)
 #   label = human-readable name
+#   origin = optional provenance class (human, derived, evidence, implementation, ...)
 #   restrict_to = optional list of files/dirs where this pattern is allowed
 
 [types.REQ]
 label = "Requirements"
+origin = "derived"
 ref = '(?<![A-Za-z])(REQ-\\d{2,4})(?!\\d)'
 classify = 'REQ-\\d{2,4}'
 
 [types.FEAT]
 label = "Features"
+origin = "derived"
 ref = '(?<![A-Za-z])(FEAT-\\d{2,4})(?!\\d)'
 classify = 'FEAT-\\d{2,4}'
 
@@ -303,7 +328,7 @@ def search(ctx, query, limit):
 
     # Search artifacts
     rows = db.execute(
-        "SELECT a.id, a.type, a.title, a.source_file "
+        "SELECT a.id, a.type, a.origin, a.title, a.source_file "
         "FROM artifacts_fts f JOIN artifacts a ON f.rowid = a.rowid "
         "WHERE artifacts_fts MATCH ? ORDER BY rank LIMIT ?",
         (fq, limit)
@@ -318,7 +343,7 @@ def search(ctx, query, limit):
 
     # Search edge contexts
     e_rows = db.execute(
-        "SELECT source_id, target_id, context FROM edges_fts "
+        "SELECT source_id, target_id, relation_type, context FROM edges_fts "
         "WHERE edges_fts MATCH ? LIMIT ?",
         (fq, limit)
     ).fetchall()
@@ -334,8 +359,9 @@ def search(ctx, query, limit):
     if rows:
         print(f"── Artifacts ({len(rows)}) ──")
         print(fmt_table(
-            [(r["id"], r["type"], r["title"][:60], r["source_file"]) for r in rows],
-            ["ID", "Type", "Title", "File"]
+            [(r["id"], r["type"], r["origin"], r["title"][:60], r["source_file"])
+             for r in rows],
+            ["ID", "Type", "Origin", "Title", "File"]
         ))
     else:
         print("Artifacts: not found")
@@ -348,8 +374,9 @@ def search(ctx, query, limit):
     if e_rows:
         print(f"\n── Edges ({len(e_rows)}) ──")
         print(fmt_table(
-            [(r["source_id"], r["target_id"], r["context"][:60]) for r in e_rows],
-            ["From", "To", "Context"]
+            [(r["source_id"], r["target_id"], r["relation_type"], r["context"][:60])
+             for r in e_rows],
+            ["From", "To", "Relation", "Context"]
         ))
 
 
@@ -384,7 +411,8 @@ def node(ctx, node_id):
 
     # Out-edges
     out = db.execute(
-        "SELECT e.target_id, a.type, a.title, e.source_file, e.line_number, e.context "
+        "SELECT e.target_id, a.type, a.title, e.relation_type, "
+        "e.source_file, e.line_number, e.context "
         "FROM edges e LEFT JOIN artifacts a ON e.target_id = a.id "
         "WHERE e.source_id = ? ORDER BY a.type, e.target_id",
         (node_id,)
@@ -392,14 +420,16 @@ def node(ctx, node_id):
 
     # In-edges
     inc = db.execute(
-        "SELECT e.source_id, a.type, a.title, e.source_file, e.line_number, e.context "
+        "SELECT e.source_id, a.type, a.title, e.relation_type, "
+        "e.source_file, e.line_number, e.context "
         "FROM edges e LEFT JOIN artifacts a ON e.source_id = a.id "
         "WHERE e.target_id = ? ORDER BY a.type, e.source_id",
         (node_id,)
     ).fetchall()
 
     if _json_out(ctx, {
-        "id": row["id"], "type": row["type"], "title": row["title"],
+        "id": row["id"], "type": row["type"], "origin": row["origin"],
+        "title": row["title"],
         "source_file": row["source_file"], "line_number": row["line_number"],
         "defined": bool(row["defined"]),
         "clusters": [r["cluster_name"] for r in clusters],
@@ -411,6 +441,8 @@ def node(ctx, node_id):
 
     print(f"ID:      {row['id']}")
     print(f"Type:    {row['type']}")
+    if row["origin"]:
+        print(f"Origin:  {row['origin']}")
     print(f"File:    {row['source_file']}:{row['line_number']}")
     print(f"Defined: {'yes' if row['defined'] else 'NO (dangling)'}")
     print(f"Title:   {row['title']}")
@@ -422,18 +454,20 @@ def node(ctx, node_id):
     if out:
         print(fmt_table(
             [(r["target_id"], r["type"] or "?",
+              r["relation_type"],
               f"{r['source_file']}:{r['line_number']}" if r["line_number"] else "",
               r["title"][:40] if r["title"] else "") for r in out],
-            ["ID", "Type", "Ref location", "Title"]
+            ["ID", "Type", "Relation", "Ref location", "Title"]
         ))
 
     print(f"\n← Incoming ({len(inc)}):")
     if inc:
         print(fmt_table(
             [(r["source_id"], r["type"] or "?",
+              r["relation_type"],
               f"{r['source_file']}:{r['line_number']}" if r["line_number"] else "",
               r["title"][:40] if r["title"] else "") for r in inc],
-            ["ID", "Type", "Ref location", "Title"]
+            ["ID", "Type", "Relation", "Ref location", "Title"]
         ))
     db.close()
 
@@ -643,7 +677,8 @@ def code_refs(ctx, by_artifact, art_type):
 
     query = (
         "SELECT e.source_id as code_node, e.target_id as artifact_id, "
-        "a.type as art_type, a.title, e.source_file, e.line_number, e.context "
+        "a.type as art_type, a.title, e.relation_type, "
+        "e.source_file, e.line_number, e.context "
         "FROM edges e "
         "LEFT JOIN artifacts a ON e.target_id = a.id "
         "WHERE e.source_id LIKE 'CODE:%'"

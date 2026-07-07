@@ -22,6 +22,114 @@ else:
 
 CONFIG_FILENAME = "graph-ba.toml"
 
+DEFAULT_ORIGINS = {
+    "human": {
+        "label": "Human primary source",
+        "description": "Client, stakeholder, refined meeting or human dictation input.",
+    },
+    "derived": {
+        "label": "Derived analysis artifact",
+        "description": "Agent or analyst normalization derived from source artifacts.",
+    },
+    "canonical": {
+        "label": "Canonical contract",
+        "description": "Accepted/current product or requirement contract.",
+    },
+    "evidence": {
+        "label": "Evidence",
+        "description": "Test, UI trace, review or runtime evidence artifact.",
+    },
+    "implementation": {
+        "label": "Implementation",
+        "description": "Code or generated implementation artifact.",
+    },
+    "container": {
+        "label": "Container",
+        "description": "Synthetic file/container node created by graph-ba.",
+    },
+    "unknown": {
+        "label": "Unknown or mixed",
+        "description": "Origin is not classified by the project config.",
+    },
+}
+
+DEFAULT_RELATIONS = {
+    "MENTIONS": {
+        "label": "Mentions",
+        "description": "A source text mentions the target ID; broad navigation edge.",
+        "direction": "source_mentions_target",
+    },
+    "INDEX": {
+        "label": "Index cross-reference",
+        "description": "A configured index table links source row ID to target ID.",
+        "direction": "source_index_row_to_target",
+    },
+    "CODE_TRACE": {
+        "label": "Code trace",
+        "description": "A CODE: node references an artifact via @trace.",
+        "direction": "code_to_artifact",
+    },
+    "TEST_EVIDENCE": {
+        "label": "Test evidence",
+        "description": "A TEST: node references an artifact as verification evidence.",
+        "direction": "test_to_artifact",
+    },
+    "UI_TRACE": {
+        "label": "UI trace",
+        "description": "A UI: trace sidecar references an artifact rendered in UI.",
+        "direction": "ui_to_artifact",
+    },
+    "DERIVES_FROM": {
+        "label": "Derives from",
+        "description": "A derived artifact was produced from a source artifact.",
+        "direction": "derived_to_source",
+    },
+    "NORMALIZES": {
+        "label": "Normalizes",
+        "description": "A canonical artifact normalizes a raw/source artifact.",
+        "direction": "canonical_to_source",
+    },
+    "IMPLEMENTS": {
+        "label": "Implements",
+        "description": "An implementation artifact implements a requirement or criterion.",
+        "direction": "implementation_to_contract",
+    },
+    "VERIFIES": {
+        "label": "Verifies",
+        "description": "Evidence verifies a requirement, criterion or behavior.",
+        "direction": "evidence_to_contract",
+    },
+    "RENDERS": {
+        "label": "Renders",
+        "description": "A UI artifact renders a component, screen or criterion.",
+        "direction": "ui_to_contract",
+    },
+    "CONFLICTS_WITH": {
+        "label": "Conflicts with",
+        "description": "Two artifacts state incompatible requirements or facts.",
+        "direction": "symmetric",
+    },
+    "SUPERSEDES": {
+        "label": "Supersedes",
+        "description": "A newer artifact replaces an older artifact.",
+        "direction": "new_to_old",
+    },
+    "TRACE_GAP": {
+        "label": "Trace gap",
+        "description": "An explicit gap where expected traceability is missing.",
+        "direction": "source_to_gap",
+    },
+}
+
+
+@dataclass
+class EnumDef:
+    """Project-configurable enum value for origins and relation types."""
+    id: str
+    label: str = ""
+    description: str = ""
+    direction: str = ""
+
 
 @dataclass
 class TypeDef:
@@ -31,6 +139,7 @@ class TypeDef:
     ref_pattern: re.Pattern  # compiled regex for finding references
     classify_pattern: Optional[re.Pattern] = None  # for classifying an ID string
     restrict_to: Optional[List[str]] = None  # only match in these files/dirs
+    origin: str = ""  # optional provenance class, e.g. human / derived / evidence
 
 
 @dataclass
@@ -121,6 +230,8 @@ class ProjectConfig:
     clusters: Dict[str, List[str]]
     normalize: NormalizeRule
     range_pattern: re.Pattern
+    origins: Dict[str, EnumDef]
+    relation_types: Dict[str, EnumDef]
     # Review validation
     required_sections: Dict[str, List[str]]
     expected_bidir: Dict[str, List[str]]
@@ -161,6 +272,7 @@ def load_config(root: Path) -> ProjectConfig:
             ref_pattern=re.compile(tdata["ref"]),
             classify_pattern=re.compile(tdata["classify"]) if "classify" in tdata else None,
             restrict_to=restrict,
+            origin=tdata.get("origin", ""),
         )
         type_order.append(tid)
 
@@ -205,6 +317,13 @@ def load_config(root: Path) -> ProjectConfig:
     rp = data.get("range_pattern",
                    r'((?:BR|BF)\.\d+\.)(\d+)\s*[–\-]\s*(?:(?:BR|BF)\.\d+\.)(\d+)')
     range_pat = re.compile(rp)
+
+    # ── Artifact origins / edge relation types ──
+    origins = _load_enum_defs(DEFAULT_ORIGINS, data.get("origins", {}))
+    relation_types = _load_enum_defs(DEFAULT_RELATIONS, data.get("relations", {}))
+    for tdef in types.values():
+        if tdef.origin and tdef.origin not in origins:
+            origins[tdef.origin] = EnumDef(id=tdef.origin, label=tdef.origin)
 
     # ── Review config ──
     review = data.get("review", {})
@@ -291,6 +410,8 @@ def load_config(root: Path) -> ProjectConfig:
         clusters=clusters,
         normalize=normalize,
         range_pattern=range_pat,
+        origins=origins,
+        relation_types=relation_types,
         required_sections=required_sections,
         expected_bidir=expected_bidir,
         expected_cross_layer=expected_cross_layer,
@@ -299,6 +420,28 @@ def load_config(root: Path) -> ProjectConfig:
         ui=ui_config,
         lint=lint_config,
     )
+
+
+def _load_enum_defs(defaults: Dict[str, Dict[str, str]],
+                    overrides: Dict[str, Dict[str, str]]) -> Dict[str, EnumDef]:
+    """Merge built-in enum suggestions with project-specific definitions."""
+    values: Dict[str, EnumDef] = {}
+    for key, raw in defaults.items():
+        values[key] = EnumDef(
+            id=key,
+            label=raw.get("label", key),
+            description=raw.get("description", ""),
+            direction=raw.get("direction", ""),
+        )
+    for key, raw in overrides.items():
+        base = values.get(key, EnumDef(id=key, label=key))
+        values[key] = EnumDef(
+            id=key,
+            label=raw.get("label", base.label or key),
+            description=raw.get("description", base.description),
+            direction=raw.get("direction", base.direction),
+        )
+    return values
 
 
 def normalize_id(raw: str, config: ProjectConfig) -> str:

@@ -581,7 +581,7 @@ class TestRequireGraph:
     def test_schema_version_mismatch_rebuilds(self, ba_project, tmp_path):
         import sqlite3
 
-        from graph_ba.db import get_db, do_import
+        from graph_ba.db import SCHEMA_VERSION, get_db, do_import
 
         runner = CliRunner()
         db_path = tmp_path / "old_schema.db"
@@ -601,7 +601,7 @@ class TestRequireGraph:
             version = check.execute("PRAGMA user_version").fetchone()[0]
         finally:
             check.close()
-        assert version == 1
+        assert version == SCHEMA_VERSION
 
 
 class TestAuditCycles:

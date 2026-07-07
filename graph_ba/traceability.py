@@ -429,8 +429,9 @@ def build_graph(
     G = nx.DiGraph()
 
     for aid, art in registry.items():
+        origin = config.types.get(art.artifact_type).origin if art.artifact_type in config.types else ""
         G.add_node(aid, type=art.artifact_type, title=art.title,
-                   source_file=str(art.source_file.name))
+                   source_file=str(art.source_file.name), origin=origin)
 
     file_arts_map: Dict[Path, List[Tuple[int, str]]] = defaultdict(list)
     for aid, art in registry.items():
@@ -442,8 +443,9 @@ def build_graph(
         target = ref.target_id
         if target not in G:
             atype = classify_id(target, config)
+            origin = config.types.get(atype).origin if atype in config.types else ""
             G.add_node(target, type=atype or "UNKNOWN",
-                       title="", source_file="", defined=False)
+                       title="", source_file="", defined=False, origin=origin)
 
         file_arts = file_arts_map.get(ref.source_file)
         owner = _find_owner(file_arts, ref.line_number) if file_arts else None
@@ -451,34 +453,42 @@ def build_graph(
         if owner and owner != target:
             G.add_edge(owner, target, context=ref.context,
                        source_file=str(ref.source_file.name),
-                       line=ref.line_number)
+                       line=ref.line_number,
+                       relation_type="MENTIONS")
         elif not owner:
             file_node = f"FILE:{ref.source_file.name}"
             if not G.has_node(file_node):
                 G.add_node(file_node, type="FILE", title=ref.source_file.name,
-                           source_file=str(ref.source_file.name), defined=True)
+                           source_file=str(ref.source_file.name), defined=True,
+                           origin="container")
             if target != file_node:
                 G.add_edge(file_node, target, context=ref.context,
                            source_file=str(ref.source_file.name),
-                           line=ref.line_number)
+                           line=ref.line_number,
+                           relation_type="MENTIONS")
 
     if index_xrefs:
         for src, tgt, fpath, lnum in index_xrefs:
             if tgt not in G:
                 atype = classify_id(tgt, config)
+                origin = config.types.get(atype).origin if atype in config.types else ""
                 G.add_node(tgt, type=atype or "UNKNOWN",
-                           title="", source_file="", defined=False)
+                           title="", source_file="", defined=False, origin=origin)
             if src not in G:
                 continue
             if src != tgt:
                 G.add_edge(src, tgt, context="index_table",
-                           source_file=str(fpath.name), line=lnum)
+                           source_file=str(fpath.name), line=lnum,
+                           relation_type="INDEX")
 
     # ── Code references → CODE nodes, test references → TEST nodes,
     #    UI trace references → UI nodes ──
-    _add_source_ref_nodes(G, code_refs, "CODE:", "CODE", config)
-    _add_source_ref_nodes(G, test_refs, "TEST:", "TEST", config)
-    _add_source_ref_nodes(G, ui_refs, "UI:", "UI", config)
+    _add_source_ref_nodes(G, code_refs, "CODE:", "CODE", config,
+                          relation_type="CODE_TRACE", origin="implementation")
+    _add_source_ref_nodes(G, test_refs, "TEST:", "TEST", config,
+                          relation_type="TEST_EVIDENCE", origin="evidence")
+    _add_source_ref_nodes(G, ui_refs, "UI:", "UI", config,
+                          relation_type="UI_TRACE", origin="evidence")
 
     for aid in registry:
         G.nodes[aid]["defined"] = True
@@ -494,6 +504,8 @@ def _add_source_ref_nodes(
     prefix: str,
     node_type: str,
     config: ProjectConfig,
+    relation_type: str,
+    origin: str,
 ):
     """Add meta-nodes (CODE:/TEST:) with edges to referenced artifacts."""
     if not refs:
@@ -502,16 +514,20 @@ def _add_source_ref_nodes(
         node_id = f"{prefix}{cref.rel_path}"
         if not G.has_node(node_id):
             G.add_node(node_id, type=node_type, title=cref.rel_path,
-                       source_file=cref.rel_path, defined=True)
+                       source_file=cref.rel_path, defined=True,
+                       origin=origin)
         for target_id in cref.target_ids:
             if target_id not in G:
                 atype = classify_id(target_id, config)
+                target_origin = config.types.get(atype).origin if atype in config.types else ""
                 G.add_node(target_id, type=atype or "UNKNOWN",
-                           title="", source_file="", defined=False)
+                           title="", source_file="", defined=False,
+                           origin=target_origin)
             G.add_edge(node_id, target_id,
                        context=cref.context,
                        source_file=cref.rel_path,
-                       line=cref.line_number)
+                       line=cref.line_number,
+                       relation_type=relation_type)
 
 
 def _resolve_dangling_variants(G: nx.DiGraph, registry: Dict[str, Artifact]):
@@ -707,6 +723,7 @@ def export_json(G: nx.DiGraph, registry: Dict[str, Artifact],
             {
                 "id": n,
                 "type": d.get("type", ""),
+                "origin": d.get("origin", ""),
                 "title": d.get("title", ""),
                 "source_file": d.get("source_file", ""),
                 "defined": d.get("defined", False),
@@ -717,6 +734,7 @@ def export_json(G: nx.DiGraph, registry: Dict[str, Artifact],
             {
                 "source": u,
                 "target": v,
+                "relation_type": d.get("relation_type", "MENTIONS"),
                 "context": d.get("context", ""),
                 "source_file": d.get("source_file", ""),
                 "line": d.get("line", 0),
@@ -841,10 +859,13 @@ def export_dot(G: nx.DiGraph, config: ProjectConfig, path: Path):
     for u, v, d in G.edges(data=True):
         src_type = G.nodes[u].get("type", "UNKNOWN") if u in G.nodes else "UNKNOWN"
         edge_color = _get_colors(src_type)["border"]
+        rel = d.get("relation_type", "MENTIONS")
         ctx = d.get("context", "").replace('"', '\\"')[:60]
+        tooltip = f"{rel}: {ctx}" if ctx else rel
         lines.append(
             f'  "{_esc(u)}" -> "{_esc(v)}" '
-            f'[color="{edge_color}80", tooltip="{ctx}"];'
+            f'[color="{edge_color}80", label="{rel if rel != "MENTIONS" else ""}", '
+            f'tooltip="{tooltip}"];'
         )
     lines.append('}')
 
@@ -939,6 +960,7 @@ def export_html(G: nx.DiGraph, config: ProjectConfig, path: Path):
         atype = d.get("type", "UNKNOWN")
         title_text = d.get("title", "").replace("'", "\\'").replace("\n", " ")
         source_file = d.get("source_file", "")
+        origin = d.get("origin", "")
         defined = d.get("defined", True)
 
         colors = _get_colors(atype)
@@ -952,6 +974,8 @@ def export_html(G: nx.DiGraph, config: ProjectConfig, path: Path):
         if title_text:
             tip_parts.append(title_text)
         tip_parts.append(f"<i>Type:</i> {group_label}")
+        if origin:
+            tip_parts.append(f"<i>Origin:</i> {origin}")
         if source_file:
             tip_parts.append(f"<i>File:</i> {source_file}")
         tip_parts.append(f"<i>In:</i> {in_deg} | <i>Out:</i> {out_deg}")
@@ -973,8 +997,9 @@ def export_html(G: nx.DiGraph, config: ProjectConfig, path: Path):
     edges_js: List[str] = []
     for u, v, d in G.edges(data=True):
         ctx = d.get("context", "").replace("'", "\\'")[:60]
+        rel = d.get("relation_type", "MENTIONS")
         src_file = d.get("source_file", "").replace("'", "\\'")
-        tip = f"{u} → {v}"
+        tip = f"{u} → {v}\\n{rel}"
         if ctx:
             tip += f"\\n{ctx}"
         if src_file:

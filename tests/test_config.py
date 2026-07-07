@@ -22,6 +22,29 @@ class TestLoadConfig:
         assert project_config.types["FEAT"].label == "Features"
         assert project_config.types["REQ"].label == "Requirements"
 
+    def test_type_origins(self, project_config):
+        assert project_config.types["ST"].origin == "human"
+        assert project_config.types["REQ"].origin == "canonical"
+        assert project_config.types["FEAT"].origin == "reviewed_derived"
+
+    def test_default_origin_enums_loaded(self, project_config):
+        assert project_config.origins["canonical"].label == "Canonical contract"
+        assert project_config.origins["derived"].label == "Derived analysis artifact"
+
+    def test_project_origin_enums_can_override_and_extend(self, project_config):
+        assert project_config.origins["human"].label == "Human source"
+        assert project_config.origins["reviewed_derived"].label == "Reviewed derived artifact"
+
+    def test_default_relation_enums_loaded(self, project_config):
+        assert project_config.relation_types["MENTIONS"].direction == "source_mentions_target"
+        assert project_config.relation_types["VERIFIES"].direction == "evidence_to_contract"
+
+    def test_project_relation_enums_can_override_and_extend(self, project_config):
+        normalizes = project_config.relation_types["NORMALIZES"]
+        assert normalizes.label == "Normalizes raw input"
+        assert normalizes.direction == "canonical_to_raw"
+        assert project_config.relation_types["REVIEWS"].label == "Reviews"
+
     def test_type_ref_pattern_compiles(self, project_config):
         pat = project_config.types["REQ"].ref_pattern
         assert pat.search("see REQ-01 here")
