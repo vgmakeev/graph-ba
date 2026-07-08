@@ -7,6 +7,13 @@ from click.testing import CliRunner
 from graph_ba.cli import cli
 
 
+def test_version_option():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--version"])
+    assert result.exit_code == 0
+    assert "graph-ba, version 0.2.7" in result.output
+
+
 class TestImportCmd:
     def test_success(self, cli_env_rw):
         runner, root, db_path = cli_env_rw

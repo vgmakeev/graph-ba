@@ -10,6 +10,7 @@ from typing import List, Tuple
 
 import click
 
+from graph_ba import __version__
 from graph_ba.audit import (
     _issue_fingerprints,
     run_anomalies,
@@ -77,6 +78,7 @@ def fmt_table(rows: list, headers: list) -> str:
 # ── CLI ───────────────────────────────────────────────────────────
 
 @click.group()
+@click.version_option(__version__, prog_name="graph-ba")
 @click.option("--db", type=click.Path(path_type=Path), default=None,
               help=f"Path to SQLite DB (default: reports/graph.db)")
 @click.option("--root", type=click.Path(exists=True, path_type=Path),
