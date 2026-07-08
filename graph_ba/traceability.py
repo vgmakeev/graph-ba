@@ -1636,6 +1636,17 @@ def _add_react_ui_nodes(
             )
             G.add_node(element.target_id, type=element.target_type, title=element.selector,
                        source_file=element.rel_path, defined=True, origin=target_origin)
+        else:
+            G.nodes[element.target_id]["type"] = element.target_type
+            G.nodes[element.target_id]["title"] = element.selector
+            G.nodes[element.target_id]["source_file"] = element.rel_path
+            G.nodes[element.target_id]["defined"] = True
+            if "origin" not in G.nodes[element.target_id] or not G.nodes[element.target_id]["origin"]:
+                G.nodes[element.target_id]["origin"] = (
+                    config.types.get(element.target_type).origin
+                    if element.target_type in config.types
+                    else origin
+                )
 
         G.add_edge(element.source_id, element.target_id,
                    context=element.context,

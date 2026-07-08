@@ -278,3 +278,11 @@ export function OrderScreen() {
         "rawIds": ["RAC-ORD-001"],
         "testIds": ["TEST:admin/src/features/order/ui/order-screen.test.ts"],
     }
+
+    db = get_db(tmp_path / "graph.db")
+    do_import(tmp_path, db, quiet=True)
+    artifact = db.execute(
+        "SELECT defined, source_file FROM artifacts WHERE id = 'UIC-ORDER-SAVE'"
+    ).fetchone()
+    assert artifact["defined"] == 1
+    assert artifact["source_file"] == "admin/src/features/order/ui/order-screen.tsx"
