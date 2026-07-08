@@ -262,6 +262,31 @@ class ReactUiConfig:
 
 
 @dataclass
+class MiniAdminSourcesConfig:
+    """Configuration for scanning mini-admin screen data-source metadata.
+
+    Scanner is static and intentionally limited to source metadata files such as
+    `features/<screen>/api/sources.ts`. It maps screen-family artifacts to the
+    CRUDL resources and CustomMethod contracts consumed by that screen.
+    """
+    dirs: List[str] = field(default_factory=list)
+    files: List[str] = field(default_factory=list)
+    extensions: List[str] = field(default_factory=lambda: ["ts", "tsx"])
+    feature_path_segment: str = "features"
+    screen_family_prefix: str = "SCR-ADMIN-"
+    resource_type: str = "CRUDL_RESOURCE"
+    custom_method_type: str = "CUSTOM_METHOD"
+    frontend_computed_type: str = "FRONTEND_COMPUTED"
+    component_type: str = "UIC"
+    component_fallback_prefix: str = "UIC:"
+    relation_type: str = "DEPENDS_ON"
+    component_relation_type: str = "CONTAINS"
+    trace_relation_type: str = "TRACES_TO"
+    trace_filename: str = "trace.json"
+    origin: str = "implementation"
+
+
+@dataclass
 class LintConfig:
     """Configuration for the lint command."""
     glossary_file: Optional[str] = None
@@ -300,6 +325,8 @@ class ProjectConfig:
     mini_registry: Optional[MiniRegistryConfig] = None
     # React UI test-id traceability
     react_ui: Optional[ReactUiConfig] = None
+    # mini-admin screen data-source traceability
+    mini_admin_sources: Optional[MiniAdminSourcesConfig] = None
     # Lint
     lint: Optional[LintConfig] = None
 
@@ -512,6 +539,60 @@ def load_config(root: Path) -> ProjectConfig:
             origin=react_ui_data.get("origin", react_ui_defaults.origin),
         )
 
+    # ── mini-admin data-source metadata scan config ──
+    mini_admin_sources_data = data.get("mini_admin_sources")
+    mini_admin_sources_config = None
+    if mini_admin_sources_data:
+        mini_admin_sources_defaults = MiniAdminSourcesConfig()
+        mini_admin_sources_config = MiniAdminSourcesConfig(
+            dirs=mini_admin_sources_data.get("dirs", []),
+            files=mini_admin_sources_data.get("files", []),
+            extensions=mini_admin_sources_data.get(
+                "extensions", mini_admin_sources_defaults.extensions
+            ),
+            feature_path_segment=mini_admin_sources_data.get(
+                "feature_path_segment",
+                mini_admin_sources_defaults.feature_path_segment,
+            ),
+            screen_family_prefix=mini_admin_sources_data.get(
+                "screen_family_prefix",
+                mini_admin_sources_defaults.screen_family_prefix,
+            ),
+            resource_type=mini_admin_sources_data.get(
+                "resource_type", mini_admin_sources_defaults.resource_type
+            ),
+            custom_method_type=mini_admin_sources_data.get(
+                "custom_method_type",
+                mini_admin_sources_defaults.custom_method_type,
+            ),
+            frontend_computed_type=mini_admin_sources_data.get(
+                "frontend_computed_type",
+                mini_admin_sources_defaults.frontend_computed_type,
+            ),
+            component_type=mini_admin_sources_data.get(
+                "component_type", mini_admin_sources_defaults.component_type
+            ),
+            component_fallback_prefix=mini_admin_sources_data.get(
+                "component_fallback_prefix",
+                mini_admin_sources_defaults.component_fallback_prefix,
+            ),
+            relation_type=mini_admin_sources_data.get(
+                "relation_type", mini_admin_sources_defaults.relation_type
+            ),
+            component_relation_type=mini_admin_sources_data.get(
+                "component_relation_type",
+                mini_admin_sources_defaults.component_relation_type,
+            ),
+            trace_relation_type=mini_admin_sources_data.get(
+                "trace_relation_type",
+                mini_admin_sources_defaults.trace_relation_type,
+            ),
+            trace_filename=mini_admin_sources_data.get(
+                "trace_filename", mini_admin_sources_defaults.trace_filename
+            ),
+            origin=mini_admin_sources_data.get("origin", mini_admin_sources_defaults.origin),
+        )
+
     # ── Lint config ──
     lint_data = data.get("lint")
     lint_config = None
@@ -543,6 +624,7 @@ def load_config(root: Path) -> ProjectConfig:
         ui=ui_config,
         mini_registry=mini_registry_config,
         react_ui=react_ui_config,
+        mini_admin_sources=mini_admin_sources_config,
         lint=lint_config,
     )
 

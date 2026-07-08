@@ -187,6 +187,22 @@ def _scan_file_mtimes(root: Path, config) -> dict[str, float]:
             for f in root.glob(pattern):
                 if f.is_file():
                     files[str(f.resolve())] = f.stat().st_mtime
+    if getattr(config, "mini_admin_sources", None):
+        for dir_str in config.mini_admin_sources.dirs:
+            p = root / dir_str
+            if not p.exists():
+                continue
+            for ext in config.mini_admin_sources.extensions:
+                for f in p.rglob(f"*.{ext}"):
+                    if f.is_file():
+                        files[str(f.resolve())] = f.stat().st_mtime
+        for pattern in config.mini_admin_sources.files:
+            for f in root.glob(pattern):
+                if f.is_file():
+                    files[str(f.resolve())] = f.stat().st_mtime
+                    trace_file = f.with_name(config.mini_admin_sources.trace_filename)
+                    if trace_file.is_file():
+                        files[str(trace_file.resolve())] = trace_file.stat().st_mtime
     return files
 
 
@@ -258,8 +274,11 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
     ui_refs = t.scan_ui_references(root, config)
     mini_registry_traces = t.scan_mini_registry_traces(root, config)
     react_ui_elements = t.scan_react_ui_elements(root, config)
+    mini_admin_source_traces = t.scan_mini_admin_source_traces(root, config)
+    mini_admin_component_traces = t.scan_mini_admin_component_traces(root, config)
     G = t.build_graph(registry, references, config, index_xrefs, code_refs, test_refs,
-                      ui_refs, mini_registry_traces, react_ui_elements)
+                      ui_refs, mini_registry_traces, react_ui_elements,
+                      mini_admin_source_traces, mini_admin_component_traces)
 
     # Clear existing data
     db.executescript("""
@@ -333,6 +352,10 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
         file_map[mref.source_file.name] = str(mref.source_file)
     for rref in react_ui_elements:
         file_map[rref.source_file.name] = str(rref.source_file)
+    for aref in mini_admin_source_traces:
+        file_map[aref.source_file.name] = str(aref.source_file)
+    for cref in mini_admin_component_traces:
+        file_map[cref.source_file.name] = str(cref.source_file)
     for fname, fpath in file_map.items():
         db.execute("INSERT OR IGNORE INTO file_paths (filename, full_path) VALUES (?, ?)",
                    (fname, fpath))
