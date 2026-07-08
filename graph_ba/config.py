@@ -229,6 +229,39 @@ class MiniRegistryConfig:
 
 
 @dataclass
+class ReactUiConfig:
+    """Configuration for scanning React JSX UI trace attributes.
+
+    By default only component IDs matching `UIC-*` and explicit screen IDs are
+    imported. This keeps technical selectors out of the BA graph unless a
+    project explicitly opts in.
+    """
+    dirs: List[str] = field(default_factory=list)
+    files: List[str] = field(default_factory=list)
+    extensions: List[str] = field(default_factory=lambda: ["tsx", "jsx"])
+    props: List[str] = field(default_factory=lambda: [
+        "data-testid",
+        "data-test-id",
+        "testID",
+    ])
+    screen_props: List[str] = field(default_factory=lambda: ["data-screen-id"])
+    screen_family_props: List[str] = field(default_factory=lambda: ["data-screen-family-id"])
+    include_patterns: List[str] = field(default_factory=lambda: [r"^UIC-"])
+    screen_include_patterns: List[str] = field(default_factory=lambda: [r"^SC-", r"^SCR-ADMIN-"])
+    screen_family_include_patterns: List[str] = field(default_factory=lambda: [r"^SCR-ADMIN-"])
+    include_unmatched: bool = False
+    selector_type: str = "UI_SELECTOR"
+    screen_type: str = "SCREEN"
+    screen_family_type: str = "SCREEN_FAMILY"
+    source_type: str = "REACT_UI"
+    relation_type: str = "RENDERS"
+    screen_relation_type: str = "IMPLEMENTS"
+    screen_component_relation_type: str = "CONTAINS"
+    screen_family_relation_type: str = "CONTAINS"
+    origin: str = "implementation"
+
+
+@dataclass
 class LintConfig:
     """Configuration for the lint command."""
     glossary_file: Optional[str] = None
@@ -265,6 +298,8 @@ class ProjectConfig:
     ui: Optional[UiConfig] = None
     # mini registry traceability
     mini_registry: Optional[MiniRegistryConfig] = None
+    # React UI test-id traceability
+    react_ui: Optional[ReactUiConfig] = None
     # Lint
     lint: Optional[LintConfig] = None
 
@@ -431,6 +466,52 @@ def load_config(root: Path) -> ProjectConfig:
             origin=mini_registry_data.get("origin", MiniRegistryConfig.origin),
         )
 
+    # ── React UI test-id scan config ──
+    react_ui_data = data.get("react_ui")
+    react_ui_config = None
+    if react_ui_data:
+        react_ui_defaults = ReactUiConfig()
+        react_ui_config = ReactUiConfig(
+            dirs=react_ui_data.get("dirs", []),
+            files=react_ui_data.get("files", []),
+            extensions=react_ui_data.get("extensions", react_ui_defaults.extensions),
+            props=react_ui_data.get("props", react_ui_defaults.props),
+            screen_props=react_ui_data.get("screen_props", react_ui_defaults.screen_props),
+            screen_family_props=react_ui_data.get(
+                "screen_family_props", react_ui_defaults.screen_family_props
+            ),
+            include_patterns=react_ui_data.get(
+                "include_patterns", react_ui_defaults.include_patterns
+            ),
+            screen_include_patterns=react_ui_data.get(
+                "screen_include_patterns", react_ui_defaults.screen_include_patterns
+            ),
+            screen_family_include_patterns=react_ui_data.get(
+                "screen_family_include_patterns",
+                react_ui_defaults.screen_family_include_patterns,
+            ),
+            include_unmatched=react_ui_data.get("include_unmatched", False),
+            selector_type=react_ui_data.get("selector_type", react_ui_defaults.selector_type),
+            screen_type=react_ui_data.get("screen_type", react_ui_defaults.screen_type),
+            screen_family_type=react_ui_data.get(
+                "screen_family_type", react_ui_defaults.screen_family_type
+            ),
+            source_type=react_ui_data.get("source_type", react_ui_defaults.source_type),
+            relation_type=react_ui_data.get("relation_type", react_ui_defaults.relation_type),
+            screen_relation_type=react_ui_data.get(
+                "screen_relation_type", react_ui_defaults.screen_relation_type
+            ),
+            screen_component_relation_type=react_ui_data.get(
+                "screen_component_relation_type",
+                react_ui_defaults.screen_component_relation_type,
+            ),
+            screen_family_relation_type=react_ui_data.get(
+                "screen_family_relation_type",
+                react_ui_defaults.screen_family_relation_type,
+            ),
+            origin=react_ui_data.get("origin", react_ui_defaults.origin),
+        )
+
     # ── Lint config ──
     lint_data = data.get("lint")
     lint_config = None
@@ -461,6 +542,7 @@ def load_config(root: Path) -> ProjectConfig:
         tests=tests_config,
         ui=ui_config,
         mini_registry=mini_registry_config,
+        react_ui=react_ui_config,
         lint=lint_config,
     )
 

@@ -174,6 +174,19 @@ def _scan_file_mtimes(root: Path, config) -> dict[str, float]:
             for f in root.glob(pattern):
                 if f.is_file():
                     files[str(f.resolve())] = f.stat().st_mtime
+    if getattr(config, "react_ui", None):
+        for dir_str in config.react_ui.dirs:
+            p = root / dir_str
+            if not p.exists():
+                continue
+            for ext in config.react_ui.extensions:
+                for f in p.rglob(f"*.{ext}"):
+                    if f.is_file():
+                        files[str(f.resolve())] = f.stat().st_mtime
+        for pattern in config.react_ui.files:
+            for f in root.glob(pattern):
+                if f.is_file():
+                    files[str(f.resolve())] = f.stat().st_mtime
     return files
 
 
@@ -224,10 +237,14 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
                 "SELECT count(*) FROM artifacts "
                 "WHERE type IN ('REGISTRY_RESOURCE', 'CUSTOM_METHOD', 'CRUDL_RESOURCE')"
             ).fetchone()[0]
+            n_react = db.execute(
+                "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'REACT:%'"
+            ).fetchone()[0]
             print(f"Imported: {n_nodes} artifacts, {n_edges} edges, "
                   f"{n_clusters} semantic clusters, {n_code} code files, "
                   f"{n_test} test files, {n_ui} ui trace files, "
-                  f"{n_mini} mini registry artifacts "
+                  f"{n_mini} mini registry artifacts, "
+                  f"{n_react} react ui files "
                   "(up to date, no changes)")
             db_path = db.execute("PRAGMA database_list").fetchone()[2]
             print(f"DB: {db_path}")
@@ -240,8 +257,9 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
     test_refs = t.scan_test_references(root, config)
     ui_refs = t.scan_ui_references(root, config)
     mini_registry_traces = t.scan_mini_registry_traces(root, config)
+    react_ui_elements = t.scan_react_ui_elements(root, config)
     G = t.build_graph(registry, references, config, index_xrefs, code_refs, test_refs,
-                      ui_refs, mini_registry_traces)
+                      ui_refs, mini_registry_traces, react_ui_elements)
 
     # Clear existing data
     db.executescript("""
@@ -313,6 +331,8 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
         file_map[uref.code_file.name] = str(uref.code_file)
     for mref in mini_registry_traces:
         file_map[mref.source_file.name] = str(mref.source_file)
+    for rref in react_ui_elements:
+        file_map[rref.source_file.name] = str(rref.source_file)
     for fname, fpath in file_map.items():
         db.execute("INSERT OR IGNORE INTO file_paths (filename, full_path) VALUES (?, ?)",
                    (fname, fpath))
@@ -351,11 +371,14 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
         "SELECT count(*) FROM artifacts "
         "WHERE type IN ('REGISTRY_RESOURCE', 'CUSTOM_METHOD', 'CRUDL_RESOURCE')"
     ).fetchone()[0]
+    n_react = db.execute(
+        "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'REACT:%'"
+    ).fetchone()[0]
     db_path = db.execute("PRAGMA database_list").fetchone()[2]
     print(f"Imported: {n_nodes} artifacts, {n_edges} edges, "
           f"{n_clusters} semantic clusters, {n_code} code files, "
           f"{n_test} test files, {n_ui} ui trace files, "
-          f"{n_mini} mini registry artifacts")
+          f"{n_mini} mini registry artifacts, {n_react} react ui files")
     print(f"DB: {db_path}")
     return True
 

@@ -194,6 +194,22 @@ coverage_types = ["REQ"]
 files = ["app/src/features/*/api/trace.json"]  # root-relative globs
 coverage_types = ["REQ"]
 
+# React UI trace scanning — static JSX scan of literal screen/test-id props.
+# By default only component values matching `UIC-*` and explicit screen ids are
+# imported, so ordinary technical selectors stay out of the BA graph.
+[react_ui]
+dirs = ["admin/src"]
+props = ["data-testid", "data-test-id", "testID"]
+screen_props = ["data-screen-id"]
+screen_family_props = ["data-screen-family-id"]
+include_patterns = ["^UIC-"]
+screen_include_patterns = ["^SC-", "^SCR-ADMIN-"]
+screen_family_include_patterns = ["^SCR-ADMIN-"]
+relation_type = "RENDERS"
+screen_relation_type = "IMPLEMENTS"
+screen_component_relation_type = "CONTAINS"
+screen_family_relation_type = "CONTAINS"
+
 # mini registry traceability — static AST scan of Resource(...) and
 # CustomMethod(...) declarations. graph-ba reads trace=Traceability(...)
 # without importing the app and creates typed implementation nodes:

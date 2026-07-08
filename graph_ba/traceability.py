@@ -69,6 +69,22 @@ class MiniRegistryTrace:
     rel_path: str = ""
 
 
+@dataclass
+class ReactUiElement:
+    """A React JSX UI trace attribute selected for graph import."""
+    source_id: str
+    source_type: str
+    source_file: Path
+    line_number: int
+    selector: str
+    target_id: str
+    target_type: str
+    relation_type: str
+    role: str = "component"
+    context: str = ""
+    rel_path: str = ""
+
+
 # ── Phase 1: Definition scanning ─────────────────────────────────
 
 def _read_lines(path: Path) -> List[str]:
@@ -502,6 +518,229 @@ def scan_mini_registry_traces(
     return traces
 
 
+def scan_react_ui_elements(
+    root: Path,
+    config: ProjectConfig,
+) -> List[ReactUiElement]:
+    """Scan React JSX UI trace attributes.
+
+    This scanner intentionally imports only literal attribute values selected by
+    `[react_ui]` patterns unless `include_unmatched=true`.
+    """
+    if not config.react_ui:
+        return []
+
+    files = _collect_configured_files(
+        root,
+        config.react_ui.dirs,
+        config.react_ui.files,
+        config.react_ui.extensions,
+    )
+    prop_roles = _react_ui_prop_roles(config)
+    prop_re = "|".join(re.escape(prop) for prop in prop_roles)
+    if not prop_re:
+        return []
+    attr_re = re.compile(
+        rf"(?P<prop>{prop_re})\s*=\s*"
+        r"(?:"
+        r"\"(?P<double>[^\"]+)\""
+        r"|'(?P<single>[^']+)'"
+        r"|\{\s*\"(?P<braced_double>[^\"]+)\"\s*\}"
+        r"|\{\s*'(?P<braced_single>[^']+)'\s*\}"
+        r"|\{\s*`(?P<braced_template>[^`$]+)`\s*\}"
+        r")"
+    )
+    component_include_res = [
+        re.compile(pattern) for pattern in config.react_ui.include_patterns
+    ]
+    screen_include_res = [
+        re.compile(pattern) for pattern in config.react_ui.screen_include_patterns
+    ]
+    screen_family_include_res = [
+        re.compile(pattern)
+        for pattern in config.react_ui.screen_family_include_patterns
+    ]
+
+    elements: List[ReactUiElement] = []
+    for filepath in files:
+        try:
+            text = filepath.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        masked = _mask_js_comments(text)
+        try:
+            rel_path = str(filepath.relative_to(root))
+        except ValueError:
+            rel_path = str(filepath)
+        source_id = f"REACT:{rel_path}"
+
+        for match in attr_re.finditer(masked):
+            selector = next(
+                value for value in (
+                    match.group("double"),
+                    match.group("single"),
+                    match.group("braced_double"),
+                    match.group("braced_single"),
+                    match.group("braced_template"),
+                )
+                if value is not None
+            )
+            role = prop_roles[match.group("prop")]
+            if role == "screen_family":
+                include_res = screen_family_include_res
+                fallback_type = config.react_ui.screen_family_type
+                relation_type = config.react_ui.screen_relation_type
+            elif role == "screen":
+                include_res = screen_include_res
+                fallback_type = config.react_ui.screen_type
+                relation_type = config.react_ui.screen_relation_type
+            else:
+                include_res = component_include_res
+                fallback_type = config.react_ui.selector_type
+                relation_type = config.react_ui.relation_type
+
+            if not _react_selector_included(
+                selector,
+                include_res,
+                config.react_ui.include_unmatched,
+            ):
+                continue
+
+            normalized = normalize_id(selector, config)
+            target_type = classify_id(normalized, config)
+            target_id = normalized
+            if target_type is None:
+                if not config.react_ui.include_unmatched:
+                    continue
+                target_type = fallback_type
+                target_id = f"{target_type}:{selector}"
+
+            line_number = masked.count("\n", 0, match.start()) + 1
+            elements.append(ReactUiElement(
+                source_id=source_id,
+                source_type=config.react_ui.source_type,
+                source_file=filepath,
+                line_number=line_number,
+                selector=selector,
+                target_id=target_id,
+                target_type=target_type,
+                relation_type=relation_type,
+                role=role,
+                context=f"{match.group('prop')}={selector}",
+                rel_path=rel_path,
+            ))
+    return elements
+
+
+def _react_ui_prop_roles(config: ProjectConfig) -> Dict[str, str]:
+    if not config.react_ui:
+        return {}
+    roles: Dict[str, str] = {}
+    for prop in config.react_ui.props:
+        roles[prop] = "component"
+    for prop in config.react_ui.screen_props:
+        roles[prop] = "screen"
+    for prop in config.react_ui.screen_family_props:
+        roles[prop] = "screen_family"
+    return roles
+
+
+def _collect_configured_files(
+    root: Path,
+    dirs: List[str],
+    files: List[str],
+    extensions: List[str],
+) -> List[Path]:
+    collected: List[Path] = []
+    for dir_str in dirs:
+        d = root / dir_str
+        if not d.exists():
+            continue
+        for ext in extensions:
+            collected.extend(sorted(d.rglob(f"*.{ext}")))
+    for pattern in files:
+        collected.extend(sorted(root.glob(pattern)))
+    seen: Set[Path] = set()
+    result: List[Path] = []
+    for item in collected:
+        if item in seen or not item.is_file():
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _react_selector_included(
+    selector: str,
+    include_res: List[re.Pattern],
+    include_unmatched: bool,
+) -> bool:
+    if include_unmatched:
+        return True
+    return any(pattern.search(selector) for pattern in include_res)
+
+
+def _mask_js_comments(text: str) -> str:
+    """Replace JS/TS comments with spaces while preserving line offsets."""
+    result: List[str] = []
+    i = 0
+    state = "normal"
+    quote = ""
+    while i < len(text):
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+
+        if state == "line_comment":
+            if ch == "\n":
+                state = "normal"
+                result.append(ch)
+            else:
+                result.append(" ")
+            i += 1
+            continue
+
+        if state == "block_comment":
+            if ch == "*" and nxt == "/":
+                result.extend("  ")
+                state = "normal"
+                i += 2
+            else:
+                result.append("\n" if ch == "\n" else " ")
+                i += 1
+            continue
+
+        if state == "string":
+            result.append(ch)
+            if ch == "\\" and i + 1 < len(text):
+                result.append(text[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                state = "normal"
+            i += 1
+            continue
+
+        if ch in {"'", '"', "`"}:
+            state = "string"
+            quote = ch
+            result.append(ch)
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            result.extend("  ")
+            state = "line_comment"
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            result.extend("  ")
+            state = "block_comment"
+            i += 2
+            continue
+        result.append(ch)
+        i += 1
+    return "".join(result)
+
+
 def _ast_call_name(func: ast.expr) -> str:
     if isinstance(func, ast.Name):
         return func.id
@@ -619,6 +858,7 @@ def build_graph(
     test_refs: Optional[List[CodeReference]] = None,
     ui_refs: Optional[List[CodeReference]] = None,
     mini_registry_traces: Optional[List[MiniRegistryTrace]] = None,
+    react_ui_elements: Optional[List[ReactUiElement]] = None,
 ) -> nx.DiGraph:
     G = nx.DiGraph()
 
@@ -684,6 +924,7 @@ def build_graph(
     _add_source_ref_nodes(G, ui_refs, "UI:", "UI", config,
                           relation_type="UI_TRACE", origin="evidence")
     _add_mini_registry_nodes(G, mini_registry_traces, config)
+    _add_react_ui_nodes(G, react_ui_elements, config)
 
     for aid in registry:
         G.nodes[aid]["defined"] = True
@@ -691,6 +932,73 @@ def build_graph(
     _resolve_dangling_variants(G, registry)
 
     return G
+
+
+def _add_react_ui_nodes(
+    G: nx.DiGraph,
+    elements: Optional[List[ReactUiElement]],
+    config: ProjectConfig,
+):
+    if not elements:
+        return
+    by_source: Dict[str, List[ReactUiElement]] = defaultdict(list)
+    for element in elements:
+        by_source[element.source_id].append(element)
+        origin = config.react_ui.origin if config.react_ui else "implementation"
+        if not G.has_node(element.source_id):
+            G.add_node(element.source_id, type=element.source_type, title=element.rel_path,
+                       source_file=element.rel_path, defined=True, origin=origin)
+
+        if element.target_id not in G:
+            target_origin = (
+                config.types.get(element.target_type).origin
+                if element.target_type in config.types
+                else origin
+            )
+            G.add_node(element.target_id, type=element.target_type, title=element.selector,
+                       source_file=element.rel_path, defined=True, origin=target_origin)
+
+        G.add_edge(element.source_id, element.target_id,
+                   context=element.context,
+                   source_file=element.rel_path,
+                   line=element.line_number,
+                   relation_type=element.relation_type)
+
+    for source_elements in by_source.values():
+        _add_react_ui_ownership_edges(G, source_elements, config)
+
+
+def _add_react_ui_ownership_edges(
+    G: nx.DiGraph,
+    elements: List[ReactUiElement],
+    config: ProjectConfig,
+):
+    families = [e for e in elements if e.role == "screen_family"]
+    screens = [e for e in elements if e.role == "screen"]
+    components = [e for e in elements if e.role == "component"]
+    if not config.react_ui:
+        return
+
+    for family in families:
+        for screen in screens:
+            if family.target_id == screen.target_id:
+                continue
+            G.add_edge(family.target_id, screen.target_id,
+                       context="same React source",
+                       source_file=screen.rel_path,
+                       line=screen.line_number,
+                       relation_type=config.react_ui.screen_family_relation_type)
+
+    owners = screens if screens else families
+    for owner in owners:
+        for component in components:
+            if owner.target_id == component.target_id:
+                continue
+            G.add_edge(owner.target_id, component.target_id,
+                       context="same React source",
+                       source_file=component.rel_path,
+                       line=component.line_number,
+                       relation_type=config.react_ui.screen_component_relation_type)
 
 
 def _add_mini_registry_nodes(
