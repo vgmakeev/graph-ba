@@ -152,6 +152,32 @@ def get_db(path: Optional[Path] = None) -> sqlite3.Connection:
 
 # ── Import ────────────────────────────────────────────────────────
 
+def _remember_files(files: dict[str, float], paths) -> None:
+    for f in paths:
+        if f.is_file():
+            files[str(f.resolve())] = f.stat().st_mtime
+
+
+def _remember_configured_sources(
+    root: Path,
+    files: dict[str, float],
+    section,
+    *,
+    include_globs: bool = True,
+) -> None:
+    if not section:
+        return
+    for dir_str in getattr(section, "dirs", []):
+        p = root / dir_str
+        if not p.exists():
+            continue
+        for ext in getattr(section, "extensions", []):
+            _remember_files(files, p.rglob(f"*.{ext}"))
+    if include_globs:
+        for pattern in getattr(section, "files", []):
+            _remember_files(files, root.glob(pattern))
+
+
 def _scan_file_mtimes(root: Path, config) -> dict[str, float]:
     files: dict[str, float] = {}
     for d in config.scan_dirs:
@@ -161,6 +187,11 @@ def _scan_file_mtimes(root: Path, config) -> dict[str, float]:
         for f in p.rglob("*.md"):
             if f.is_file():
                 files[str(f.resolve())] = f.stat().st_mtime
+    _remember_configured_sources(root, files, getattr(config, "code", None))
+    _remember_configured_sources(root, files, getattr(config, "tests", None))
+    if getattr(config, "ui", None):
+        for pattern in config.ui.files:
+            _remember_files(files, root.glob(pattern))
     if getattr(config, "mini_registry", None):
         for dir_str in config.mini_registry.dirs:
             p = root / dir_str

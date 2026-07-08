@@ -1,9 +1,11 @@
 """Tests for SQLite schema, import, query helpers."""
+from pathlib import Path
+
 import pytest
 import sqlite3
 
 from graph_ba.cli import fmt_table
-from graph_ba.db import get_db, _fts_query, _load_nx
+from graph_ba.db import get_db, _fts_query, _load_nx, _scan_file_mtimes
 
 
 class TestSchema:
@@ -33,6 +35,20 @@ class TestSchema:
         assert "artifacts_fts" in tables
         assert "edges_fts" in tables
         assert "clusters_fts" in tables
+
+
+class TestImportSnapshot:
+    def test_scanned_file_mtimes_include_trace_source_layers(self, ba_project, project_config):
+        files = _scan_file_mtimes(ba_project, project_config)
+        rel_paths = {
+            str(Path(path).relative_to(ba_project))
+            for path in files
+        }
+
+        assert "src/order.ts" in rel_paths
+        assert "tests/test_orders.py" in rel_paths
+        assert "src/mappers.test.ts" in rel_paths
+        assert "ui/orders/trace.json" in rel_paths
 
 
 class TestImport:
