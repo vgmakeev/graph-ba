@@ -194,12 +194,12 @@ coverage_types = ["REQ"]
 files = ["app/src/features/*/api/trace.json"]  # root-relative globs
 coverage_types = ["REQ"]
 
-# React UI trace scanning — static JSX scan of literal screen/test-id props.
-# By default only component values matching `UIC-*` and explicit screen ids are
-# imported, so ordinary technical selectors stay out of the BA graph.
+# React UI trace scanning — static JSX scan of literal canonical UI trace ids.
+# By default only `data-uic-id="UIC-*"` component values and explicit screen ids
+# are imported, so ordinary technical test selectors stay out of the BA graph.
 [react_ui]
 dirs = ["admin/src"]
-props = ["data-testid", "data-test-id", "testID"]
+props = ["data-uic-id"]
 screen_props = ["data-screen-id"]
 screen_family_props = ["data-screen-family-id"]
 include_patterns = ["^UIC-"]

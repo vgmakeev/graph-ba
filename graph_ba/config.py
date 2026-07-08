@@ -239,11 +239,7 @@ class ReactUiConfig:
     dirs: List[str] = field(default_factory=list)
     files: List[str] = field(default_factory=list)
     extensions: List[str] = field(default_factory=lambda: ["tsx", "jsx"])
-    props: List[str] = field(default_factory=lambda: [
-        "data-testid",
-        "data-test-id",
-        "testID",
-    ])
+    props: List[str] = field(default_factory=lambda: ["data-uic-id"])
     screen_props: List[str] = field(default_factory=lambda: ["data-screen-id"])
     screen_family_props: List[str] = field(default_factory=lambda: ["data-screen-family-id"])
     include_patterns: List[str] = field(default_factory=lambda: [r"^UIC-"])

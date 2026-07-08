@@ -224,3 +224,57 @@ def test_mini_admin_component_trace_export_groups_by_screen(tmp_path):
         "testIds": ["TEST:admin/src/features/order/ui/order-screen.test.ts"],
     }
     assert exported["SCR-ADMIN-ORDER"]["UIC-ORDER-SAVE"] == exported["SCR-ADMIN-ORDER"]["order-save"]
+
+
+def test_mini_admin_component_trace_accepts_uic_ids_without_testid_alias(tmp_path):
+    (tmp_path / "graph-ba.toml").write_text(TOML, encoding="utf-8")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "screens.md").write_text(
+        "## SCR-ADMIN-ORDER — Order screen\n",
+        encoding="utf-8",
+    )
+    api_dir = tmp_path / "admin" / "src" / "features" / "order" / "api"
+    api_dir.mkdir(parents=True)
+    (api_dir / "resources.ts").write_text(RESOURCES_TS, encoding="utf-8")
+    (api_dir / "sources.ts").write_text(SOURCES_TS, encoding="utf-8")
+    (api_dir / "trace.json").write_text(
+        """\
+{
+  "UIC-ORDER-SAVE": {
+    "acIds": ["AC-ORD-001"],
+    "rawIds": ["RAC-ORD-001"],
+    "source": "orders"
+  }
+}
+""",
+        encoding="utf-8",
+    )
+    ui_dir = tmp_path / "admin" / "src" / "features" / "order" / "ui"
+    ui_dir.mkdir(parents=True)
+    (ui_dir / "order-screen.tsx").write_text(
+        """\
+export function OrderScreen() {
+  return (
+    <section data-screen-family-id="SCR-ADMIN-ORDER">
+      <button data-uic-id="UIC-ORDER-SAVE">Save</button>
+    </section>
+  );
+}
+""",
+        encoding="utf-8",
+    )
+    (ui_dir / "order-screen.test.ts").write_text(TEST_TS, encoding="utf-8")
+
+    config = load_config(tmp_path)
+    entries = build_mini_admin_component_trace_entries(tmp_path, config)
+    exported = export_mini_admin_component_trace_map(tmp_path, config)
+
+    assert entries[0]["component_id"] == "UIC-ORDER-SAVE"
+    assert entries[0]["selector"] == "UIC-ORDER-SAVE"
+    assert entries[0]["aliases"] == []
+    assert exported["SCR-ADMIN-ORDER"]["UIC-ORDER-SAVE"] == {
+        "sources": ["orders"],
+        "acIds": ["AC-ORD-001"],
+        "rawIds": ["RAC-ORD-001"],
+        "testIds": ["TEST:admin/src/features/order/ui/order-screen.test.ts"],
+    }

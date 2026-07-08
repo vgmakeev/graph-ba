@@ -39,11 +39,11 @@ export function OrdersScreen() {
       data-screen-family-id="SCR-ADMIN-ORDERS"
       data-screen-id="SC-02"
     >
-      <button data-testid="UIC-ORDERS-SAVE">Save</button>
-      <div data-test-id='UIC-ORDERS-EMPTY'>Empty</div>
-      <span testID={"UIC-ORDERS-STATUS"} />
-      <span data-testid={`UIC-ORDERS-DYNAMIC-${id}`} />
-      {/* <div data-testid="UIC-ORDERS-COMMENTED" /> */}
+      <button data-uic-id="UIC-ORDERS-SAVE">Save</button>
+      <div data-uic-id='UIC-ORDERS-EMPTY'>Empty</div>
+      <span data-uic-id={"UIC-ORDERS-STATUS"} />
+      <span data-uic-id={`UIC-ORDERS-DYNAMIC-${id}`} />
+      {/* <div data-uic-id="UIC-ORDERS-COMMENTED" /> */}
     </section>
   );
 }
