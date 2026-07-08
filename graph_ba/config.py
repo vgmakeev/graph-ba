@@ -94,6 +94,11 @@ DEFAULT_RELATIONS = {
         "description": "An implementation artifact implements a requirement or criterion.",
         "direction": "implementation_to_contract",
     },
+    "DEPENDS_ON": {
+        "label": "Depends on",
+        "description": "An artifact depends on another artifact for behavior, data or context.",
+        "direction": "source_to_dependency",
+    },
     "VERIFIES": {
         "label": "Verifies",
         "description": "Evidence verifies a requirement, criterion or behavior.",
@@ -208,6 +213,22 @@ class UiConfig:
 
 
 @dataclass
+class MiniRegistryConfig:
+    """Configuration for scanning mini registry declarations.
+
+    Scanner is static and does not import application code. It creates
+    implementation nodes for Resource(...) and CustomMethod(...) declarations
+    and reads trace=Traceability(...) / Traceability.implements(...).
+    """
+    dirs: List[str] = field(default_factory=list)
+    files: List[str] = field(default_factory=list)
+    extensions: List[str] = field(default_factory=lambda: ["py"])
+    resource_type: str = "REGISTRY_RESOURCE"
+    custom_method_type: str = "CUSTOM_METHOD"
+    origin: str = "implementation"
+
+
+@dataclass
 class LintConfig:
     """Configuration for the lint command."""
     glossary_file: Optional[str] = None
@@ -242,6 +263,8 @@ class ProjectConfig:
     tests: Optional[TestsConfig] = None
     # UI traceability
     ui: Optional[UiConfig] = None
+    # mini registry traceability
+    mini_registry: Optional[MiniRegistryConfig] = None
     # Lint
     lint: Optional[LintConfig] = None
 
@@ -389,6 +412,25 @@ def load_config(root: Path) -> ProjectConfig:
             coverage_types=ui_data.get("coverage_types", []),
         )
 
+    # ── mini registry scan config ──
+    mini_registry_data = data.get("mini_registry")
+    mini_registry_config = None
+    if mini_registry_data:
+        mini_registry_config = MiniRegistryConfig(
+            dirs=mini_registry_data.get("dirs", []),
+            files=mini_registry_data.get("files", []),
+            extensions=mini_registry_data.get(
+                "extensions", MiniRegistryConfig().extensions
+            ),
+            resource_type=mini_registry_data.get(
+                "resource_type", MiniRegistryConfig.resource_type
+            ),
+            custom_method_type=mini_registry_data.get(
+                "custom_method_type", MiniRegistryConfig.custom_method_type
+            ),
+            origin=mini_registry_data.get("origin", MiniRegistryConfig.origin),
+        )
+
     # ── Lint config ──
     lint_data = data.get("lint")
     lint_config = None
@@ -418,6 +460,7 @@ def load_config(root: Path) -> ProjectConfig:
         code=code_config,
         tests=tests_config,
         ui=ui_config,
+        mini_registry=mini_registry_config,
         lint=lint_config,
     )
 

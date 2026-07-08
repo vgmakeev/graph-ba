@@ -10,6 +10,7 @@ Usage:
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 import sys
@@ -52,6 +53,20 @@ class CodeReference:
     target_ids: List[str]  # normalized artifact IDs
     context: str = ""      # the raw comment line
     rel_path: str = ""     # relative path from project root
+
+
+@dataclass
+class MiniRegistryTrace:
+    """A trace edge declared on a mini Resource or CustomMethod."""
+    source_id: str
+    source_type: str
+    title: str
+    source_file: Path
+    line_number: int
+    target_id: str
+    relation_type: str
+    context: str = ""
+    rel_path: str = ""
 
 
 # ── Phase 1: Definition scanning ─────────────────────────────────
@@ -398,6 +413,184 @@ def scan_ui_references(
     return _scan_file_references(root, files, extract, config)
 
 
+def scan_mini_registry_traces(
+    root: Path,
+    config: ProjectConfig,
+) -> List[MiniRegistryTrace]:
+    """Scan mini Resource(...) and CustomMethod(...) trace declarations.
+
+    This is intentionally static AST parsing. graph-ba must not import a mini
+    application just to learn its trace contract.
+    """
+    if not config.mini_registry:
+        return []
+
+    files: List[Path] = []
+    for dir_str in config.mini_registry.dirs:
+        d = root / dir_str
+        if not d.exists():
+            continue
+        for ext in config.mini_registry.extensions:
+            files.extend(sorted(d.rglob(f"*.{ext}")))
+    for pattern in config.mini_registry.files:
+        files.extend(sorted(root.glob(pattern)))
+
+    seen: Set[Path] = set()
+    traces: List[MiniRegistryTrace] = []
+    for filepath in files:
+        if filepath in seen or not filepath.is_file():
+            continue
+        seen.add(filepath)
+        try:
+            tree = ast.parse(filepath.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError, OSError):
+            continue
+        try:
+            rel_path = str(filepath.relative_to(root))
+        except ValueError:
+            rel_path = str(filepath)
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            call_name = _ast_call_name(node.func)
+            if call_name == "Resource":
+                source_key = _ast_kw_string(node, "name")
+                title = _ast_kw_string(node, "title") or source_key or ""
+                source_type = config.mini_registry.resource_type
+                source_id = f"{source_type}:{source_key}" if source_key else ""
+            elif call_name == "CustomMethod":
+                source_key = _ast_kw_string(node, "code")
+                title = _ast_kw_string(node, "title") or source_key or ""
+                source_type = config.mini_registry.custom_method_type
+                source_id = f"{source_type}:{source_key}" if source_key else ""
+            else:
+                continue
+            if not source_id:
+                continue
+
+            links = _extract_trace_links(_ast_kw_value(node, "trace"))
+            if not links:
+                traces.append(MiniRegistryTrace(
+                    source_id=source_id,
+                    source_type=source_type,
+                    title=title,
+                    source_file=filepath,
+                    line_number=getattr(node, "lineno", 0),
+                    target_id="",
+                    relation_type="",
+                    context="mini_registry",
+                    rel_path=rel_path,
+                ))
+                continue
+
+            for raw_target, raw_relation in links:
+                target_id = normalize_id(raw_target, config)
+                if classify_id(target_id, config) is None:
+                    continue
+                traces.append(MiniRegistryTrace(
+                    source_id=source_id,
+                    source_type=source_type,
+                    title=title,
+                    source_file=filepath,
+                    line_number=getattr(node, "lineno", 0),
+                    target_id=target_id,
+                    relation_type=_relation_type(raw_relation),
+                    context="mini_registry_trace",
+                    rel_path=rel_path,
+                ))
+    return traces
+
+
+def _ast_call_name(func: ast.expr) -> str:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
+def _ast_kw_value(call: ast.Call, name: str) -> ast.expr | None:
+    for kw in call.keywords:
+        if kw.arg == name:
+            return kw.value
+    return None
+
+
+def _ast_kw_string(call: ast.Call, name: str) -> str | None:
+    value = _ast_kw_value(call, name)
+    return value.value if isinstance(value, ast.Constant) and isinstance(value.value, str) else None
+
+
+def _ast_string(value: ast.expr | None) -> str | None:
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return value.value
+    return None
+
+
+def _ast_string_items(value: ast.expr | None) -> List[str]:
+    if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
+        return [item.value for item in value.elts
+                if isinstance(item, ast.Constant) and isinstance(item.value, str)]
+    single = _ast_string(value)
+    return [single] if single else []
+
+
+def _extract_trace_links(value: ast.expr | None) -> List[Tuple[str, str]]:
+    if value is None:
+        return []
+    if not isinstance(value, ast.Call):
+        return []
+    call_name = _ast_call_name(value.func)
+
+    # Traceability.implements("AC-...")
+    if (
+        isinstance(value.func, ast.Attribute)
+        and value.func.attr == "implements"
+        and _ast_call_name(value.func.value) == "Traceability"
+    ):
+        artifacts = [
+            artifact for artifact in (_ast_string(arg) for arg in value.args)
+            if artifact is not None
+        ]
+        return [(artifact, "implements") for artifact in artifacts]
+
+    if call_name != "Traceability":
+        return []
+
+    links: List[Tuple[str, str]] = []
+    artifacts_value = _ast_kw_value(value, "artifacts")
+    for artifact in _ast_string_items(artifacts_value):
+        links.append((artifact, "implements"))
+
+    links_value = _ast_kw_value(value, "links")
+    if isinstance(links_value, (ast.Tuple, ast.List, ast.Set)):
+        for item in links_value.elts:
+            parsed = _extract_trace_link(item)
+            if parsed:
+                links.append(parsed)
+    return links
+
+
+def _extract_trace_link(value: ast.expr) -> Tuple[str, str] | None:
+    if not isinstance(value, ast.Call) or _ast_call_name(value.func) != "TraceLink":
+        return None
+    artifact = _ast_kw_string(value, "artifact")
+    if artifact is None and value.args:
+        artifact = _ast_string(value.args[0])
+    relation = _ast_kw_string(value, "relation")
+    if relation is None and len(value.args) > 1:
+        relation = _ast_string(value.args[1])
+    if not artifact:
+        return None
+    return artifact, relation or "implements"
+
+
+def _relation_type(raw: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9]+", "_", raw.strip()).strip("_").upper()
+    return value or "IMPLEMENTS"
+
+
 # ── Phase 3: Graph construction ──────────────────────────────────
 
 def _find_owner(
@@ -425,6 +618,7 @@ def build_graph(
     code_refs: Optional[List[CodeReference]] = None,
     test_refs: Optional[List[CodeReference]] = None,
     ui_refs: Optional[List[CodeReference]] = None,
+    mini_registry_traces: Optional[List[MiniRegistryTrace]] = None,
 ) -> nx.DiGraph:
     G = nx.DiGraph()
 
@@ -489,6 +683,7 @@ def build_graph(
                           relation_type="TEST_EVIDENCE", origin="evidence")
     _add_source_ref_nodes(G, ui_refs, "UI:", "UI", config,
                           relation_type="UI_TRACE", origin="evidence")
+    _add_mini_registry_nodes(G, mini_registry_traces, config)
 
     for aid in registry:
         G.nodes[aid]["defined"] = True
@@ -496,6 +691,33 @@ def build_graph(
     _resolve_dangling_variants(G, registry)
 
     return G
+
+
+def _add_mini_registry_nodes(
+    G: nx.DiGraph,
+    traces: Optional[List[MiniRegistryTrace]],
+    config: ProjectConfig,
+):
+    if not traces:
+        return
+    for trace in traces:
+        if not G.has_node(trace.source_id):
+            origin = config.mini_registry.origin if config.mini_registry else "implementation"
+            G.add_node(trace.source_id, type=trace.source_type, title=trace.title,
+                       source_file=trace.rel_path, defined=True, origin=origin)
+        if not trace.target_id:
+            continue
+        if trace.target_id not in G:
+            atype = classify_id(trace.target_id, config)
+            target_origin = config.types.get(atype).origin if atype in config.types else ""
+            G.add_node(trace.target_id, type=atype or "UNKNOWN",
+                       title="", source_file="", defined=False,
+                       origin=target_origin)
+        G.add_edge(trace.source_id, trace.target_id,
+                   context=trace.context,
+                   source_file=trace.rel_path,
+                   line=trace.line_number,
+                   relation_type=trace.relation_type)
 
 
 def _add_source_ref_nodes(

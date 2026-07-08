@@ -19,7 +19,9 @@ Both are project-configurable enums in `graph-ba.toml`. Built-in suggestions
 cover common AI SDLC flows: human source, derived artifact, canonical contract,
 evidence, implementation, and relation types such as `DERIVES_FROM`,
 `NORMALIZES`, `IMPLEMENTS`, `VERIFIES`, `CONFLICTS_WITH`, `SUPERSEDES` and
-`TRACE_GAP`.
+`TRACE_GAP`. mini registry resources and custom methods can also declare
+graph-ba trace links directly in code; graph-ba imports those as typed
+implementation nodes when `[mini_registry]` is enabled.
 
 ## What it does
 
@@ -191,6 +193,15 @@ coverage_types = ["REQ"]
 [ui]
 files = ["app/src/features/*/api/trace.json"]  # root-relative globs
 coverage_types = ["REQ"]
+
+# mini registry traceability — static AST scan of Resource(...) and
+# CustomMethod(...) declarations. graph-ba reads trace=Traceability(...)
+# without importing the app and creates typed implementation nodes:
+# CRUDL_RESOURCE:<resource_name> / CUSTOM_METHOD:<method_code>.
+[mini_registry]
+dirs = ["mini_app"]
+resource_type = "CRUDL_RESOURCE"
+custom_method_type = "CUSTOM_METHOD"
 
 # Content linting
 [lint]
