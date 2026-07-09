@@ -44,6 +44,37 @@ from graph_ba.review import (
     run_validate,
 )
 
+IMPLEMENTATION_ARTIFACT_TYPES = {
+    "ADMIN_PAGE_ACTION",
+    "CRUDL_RESOURCE",
+    "CUSTOM_METHOD",
+    "DATA_SOURCE",
+    "INTEGRATION_ACTION",
+    "INTEGRATION_CONNECTION",
+    "INTEGRATION_TRIGGER",
+    "JOB",
+    "REACT_COMPONENT",
+    "REGISTRY_DECLARATION",
+    "RUNTIME",
+    "RUNTIME_CONFIG",
+}
+
+PROOF_INCOMING_RELATIONS = {
+    "CODE_TRACE",
+    "CONTAINS",
+    "DEPENDS_ON",
+    "IMPLEMENTS",
+    "RENDERS",
+    "TRACES_TO",
+    "UI_TRACE",
+}
+
+PROOF_OUTGOING_RELATIONS = {
+    "DEPENDS_ON",
+}
+
+CONTRACT_ARTIFACT_TYPES = {"AC", "RULE", "DER", "STATE", "EVT", "ENT", "MTH"}
+
 def _is_meta_node(node_id: str) -> bool:
     """Check if node is a meta-node (FILE:, CODE:, TEST: or UI:) rather than a BA artifact."""
     return (node_id.startswith("FILE:") or node_id.startswith("CODE:")
@@ -919,7 +950,8 @@ def _artifact_state_item(
     lifecycle = _artifact_lifecycle(row, lifecycle_overrides)
     fingerprints = _artifact_fingerprints(db, row)
     active_changes = _active_changes_for_artifact(db, artifact_id, change_states)
-    implemented = _artifact_has_implementation(db, row)
+    implementation_proofs = _artifact_implementation_proofs(db, row)
+    implemented = bool(implementation_proofs)
     verified = _artifact_has_evidence(db, artifact_id)
     baseline = snapshot.get("artifacts", {}).get(artifact_id, {}) if snapshot else {}
     baseline_fingerprints = baseline.get("fingerprints", {}) if isinstance(baseline, dict) else {}
@@ -940,6 +972,7 @@ def _artifact_state_item(
             "unimplemented": lifecycle in {"accepted", "planned"} and not implemented,
             "unverified": lifecycle in {"accepted", "planned"} and not verified,
         },
+        "implementation_proofs": implementation_proofs[:5],
         "active_changes": active_changes,
         "fingerprints": fingerprints,
         "baseline": {
@@ -1021,20 +1054,114 @@ def _edge_tuples(
 
 
 def _artifact_has_implementation(db: sqlite3.Connection, row: sqlite3.Row) -> bool:
-    if row["origin"] == "implementation":
-        return True
+    return bool(_artifact_implementation_proofs(db, row))
+
+
+def _artifact_implementation_proofs(
+    db: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    max_depth: int = 4,
+    max_proofs: int = 8,
+) -> list[dict[str, Any]]:
+    """Find short typed-edge paths from implementation facts to this artifact.
+
+    The traversal intentionally ignores weak MENTIONS edges. It follows incoming
+    semantic edges toward implementation nodes, and follows outgoing DEPENDS_ON
+    edges from bridge nodes such as UIC/DATA_SOURCE when the implementation is a
+    dependency rather than the source of the semantic trace.
+    """
     artifact_id = row["id"]
-    found = db.execute(
-        "SELECT 1 FROM edges e JOIN artifacts s ON e.source_id = s.id "
-        "WHERE e.target_id = ? "
-        "AND e.relation_type IN ('IMPLEMENTS', 'RENDERS') "
-        "AND (s.origin = 'implementation' OR s.type IN ("
-        "'CRUDL_RESOURCE','CUSTOM_METHOD','INTEGRATION_ACTION',"
-        "'INTEGRATION_CONNECTION','INTEGRATION_TRIGGER','REACT_UI'"
-        ")) LIMIT 1",
-        (artifact_id,),
-    ).fetchone()
-    return bool(found)
+    if _is_implementation_artifact(row):
+        return [{
+            "source": artifact_id,
+            "source_type": row["type"],
+            "path": [],
+            "reason": "artifact_is_observed_implementation",
+        }]
+
+    proofs: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = {(artifact_id, 0)}
+    queue: list[tuple[str, list[dict[str, Any]], int]] = [(artifact_id, [], 0)]
+    incoming_placeholders = ",".join("?" for _ in PROOF_INCOMING_RELATIONS)
+    outgoing_placeholders = ",".join("?" for _ in PROOF_OUTGOING_RELATIONS)
+    while queue and len(proofs) < max_proofs:
+        current_id, path, depth = queue.pop(0)
+        if depth >= max_depth:
+            continue
+
+        incoming = db.execute(
+            "SELECT e.source_id, e.target_id, e.relation_type, s.type AS source_type, "
+            "s.origin AS source_origin, s.title AS source_title "
+            "FROM edges e JOIN artifacts s ON e.source_id = s.id "
+            "WHERE e.target_id = ? "
+            f"AND e.relation_type IN ({incoming_placeholders})",
+            (current_id, *sorted(PROOF_INCOMING_RELATIONS)),
+        ).fetchall()
+        for edge in incoming:
+            next_path = [
+                {
+                    "from": edge["source_id"],
+                    "relation": edge["relation_type"],
+                    "to": edge["target_id"],
+                },
+                *path,
+            ]
+            if _is_implementation_type(edge["source_type"], edge["source_origin"]):
+                proofs.append({
+                    "source": edge["source_id"],
+                    "source_type": edge["source_type"],
+                    "path": next_path,
+                    "reason": "typed_implementation_path",
+                })
+                if len(proofs) >= max_proofs:
+                    break
+            key = (edge["source_id"], depth + 1)
+            if key not in seen:
+                seen.add(key)
+                queue.append((edge["source_id"], next_path, depth + 1))
+        if len(proofs) >= max_proofs:
+            break
+
+        outgoing = db.execute(
+            "SELECT e.source_id, e.target_id, e.relation_type, t.type AS target_type, "
+            "t.origin AS target_origin, t.title AS target_title "
+            "FROM edges e JOIN artifacts t ON e.target_id = t.id "
+            "WHERE e.source_id = ? "
+            f"AND e.relation_type IN ({outgoing_placeholders})",
+            (current_id, *sorted(PROOF_OUTGOING_RELATIONS)),
+        ).fetchall()
+        for edge in outgoing:
+            next_path = [
+                *path,
+                {
+                    "from": edge["source_id"],
+                    "relation": edge["relation_type"],
+                    "to": edge["target_id"],
+                },
+            ]
+            if _is_implementation_type(edge["target_type"], edge["target_origin"]):
+                proofs.append({
+                    "source": edge["target_id"],
+                    "source_type": edge["target_type"],
+                    "path": next_path,
+                    "reason": "typed_dependency_path",
+                })
+                if len(proofs) >= max_proofs:
+                    break
+            key = (edge["target_id"], depth + 1)
+            if key not in seen:
+                seen.add(key)
+                queue.append((edge["target_id"], next_path, depth + 1))
+    return proofs
+
+
+def _is_implementation_artifact(row: sqlite3.Row) -> bool:
+    return _is_implementation_type(row["type"], row["origin"])
+
+
+def _is_implementation_type(artifact_type: str, origin: str | None) -> bool:
+    return origin == "implementation" or artifact_type in IMPLEMENTATION_ARTIFACT_TYPES
 
 
 def _artifact_has_evidence(db: sqlite3.Connection, artifact_id: str) -> bool:
@@ -1167,27 +1294,22 @@ def change_group(ctx):
 def change_create(ctx, change_id, title, state, mode, scope_items):
     """Create `.graphba/changes/<change-id>/`."""
     root = Path(ctx.obj.get("root", ".")).resolve()
-    path = _change_path(root, change_id)
-    if path.exists():
-        raise click.ClickException(f"Change already exists: {path}")
-    (path / "compiled").mkdir(parents=True)
-    (path / "evidence").mkdir()
-    (path / "archive").mkdir()
-    lines = [
-        f"id: {change_id}",
-        f"title: {title or change_id}",
-        f"state: {state}",
-        f"mode: {mode}",
-        "scope:",
-    ]
-    lines.extend(f"  - {item}" for item in scope_items)
-    (path / "change.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    (path / "source.md").write_text(
-        "# Change source\n\n"
-        "<!-- Add graph-native :::artifact blocks here. -->\n",
-        encoding="utf-8",
-    )
+    path = _create_change_dir(root, change_id, title, state, mode, scope_items)
     print(f"Created graph-ba change: {path}")
+
+
+@change_group.command("init")
+@click.argument("change_id")
+@click.option("--title", default="", help="Human-readable change title")
+@click.option("--state", default="draft", type=click.Choice(["draft", "planned", "accepted", "archived"]))
+@click.option("--mode", default="dev", type=click.Choice(["explore", "dev", "review", "release"]))
+@click.option("--scope", "scope_items", multiple=True, help="Scoped artifact ID; can be repeated")
+@click.pass_context
+def change_init(ctx, change_id, title, state, mode, scope_items):
+    """Alias for `change create` matching the graph-native workflow."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    path = _create_change_dir(root, change_id, title, state, mode, scope_items)
+    print(f"Initialized graph-ba change: {path}")
 
 
 @change_group.command("show")
@@ -1212,6 +1334,63 @@ def change_show(ctx, change_id):
             f"  {item['id']} [{item['type']}] "
             f"implemented={flags['implemented']} verified={flags['verified']} stale={flags['stale']}"
         )
+
+
+@change_group.command("compile")
+@click.argument("change_id")
+@click.option("--mode", default=None, type=click.Choice(["explore", "dev", "review", "release"]),
+              help="Gate strictness for generated findings; defaults to change.yaml mode or dev")
+@click.option("--snapshot", "snapshot_path", type=click.Path(path_type=Path), default=None,
+              help="Accepted fingerprint snapshot for stale checks")
+@click.pass_context
+def change_compile(ctx, change_id, mode, snapshot_path):
+    """Write generated pack/gaps/state/projection files for a change."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    db = _conn(ctx)
+    _require_graph(ctx, db)
+    change_dir = _change_path(root, change_id)
+    if not change_dir.exists():
+        raise click.ClickException(f"Change not found: {change_dir}")
+    compiled_dir = change_dir / "compiled"
+    compiled_dir.mkdir(parents=True, exist_ok=True)
+    graph_payload = _graph_slice_payload(db, root, change_id, mode, snapshot_path, "excerpt", 1200, False)
+    gate_payload = _gate_payload(db, root, change_id, mode, snapshot_path)
+    state_payload = _change_payload(db, root, change_id)
+    pack_payload = _pack_payload(db, root, change_id)
+    db.close()
+    (compiled_dir / "graph.json").write_text(
+        json.dumps(graph_payload, ensure_ascii=False, indent=2, default=str).rstrip() + "\n",
+        encoding="utf-8",
+    )
+    (compiled_dir / "worklist.json").write_text(
+        json.dumps(graph_payload["agent_worklist"], ensure_ascii=False, indent=2, default=str).rstrip() + "\n",
+        encoding="utf-8",
+    )
+    (compiled_dir / "state.yaml").write_text(_render_change_state_yaml(state_payload), encoding="utf-8")
+    (compiled_dir / "gaps.md").write_text(_render_gaps_markdown(gate_payload), encoding="utf-8")
+    (compiled_dir / "worklist.md").write_text(_render_worklist_markdown(graph_payload), encoding="utf-8")
+    (compiled_dir / "projection.md").write_text(_render_projection_markdown(graph_payload), encoding="utf-8")
+    (compiled_dir / "pack.md").write_text(_render_pack_markdown(pack_payload).rstrip() + "\n", encoding="utf-8")
+    print(f"Compiled graph-ba change: {compiled_dir}")
+
+
+@change_group.command("check")
+@click.argument("change_id")
+@click.option("--mode", default=None, type=click.Choice(["explore", "dev", "review", "release"]),
+              help="Gate strictness; defaults to change.yaml mode or dev")
+@click.option("--snapshot", "snapshot_path", type=click.Path(path_type=Path), default=None,
+              help="Accepted fingerprint snapshot for stale checks")
+@click.pass_context
+def change_check(ctx, change_id, mode, snapshot_path):
+    """Evaluate a change gate; alias for `graph-ba gate <change-id>`."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    db = _conn(ctx)
+    _require_graph(ctx, db)
+    result = _gate_payload(db, root, change_id, mode, snapshot_path)
+    db.close()
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    if not result["pass"]:
+        raise click.ClickException(f"Gate failed: {result['verdict']}")
 
 
 @change_group.command("accept")
@@ -1389,6 +1568,37 @@ def _change_path(root: Path, change_id: str) -> Path:
     return root / ".graphba" / "changes" / change_id
 
 
+def _create_change_dir(
+    root: Path,
+    change_id: str,
+    title: str,
+    state: str,
+    mode: str,
+    scope_items: tuple[str, ...],
+) -> Path:
+    path = _change_path(root, change_id)
+    if path.exists():
+        raise click.ClickException(f"Change already exists: {path}")
+    (path / "compiled").mkdir(parents=True)
+    (path / "evidence").mkdir()
+    (path / "archive").mkdir()
+    lines = [
+        f"id: {change_id}",
+        f"title: {title or change_id}",
+        f"state: {state}",
+        f"mode: {mode}",
+        "scope:",
+    ]
+    lines.extend(f"  - {item}" for item in scope_items)
+    (path / "change.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (path / "source.md").write_text(
+        "# Change source\n\n"
+        "<!-- Add graph-native :::artifact blocks here. -->\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def _change_payload(db: sqlite3.Connection, root: Path, change_id: str) -> dict[str, Any]:
     change_states = _graph_native_change_state_map(root)
     row = db.execute("SELECT * FROM artifacts WHERE id = ?", (change_id,)).fetchone()
@@ -1484,9 +1694,12 @@ def _semantic_scope_relations() -> set[str]:
 def _incoming_scope_relations() -> set[str]:
     return {
         "CODE_TRACE",
+        "CONTAINS",
+        "DEPENDS_ON",
         "IMPLEMENTS",
         "RENDERS",
         "TEST_EVIDENCE",
+        "TRACES_TO",
         "UI_TRACE",
         "VERIFIES",
     }
@@ -1528,6 +1741,8 @@ def _gate_payload(
         for row in rows
     ]
     findings = _gate_findings(states, selected_mode, bool(snapshot))
+    evidence_profile = _evidence_profile(db, states)
+    quality_axes = _quality_axes(states, findings, evidence_profile, bool(snapshot))
     fail_count = sum(1 for item in findings if item["severity"] == "fail")
     warn_count = sum(1 for item in findings if item["severity"] == "warn")
     return {
@@ -1537,6 +1752,9 @@ def _gate_payload(
         "pass": fail_count == 0,
         "verdict": "PASS" if fail_count == 0 else "FAIL",
         "summary": {"fail": fail_count, "warn": warn_count, "scope": len(states)},
+        "quality_axes": quality_axes,
+        "overall_confidence": _overall_confidence(quality_axes),
+        "evidence_profile": evidence_profile,
         "findings": findings,
         "scope": [
             {
@@ -1544,6 +1762,7 @@ def _gate_payload(
                 "type": item["type"],
                 "lifecycle": item["lifecycle"],
                 "computed": item["computed"],
+                "implementation_proofs": item.get("implementation_proofs", []),
             }
             for item in states
         ],
@@ -1556,10 +1775,9 @@ def _gate_findings(states: list[dict[str, Any]], mode: str, snapshot_loaded: boo
     findings: list[dict[str, Any]] = []
     strict = mode in {"review", "release"}
     release = mode == "release"
-    contract_types = {"AC", "RULE", "DER", "STATE", "EVT", "ENT", "MTH"}
     for item in states:
         computed = item["computed"]
-        if item["type"] in contract_types and not computed["implemented"]:
+        if item["type"] in CONTRACT_ARTIFACT_TYPES and not computed["implemented"]:
             findings.append(_gate_finding(item, "unimplemented", "fail" if strict else "warn"))
         if item["type"] == "AC" and not computed["verified"]:
             findings.append(_gate_finding(item, "unverified", "fail" if strict else "warn"))
@@ -1576,14 +1794,259 @@ def _gate_findings(states: list[dict[str, Any]], mode: str, snapshot_loaded: boo
     return findings
 
 
-def _gate_finding(item: dict[str, Any], code: str, severity: str) -> dict[str, str]:
+def _evidence_profile(db: sqlite3.Connection, states: list[dict[str, Any]]) -> dict[str, Any]:
+    ac_ids = [item["id"] for item in states if item["type"] == "AC"]
+    by_target: dict[str, list[dict[str, Any]]] = {artifact_id: [] for artifact_id in ac_ids}
+    if ac_ids:
+        placeholders = ",".join("?" for _ in ac_ids)
+        rows = db.execute(
+            "SELECT e.target_id, e.relation_type, s.id AS source_id, s.type AS source_type, "
+            "s.origin AS source_origin, s.title AS source_title, s.source_file AS source_file "
+            "FROM edges e JOIN artifacts s ON e.source_id = s.id "
+            f"WHERE e.target_id IN ({placeholders}) "
+            "AND e.relation_type IN ('TEST_EVIDENCE', 'VERIFIES') "
+            "ORDER BY e.target_id, s.id",
+            tuple(ac_ids),
+        ).fetchall()
+        for row in rows:
+            kind = _evidence_kind(row)
+            by_target.setdefault(row["target_id"], []).append({
+                "source": row["source_id"],
+                "source_type": row["source_type"],
+                "relation": row["relation_type"],
+                "kind": kind,
+            })
+
+    weak_only = []
+    behavior_or_runtime = []
+    runtime = []
+    verified = []
+    for artifact_id, evidence in by_target.items():
+        if evidence:
+            verified.append(artifact_id)
+        kinds = {item["kind"] for item in evidence}
+        if kinds and kinds <= {"trace"}:
+            weak_only.append(artifact_id)
+        if kinds & {"behavior", "runtime", "manual"}:
+            behavior_or_runtime.append(artifact_id)
+        if kinds & {"runtime", "manual"}:
+            runtime.append(artifact_id)
+
+    return {
+        "ac_total": len(ac_ids),
+        "ac_verified": len(verified),
+        "ac_with_behavior_or_runtime_evidence": len(behavior_or_runtime),
+        "ac_with_runtime_or_manual_evidence": len(runtime),
+        "ac_trace_only": len(weak_only),
+        "trace_only_ac": weak_only[:50],
+        "sample": {
+            artifact_id: evidence[:5]
+            for artifact_id, evidence in list(by_target.items())[:20]
+            if evidence
+        },
+    }
+
+
+def _evidence_kind(row: sqlite3.Row) -> str:
+    source_type = row["source_type"]
+    source = f"{row['source_id']} {row['source_title']} {row['source_file']}".lower()
+    if source_type == "EVD":
+        return "manual"
+    if any(marker in source for marker in ("trace.test", "trace-strict", "traceability", "graphba", "graph-ba")):
+        return "trace"
+    if any(marker in source for marker in ("e2e", "playwright", ".spec.", "acceptance")):
+        return "runtime"
+    if source_type == "TEST":
+        return "behavior"
+    return "manual" if row["source_origin"] == "evidence" else "trace"
+
+
+def _quality_axes(
+    states: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+    evidence_profile: dict[str, Any],
+    snapshot_loaded: bool,
+) -> dict[str, Any]:
+    finding_codes = {item.get("code") for item in findings}
+    fail_codes = {item.get("code") for item in findings if item.get("severity") == "fail"}
+    types = {item["type"] for item in states}
+    dynamic = _is_dynamic_scope(states)
+    behavior_missing = _behavior_model_missing(types, dynamic)
+    axes = {
+        "traceability": _axis(
+            "FAIL" if "missing_trace" in fail_codes else "PASS",
+            "typed graph scope is connected; weak MENTIONS are not counted as proof",
+        ),
+        "implementation_proof": _axis(
+            "FAIL" if "unimplemented" in fail_codes else ("PARTIAL" if "unimplemented" in finding_codes else "PASS"),
+            "implemented means a typed path from observed implementation artifacts exists",
+        ),
+        "test_evidence": _axis(
+            "FAIL" if "unverified" in fail_codes else _test_evidence_status(evidence_profile),
+            _test_evidence_reason(evidence_profile),
+        ),
+        "behavior_model": _axis(
+            "PARTIAL" if behavior_missing else "PASS",
+            "dynamic behavior scopes should expose RULE/DER plus STATE/EVT artifacts" if behavior_missing else "required behavior artifact classes are present or scope is static",
+            missing=behavior_missing,
+        ),
+        "runtime_acceptance": _axis(
+            _runtime_acceptance_status(evidence_profile),
+            "runtime/manual evidence is tracked separately from unit/API/trace evidence",
+        ),
+        "drift": _axis(
+            "UNKNOWN" if not snapshot_loaded else ("FAIL" if "stale" in fail_codes else "PASS"),
+            "accepted fingerprint snapshot is required for drift confidence",
+        ),
+    }
+    return axes
+
+
+def _axis(status: str, reason: str, **extra: Any) -> dict[str, Any]:
+    result = {"status": status, "reason": reason}
+    result.update(extra)
+    return result
+
+
+def _test_evidence_status(profile: dict[str, Any]) -> str:
+    if profile["ac_total"] == 0:
+        return "UNKNOWN"
+    if profile["ac_verified"] < profile["ac_total"]:
+        return "FAIL"
+    if profile["ac_trace_only"] > 0:
+        return "PARTIAL"
+    return "PASS"
+
+
+def _test_evidence_reason(profile: dict[str, Any]) -> str:
+    if profile["ac_total"] == 0:
+        return "no AC artifacts in scope"
+    return (
+        f"{profile['ac_verified']}/{profile['ac_total']} AC have evidence; "
+        f"{profile['ac_trace_only']} AC have only trace evidence"
+    )
+
+
+def _runtime_acceptance_status(profile: dict[str, Any]) -> str:
+    if profile["ac_total"] == 0:
+        return "UNKNOWN"
+    if profile["ac_with_runtime_or_manual_evidence"] == 0:
+        return "UNKNOWN"
+    if profile["ac_with_runtime_or_manual_evidence"] < profile["ac_total"]:
+        return "PARTIAL"
+    return "PASS"
+
+
+def _is_dynamic_scope(states: list[dict[str, Any]]) -> bool:
+    dynamic_types = {"EVT", "STATE", "MTH", "CUSTOM_METHOD", "DATA_SOURCE"}
+    if any(item["type"] in dynamic_types for item in states):
+        return True
+    dynamic_terms = (
+        "polling", "live", "event", "state", "slot", "capacity", "cascade",
+        "concurrent", "stale", "order", "заказ", "слот", "ёмк", "емк",
+        "каскад", "конкур", "событ", "состоя",
+    )
+    return any(
+        item["type"] == "AC" and any(term in f"{item['id']} {item['title']}".lower() for term in dynamic_terms)
+        for item in states
+    )
+
+
+def _behavior_model_missing(types: set[str], dynamic: bool) -> list[str]:
+    if not dynamic:
+        return []
+    missing = []
+    if not ({"RULE", "DER"} & types):
+        missing.append("RULE_OR_DER")
+    if "STATE" not in types:
+        missing.append("STATE")
+    if "EVT" not in types:
+        missing.append("EVT")
+    return missing
+
+
+def _overall_confidence(axes: dict[str, Any]) -> str:
+    statuses = {axis.get("status") for axis in axes.values()}
+    if "FAIL" in statuses:
+        return "FAIL"
+    if "PARTIAL" in statuses:
+        return "PARTIAL"
+    if "UNKNOWN" in statuses:
+        return "UNKNOWN"
+    return "PASS"
+
+
+def _gate_finding(item: dict[str, Any], code: str, severity: str) -> dict[str, Any]:
+    gap_type = _gap_type(item["type"], code)
     return {
         "artifact": item["id"],
         "type": item["type"],
         "code": code,
+        "gap_type": gap_type,
         "severity": severity,
+        "blocking": severity == "fail",
         "message": f"{item['id']} {code.replace('_', ' ')}",
+        "suggested_fix": _gap_suggested_fix(item, code),
     }
+
+
+def _gap_type(artifact_type: str, code: str) -> str:
+    if code == "unverified":
+        return "GAP-TEST"
+    if code == "stale":
+        return "GAP-DRIFT"
+    if code == "unimplemented":
+        return {
+            "AC": "GAP-AC",
+            "DER": "GAP-DER",
+            "ENT": "GAP-SPEC",
+            "EVT": "GAP-EVT",
+            "MTH": "GAP-MTH",
+            "RULE": "GAP-RULE",
+            "STATE": "GAP-STATE",
+        }.get(artifact_type, "GAP-SPEC")
+    return "GAP-SPEC"
+
+
+def _gap_suggested_fix(item: dict[str, Any], code: str) -> list[str]:
+    artifact_type = item["type"]
+    artifact_id = item["id"]
+    if code == "unverified":
+        return [
+            f"add or link TEST/EVD that verifies {artifact_id}",
+            "mention the canonical AC id in the deterministic test or evidence artifact",
+        ]
+    if code == "stale":
+        return [
+            f"refresh evidence for {artifact_id}",
+            "accept the changed fingerprint through a new graph-ba change",
+        ]
+    if code != "unimplemented":
+        return []
+    if artifact_type == "AC":
+        return [
+            f"link {artifact_id} to implemented UI/domain artifacts through UIC, MTH, ENT, STATE or EVT",
+            "ensure observed implementation has a typed path using IMPLEMENTS, RENDERS, DEPENDS_ON or TRACES_TO",
+        ]
+    if artifact_type == "MTH":
+        return [
+            f"add observed CUSTOM_METHOD, ADMIN_PAGE_ACTION or JOB implementing {artifact_id}",
+            "declare the method in mini metadata or graph-native source",
+        ]
+    if artifact_type == "ENT":
+        return [
+            f"add observed CRUDL_RESOURCE implementing {artifact_id}",
+            "declare the entity as a mini registry resource or link existing resource alias",
+        ]
+    if artifact_type in {"STATE", "EVT"}:
+        return [
+            f"link {artifact_id} to observed FSM/resource/custom method facts",
+            "add transition/state metadata in mini registry or graph-native source",
+        ]
+    return [
+        f"add a typed implementation path for {artifact_id}",
+        "avoid relying on weak MENTIONS edges for acceptance proof",
+    ]
 
 
 def _pack_payload(db: sqlite3.Connection, root: Path, target_id: str) -> dict[str, Any]:
@@ -1695,14 +2158,16 @@ def _graph_slice_payload(
         raise click.ClickException(f"Artifact not found: {target_id}")
     ids = _scope_ids(db, target_id)
     ids.add(target_id)
-    rows = _rows_for_ids(db, ids)
     gate_data = _gate_payload(db, root, target_id, mode, snapshot_path)
     computed_by_id = {item["id"]: item for item in gate_data["scope"]}
+    ids.update(_proof_artifact_ids(gate_data))
+    rows = _rows_for_ids(db, ids)
     nodes = [
         _graph_slice_node(db, item, computed_by_id.get(item["id"]), content_mode, max(0, content_limit))
         for item in rows
     ]
     edges = _graph_slice_edges(db, ids, include_mentions)
+    worklist = _agent_worklist(gate_data, nodes, edges)
     return {
         "schema": "graph-ba.graph-slice.v1",
         "target": target_id,
@@ -1715,11 +2180,235 @@ def _graph_slice_payload(
             "content": content_mode,
             "content_limit": max(0, content_limit),
         },
+        "quality_axes": gate_data["quality_axes"],
+        "overall_confidence": gate_data["overall_confidence"],
+        "evidence_profile": gate_data["evidence_profile"],
         "relation_catalog": _relation_catalog(include_mentions),
+        "class_matrices": _graph_class_matrices(root),
         "findings": gate_data["findings"],
+        "agent_worklist": worklist,
         "nodes": nodes,
         "edges": edges,
     }
+
+
+def _agent_worklist(
+    gate_data: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build a compact deterministic next-action list for agents.
+
+    Keep this intentionally small. The graph already carries the rich context;
+    worklist only answers "what should I fix next?".
+    """
+    by_id = {node["id"]: node for node in nodes}
+    incoming: dict[str, list[dict[str, Any]]] = {}
+    outgoing: dict[str, list[dict[str, Any]]] = {}
+    for edge in edges:
+        incoming.setdefault(edge["to"], []).append(edge)
+        outgoing.setdefault(edge["from"], []).append(edge)
+
+    items: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    sequence = 1
+
+    def add(kind: str, artifact: str, reason: str, *, source: dict[str, Any] | None = None) -> None:
+        nonlocal sequence
+        key = (kind, artifact, reason)
+        if key in seen:
+            return
+        seen.add(key)
+        node = by_id.get(artifact, {})
+        item = {
+            "id": f"WL-{sequence:03d}",
+            "priority": _worklist_priority(kind, source),
+            "kind": kind,
+            "artifact": artifact,
+            "artifact_type": node.get("type") or (source or {}).get("type", ""),
+            "reason": reason,
+            "suggested_actions": _worklist_suggested_actions(kind, artifact),
+            "related_nodes": _worklist_related_nodes(artifact, incoming, outgoing),
+            "blocking_in": _worklist_blocking_modes(kind),
+        }
+        if source:
+            item["source"] = {k: v for k, v in source.items() if k in {"code", "gap_type", "severity"}}
+        sequence += 1
+        items.append(item)
+
+    for finding in gate_data.get("findings", []):
+        artifact = finding.get("artifact") or gate_data.get("target", "")
+        code = finding.get("code", "")
+        if code in {"unimplemented", "missing_implementation"}:
+            add("add_implementation", artifact, "artifact has no typed implementation proof path", source=finding)
+        elif code in {"unverified", "missing_evidence"}:
+            add("add_evidence", artifact, "artifact has no TEST/EVD verification path", source=finding)
+        elif code in {"stale", "missing_snapshot"}:
+            add("refresh_acceptance", artifact, "accepted fingerprint or evidence is stale or missing", source=finding)
+        else:
+            add("add_trace", artifact, finding.get("message") or "artifact needs an explicit typed trace", source=finding)
+
+    behavior_axis = gate_data.get("quality_axes", {}).get("behavior_model", {})
+    if behavior_axis.get("status") == "PARTIAL":
+        missing = behavior_axis.get("missing", [])
+        add(
+            "add_behavior_rule",
+            gate_data.get("target", ""),
+            f"dynamic behavior model is partial; missing {', '.join(missing) or 'behavior artifacts'}",
+            source={"code": "behavior_model_partial", "severity": "warn"},
+        )
+    evidence_profile = gate_data.get("evidence_profile", {})
+    for artifact in evidence_profile.get("trace_only_ac", [])[:20]:
+        add(
+            "add_evidence",
+            artifact,
+            "AC has only trace evidence; add behavior/runtime evidence",
+            source={"code": "trace_only_evidence", "severity": "warn"},
+        )
+
+    for node in nodes:
+        artifact = node["id"]
+        artifact_type = node["type"]
+        computed = node.get("computed") or {}
+        if artifact_type == "SCR":
+            if not _has_outgoing_to_type(artifact, "CONTAINS", "UIC", outgoing, by_id):
+                add("add_trace", artifact, "screen readiness lint: screen has no scoped UIC artifact")
+            if not _screen_has_acceptance_trace(artifact, outgoing, by_id):
+                add("add_trace", artifact, "screen readiness lint: screen has no reachable AC trace")
+        if artifact_type == "AC" and computed:
+            if computed.get("implemented") and not computed.get("verified"):
+                add("add_evidence", artifact, "AC is implemented but not verified")
+            elif computed.get("verified") and not computed.get("implemented"):
+                add("add_implementation", artifact, "AC is verified but has no implementation proof")
+        if artifact_type == "UIC" and _is_interactive_or_visible_uic(node) and not _has_outgoing_to_type(artifact, "TRACES_TO", "AC", outgoing, by_id):
+            add("add_trace", artifact, "visible UI zone has no canonical AC trace")
+        if computed.get("stale"):
+            add("refresh_acceptance", artifact, "artifact fingerprint changed after acceptance")
+
+    return sorted(items, key=lambda item: (_priority_rank(item["priority"]), item["id"]))
+
+
+def _worklist_priority(kind: str, source: dict[str, Any] | None) -> str:
+    if source and source.get("severity") == "fail":
+        return "P0"
+    return {
+        "add_implementation": "P0",
+        "add_evidence": "P1",
+        "add_trace": "P1",
+        "add_behavior_rule": "P1",
+        "refresh_acceptance": "P0",
+    }.get(kind, "P2")
+
+
+def _priority_rank(priority: str) -> int:
+    return {"P0": 0, "P1": 1, "P2": 2}.get(priority, 9)
+
+
+def _worklist_suggested_actions(kind: str, artifact: str) -> list[str]:
+    if kind == "add_implementation":
+        return [
+            f"add a typed implementation path to {artifact}",
+            "use IMPLEMENTS, RENDERS, DEPENDS_ON or TRACES_TO; do not rely on MENTIONS",
+        ]
+    if kind == "add_evidence":
+        return [
+            f"add or link TEST/EVD that verifies {artifact}",
+            "mention the canonical artifact id in deterministic test/evidence",
+        ]
+    if kind == "add_behavior_rule":
+        return [
+            f"add graph-native RULE/DER/STATE/EVT artifacts for {artifact}",
+            "describe dynamic behavior before relying on implementation/test traces",
+        ]
+    if kind == "refresh_acceptance":
+        return [
+            f"refresh evidence or accepted fingerprint for {artifact}",
+            "accept the delta through a graph-ba change",
+        ]
+    return [
+        f"add an explicit typed trace for {artifact}",
+        "prefer the project class matrix relation instead of text-only mention",
+    ]
+
+
+def _worklist_blocking_modes(kind: str) -> list[str]:
+    if kind == "refresh_acceptance":
+        return ["release"]
+    return ["review", "release"]
+
+
+def _worklist_related_nodes(
+    artifact: str,
+    incoming: dict[str, list[dict[str, Any]]],
+    outgoing: dict[str, list[dict[str, Any]]],
+) -> list[str]:
+    ids = []
+    for edge in incoming.get(artifact, [])[:5]:
+        ids.append(edge["from"])
+    for edge in outgoing.get(artifact, [])[:5]:
+        ids.append(edge["to"])
+    return _dedupe_worklist_ids(ids)[:8]
+
+
+def _dedupe_worklist_ids(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))
+
+
+def _is_interactive_or_visible_uic(node: dict[str, Any]) -> bool:
+    title = f"{node.get('id', '')} {node.get('title', '')}".lower()
+    if any(marker in title for marker in ("button", "dialog", "form", "input", "action", "confirm", "modal")):
+        return True
+    return node.get("type") == "UIC"
+
+
+def _has_outgoing_to_type(
+    artifact: str,
+    relation: str,
+    target_type: str,
+    outgoing: dict[str, list[dict[str, Any]]],
+    by_id: dict[str, dict[str, Any]],
+) -> bool:
+    return any(
+        edge["relation"] == relation and by_id.get(edge["to"], {}).get("type") == target_type
+        for edge in outgoing.get(artifact, [])
+    )
+
+
+def _screen_has_acceptance_trace(
+    artifact: str,
+    outgoing: dict[str, list[dict[str, Any]]],
+    by_id: dict[str, dict[str, Any]],
+) -> bool:
+    seen = {artifact}
+    queue = [artifact]
+    allowed = {"CONTAINS", "TRACES_TO", "NORMALIZES"}
+    while queue:
+        current = queue.pop(0)
+        for edge in outgoing.get(current, []):
+            if edge["relation"] not in allowed:
+                continue
+            target = edge["to"]
+            if by_id.get(target, {}).get("type") == "AC":
+                return True
+            if target not in seen:
+                seen.add(target)
+                queue.append(target)
+    return False
+
+
+def _proof_artifact_ids(gate_data: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    for item in gate_data.get("scope", []):
+        for proof in item.get("implementation_proofs", []):
+            source = proof.get("source")
+            if source:
+                ids.add(source)
+            for edge in proof.get("path", []):
+                if edge.get("from"):
+                    ids.add(edge["from"])
+                if edge.get("to"):
+                    ids.add(edge["to"])
+    return ids
 
 
 def _rows_for_ids(db: sqlite3.Connection, ids: set[str]) -> list[sqlite3.Row]:
@@ -1782,6 +2471,8 @@ def _graph_slice_node(
         },
         "computed": computed.get("computed", {}) if computed else {},
     }
+    if computed and computed.get("implementation_proofs"):
+        node["implementation_proofs"] = computed["implementation_proofs"]
     if content_mode != "none":
         node["content"] = {
             "mode": "full" if content_mode == "full" else "excerpt",
@@ -1841,6 +2532,164 @@ def _relation_catalog(include_mentions: bool = False) -> list[dict[str, str]]:
     }
     relations = sorted(_semantic_scope_relations() | ({"MENTIONS"} if include_mentions else set()))
     return [{"relation": relation, "meaning": meanings.get(relation, "")} for relation in relations]
+
+
+def _graph_class_matrices(root: Path) -> list[dict[str, Any]]:
+    """Load project/adapter sparse class matrices for agent graph slices."""
+    candidates = [
+        root / ".graphba" / "artifact-class-matrix.json",
+        root / "reports" / "graphba" / "mini-artifact-class-matrix.json",
+    ]
+    matrices: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        _append_class_matrix(matrices, seen, path)
+        if path.name == "artifact-class-matrix.json" and matrices:
+            for upstream in matrices[-1].get("upstream_matrices", []):
+                upstream_path = upstream.get("path") if isinstance(upstream, dict) else None
+                if upstream_path:
+                    _append_class_matrix(matrices, seen, root / upstream_path)
+    return matrices
+
+
+def _append_class_matrix(matrices: list[dict[str, Any]], seen: set[Path], path: Path) -> None:
+    resolved = path.resolve()
+    if resolved in seen or not resolved.exists():
+        return
+    seen.add(resolved)
+    try:
+        data = json.loads(resolved.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+    matrices.append({
+        "source": str(path),
+        "schema": data.get("schema", ""),
+        "provider": data.get("provider") or data.get("project") or "",
+        "description": data.get("description", ""),
+        "entries": data.get("entries", []),
+    })
+
+
+def _render_change_state_yaml(payload: dict[str, Any]) -> str:
+    lines = [
+        "schema: graph-ba.change-state.v1",
+        f"id: {payload['change']['id']}",
+        f"state: {payload['change'].get('state') or 'draft'}",
+        f"mode: {payload['change'].get('mode') or 'dev'}",
+        "scope:",
+    ]
+    for item in payload.get("scope", []):
+        computed = item.get("computed", {})
+        lines.extend([
+            f"  - id: {item['id']}",
+            f"    type: {item['type']}",
+            f"    lifecycle: {item['lifecycle']}",
+            f"    implemented: {str(computed.get('implemented', False)).lower()}",
+            f"    verified: {str(computed.get('verified', False)).lower()}",
+            f"    stale: {str(computed.get('stale', False)).lower()}",
+        ])
+    return "\n".join(lines) + "\n"
+
+
+def _render_gaps_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        f"# graph-ba gaps: {payload['target']}",
+        "",
+        f"Mode: `{payload['mode']}`",
+        f"Verdict: `{payload['verdict']}`",
+        f"Summary: fail={payload['summary']['fail']} warn={payload['summary']['warn']} scope={payload['summary']['scope']}",
+        "",
+    ]
+    findings = payload.get("findings", [])
+    if not findings:
+        lines.append("No gaps.")
+        return "\n".join(lines) + "\n"
+    for finding in findings:
+        lines.extend([
+            f"## {finding.get('gap_type', 'GAP-SPEC')} {finding['artifact']}",
+            "",
+            f"- code: `{finding['code']}`",
+            f"- severity: `{finding['severity']}`",
+            f"- blocking: `{str(finding.get('blocking', False)).lower()}`",
+            f"- message: {finding['message']}",
+        ])
+        suggestions = finding.get("suggested_fix") or []
+        if suggestions:
+            lines.append("- suggested_fix:")
+            lines.extend(f"  - {item}" for item in suggestions)
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_worklist_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        f"# graph-ba worklist: {payload['target']}",
+        "",
+        f"Mode: `{payload['mode']}`",
+        "",
+    ]
+    items = payload.get("agent_worklist", [])
+    if not items:
+        lines.append("No worklist items.")
+        return "\n".join(lines) + "\n"
+    for item in items:
+        lines.extend([
+            f"## {item['priority']} {item['kind']} {item['artifact']}",
+            "",
+            f"- artifact_type: `{item.get('artifact_type', '')}`",
+            f"- reason: {item['reason']}",
+            f"- blocking_in: {', '.join(item.get('blocking_in', [])) or 'none'}",
+        ])
+        related = item.get("related_nodes") or []
+        if related:
+            lines.append(f"- related_nodes: {', '.join(f'`{node}`' for node in related)}")
+        actions = item.get("suggested_actions") or []
+        if actions:
+            lines.append("- suggested_actions:")
+            lines.extend(f"  - {action}" for action in actions)
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_projection_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        f"# graph-ba projection: {payload['target']}",
+        "",
+        f"Mode: `{payload['mode']}`",
+        f"Nodes: {payload['summary']['nodes']}",
+        f"Edges: {payload['summary']['edges']}",
+        "",
+        "## Scope",
+        "",
+    ]
+    for node in payload.get("nodes", []):
+        computed = node.get("computed", {})
+        flags = []
+        if computed:
+            flags.append(f"implemented={str(computed.get('implemented', False)).lower()}")
+            flags.append(f"verified={str(computed.get('verified', False)).lower()}")
+            flags.append(f"stale={str(computed.get('stale', False)).lower()}")
+        lines.append(f"- `{node['id']}` [{node['type']}] {node.get('title') or ''} {' '.join(flags)}".rstrip())
+        proofs = node.get("implementation_proofs") or []
+        for proof in proofs[:2]:
+            path = " -> ".join(
+                f"{edge['from']} -{edge['relation']}-> {edge['to']}"
+                for edge in proof.get("path", [])
+            )
+            lines.append(f"  - proof: {path or proof.get('reason', '')}")
+    lines.extend(["", "## Findings", ""])
+    findings = payload.get("findings", [])
+    if not findings:
+        lines.append("No findings.")
+    else:
+        for finding in findings:
+            lines.append(
+                f"- `{finding.get('gap_type', 'GAP-SPEC')}` `{finding['artifact']}` "
+                f"{finding['severity']}: {finding['message']}"
+            )
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _rewrite_change_state(path: Path, state: str) -> None:

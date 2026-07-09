@@ -488,6 +488,12 @@ origin = "canonical"
 ref = '(AC-[A-Z]+-\\d{3})'
 classify = 'AC-[A-Z]+-\\d{3}'
 
+[types.REACT_COMPONENT]
+label = "React components"
+origin = "implementation"
+ref = '(REACT_COMPONENT:[A-Za-z0-9_:\\-]+)'
+classify = 'REACT_COMPONENT:[A-Za-z0-9_:\\-]+'
+
 [tests]
 dirs = ["tests"]
 coverage_types = ["AC"]
@@ -563,13 +569,30 @@ dirs = [".graphba"]
     )
     graphba_dir = tmp_path / ".graphba"
     graphba_dir.mkdir()
+    (graphba_dir / "artifact-class-matrix.json").write_text(
+        json.dumps({
+            "schema": "graph-ba.artifact-class-matrix.v1",
+            "project": "test",
+            "entries": [
+                {
+                    "source_type": "REACT_COMPONENT",
+                    "relation": "RENDERS",
+                    "target_type": "UIC",
+                    "meaning": "React component renders a stable UI zone.",
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
     (graphba_dir / "source.md").write_text(
         ':::artifact type="SCR" id="SCR-KITCHEN" state="accepted" '
-        'title="Kitchen" contains="UIC-HEADER"\n'
+        'title="Kitchen" contains="UIC-HEADER,REACT_COMPONENT:KitchenHeader"\n'
         'Screen text mentions AC-KIT-001 but the typed edge goes through UIC-HEADER.\n'
         ':::\n'
         ':::artifact type="UIC" id="UIC-HEADER" state="accepted" '
         'title="Header" traces_to="AC-KIT-001"\n:::\n'
+        ':::artifact type="REACT_COMPONENT" id="REACT_COMPONENT:KitchenHeader" state="accepted" '
+        'title="KitchenHeader" renders="UIC-HEADER"\n:::\n'
         ':::artifact type="AC" id="AC-KIT-001" state="accepted" '
         'title="Kitchen AC"\n'
         'A long acceptance criterion body that should be excerpted.\n'
@@ -610,13 +633,155 @@ dirs = [".graphba"]
     assert all(edge["relation"] != "MENTIONS" for edge in payload["edges"])
     assert {
         ("SCR-KITCHEN", "CONTAINS", "UIC-HEADER"),
+        ("REACT_COMPONENT:KitchenHeader", "RENDERS", "UIC-HEADER"),
         ("UIC-HEADER", "TRACES_TO", "AC-KIT-001"),
         ("TEST:tests/test_kitchen.py", "TEST_EVIDENCE", "AC-KIT-001"),
     } <= {(edge["from"], edge["relation"], edge["to"]) for edge in payload["edges"]}
     ac_node = next(node for node in payload["nodes"] if node["id"] == "AC-KIT-001")
+    assert ac_node["computed"]["implemented"] is True
+    assert ac_node["implementation_proofs"][0]["source"] == "REACT_COMPONENT:KitchenHeader"
     assert ac_node["content"]["mode"] == "excerpt"
     assert len(ac_node["content"]["text"]) <= 32
     assert any(item["relation"] == "TRACES_TO" for item in payload["relation_catalog"])
+    assert payload["class_matrices"][0]["provider"] == "test"
+    assert payload["agent_worklist"] == []
+
+
+def test_graph_slice_worklist_reports_screen_readiness_gaps(tmp_path):
+    (tmp_path / "graph-ba.toml").write_text(
+        """
+[scan]
+dirs = [".graphba"]
+
+[types.SCR]
+label = "Screens"
+origin = "canonical"
+ref = '(SCR-[A-Z]+)'
+classify = 'SCR-[A-Z]+'
+
+[types.UIC]
+label = "UI Components"
+origin = "human_designed"
+ref = '(UIC-[A-Z]+)'
+classify = 'UIC-[A-Z]+'
+
+[types.AC]
+label = "Acceptance Criteria"
+origin = "canonical"
+ref = '(AC-[A-Z]+-\\d{3})'
+classify = 'AC-[A-Z]+-\\d{3}'
+
+[graph_native]
+dirs = [".graphba"]
+        """.strip(),
+        encoding="utf-8",
+    )
+    graphba_dir = tmp_path / ".graphba"
+    graphba_dir.mkdir()
+    (graphba_dir / "source.md").write_text(
+        ':::artifact type="SCR" id="SCR-KITCHEN" state="planned" title="Kitchen"\n:::\n',
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "graph.db"
+    db = get_db(db_path)
+    do_import(tmp_path, db, quiet=True)
+    db.close()
+
+    result = CliRunner().invoke(
+        cli,
+        ["--root", str(tmp_path), "--db", str(db_path), "graph", "SCR-KITCHEN"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    worklist = payload["agent_worklist"]
+    assert {item["kind"] for item in worklist} == {"add_trace"}
+    assert any("no scoped UIC" in item["reason"] for item in worklist)
+    assert any("no reachable AC" in item["reason"] for item in worklist)
+
+
+def test_graph_slice_quality_axes_mark_dynamic_trace_only_scope_partial(tmp_path):
+    (tmp_path / "graph-ba.toml").write_text(
+        """
+[scan]
+dirs = [".graphba", "tests"]
+
+[types.SCR]
+label = "Screens"
+origin = "canonical"
+ref = '(SCR-[A-Z]+)'
+classify = 'SCR-[A-Z]+'
+
+[types.UIC]
+label = "UI Components"
+origin = "human_designed"
+ref = '(UIC-[A-Z]+)'
+classify = 'UIC-[A-Z]+'
+
+[types.AC]
+label = "Acceptance Criteria"
+origin = "canonical"
+ref = '(AC-[A-Z]+-\\d{3})'
+classify = 'AC-[A-Z]+-\\d{3}'
+
+[types.EVT]
+label = "Events"
+origin = "canonical"
+ref = '(EVT-[A-Z]+)'
+classify = 'EVT-[A-Z]+'
+
+[types.STATE]
+label = "States"
+origin = "canonical"
+ref = '(STATE-[A-Z]+)'
+classify = 'STATE-[A-Z]+'
+
+[types.REACT_COMPONENT]
+label = "React components"
+origin = "implementation"
+ref = '(REACT_COMPONENT:[A-Za-z0-9_:\\-]+)'
+classify = 'REACT_COMPONENT:[A-Za-z0-9_:\\-]+'
+
+[tests]
+dirs = ["tests"]
+coverage_types = ["AC"]
+
+[graph_native]
+dirs = [".graphba"]
+        """.strip(),
+        encoding="utf-8",
+    )
+    graphba_dir = tmp_path / ".graphba"
+    graphba_dir.mkdir()
+    (graphba_dir / "source.md").write_text(
+        ':::artifact type="SCR" id="SCR-KITCHEN" state="accepted" title="Kitchen" contains="UIC-SLOT,EVT-ORDER,STATE-SLOT"\n:::\n'
+        ':::artifact type="UIC" id="UIC-SLOT" state="accepted" title="Slot" traces_to="AC-KIT-001"\n:::\n'
+        ':::artifact type="AC" id="AC-KIT-001" state="accepted" title="New order updates slot capacity"\n:::\n'
+        ':::artifact type="EVT" id="EVT-ORDER" state="accepted" title="Order created" traces_to="AC-KIT-001"\n:::\n'
+        ':::artifact type="STATE" id="STATE-SLOT" state="accepted" title="Slot lifecycle" traces_to="AC-KIT-001"\n:::\n'
+        ':::artifact type="REACT_COMPONENT" id="REACT_COMPONENT:Kitchen" state="accepted" title="Kitchen" renders="UIC-SLOT"\n:::\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "trace.test.ts").write_text("// AC-KIT-001\n", encoding="utf-8")
+    db_path = tmp_path / "graph.db"
+    db = get_db(db_path)
+    do_import(tmp_path, db, quiet=True)
+    db.close()
+
+    result = CliRunner().invoke(
+        cli,
+        ["--root", str(tmp_path), "--db", str(db_path), "graph", "SCR-KITCHEN"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["overall_confidence"] == "PARTIAL"
+    assert payload["quality_axes"]["test_evidence"]["status"] == "PARTIAL"
+    assert payload["quality_axes"]["behavior_model"]["status"] == "PARTIAL"
+    assert payload["quality_axes"]["behavior_model"]["missing"] == ["RULE_OR_DER"]
+    assert payload["evidence_profile"]["ac_trace_only"] == 1
+    assert {item["kind"] for item in payload["agent_worklist"]} >= {"add_behavior_rule", "add_evidence"}
 
 
 def test_gate_blocks_unimplemented_review_scope(tmp_path):
@@ -667,3 +832,73 @@ scope_relation_type = "CONTAINS"
     assert result.exit_code != 0
     assert '"code": "unimplemented"' in result.output
     assert '"code": "unverified"' in result.output
+    assert '"gap_type": "GAP-AC"' in result.output
+    assert '"suggested_fix"' in result.output
+
+
+def test_change_compile_writes_generated_files(tmp_path):
+    (tmp_path / "graph-ba.toml").write_text(
+        """
+[scan]
+dirs = [".graphba", "tests"]
+
+[types.CHG]
+label = "Changes"
+origin = "derived"
+ref = '(CHG-[A-Za-z0-9-]+)'
+classify = 'CHG-[A-Za-z0-9-]+'
+
+[types.AC]
+label = "Acceptance Criteria"
+origin = "canonical"
+ref = '(AC-[A-Z]+-\\d{3})'
+classify = 'AC-[A-Z]+-\\d{3}'
+
+[types.REACT_COMPONENT]
+label = "React components"
+origin = "implementation"
+ref = '(REACT_COMPONENT:[A-Za-z0-9_:\\-]+)'
+classify = 'REACT_COMPONENT:[A-Za-z0-9_:\\-]+'
+
+[tests]
+dirs = ["tests"]
+coverage_types = ["AC"]
+
+[graph_native]
+dirs = [".graphba"]
+change_files = [".graphba/changes/*/change.yaml"]
+scope_relation_type = "CONTAINS"
+        """.strip(),
+        encoding="utf-8",
+    )
+    change_dir = tmp_path / ".graphba" / "changes" / "CHG-kitchen"
+    change_dir.mkdir(parents=True)
+    (change_dir / "change.yaml").write_text(
+        "id: CHG-kitchen\nmode: dev\nscope:\n  - AC-KIT-001\n",
+        encoding="utf-8",
+    )
+    (change_dir / "source.md").write_text(
+        ':::artifact type="AC" id="AC-KIT-001" state="planned" title="Kitchen AC"\n:::\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_kitchen.py").write_text("# AC-KIT-001\n", encoding="utf-8")
+    db_path = tmp_path / "graph.db"
+    db = get_db(db_path)
+    do_import(tmp_path, db, quiet=True)
+    db.close()
+
+    result = CliRunner().invoke(
+        cli,
+        ["--root", str(tmp_path), "--db", str(db_path), "change", "compile", "CHG-kitchen"],
+    )
+
+    assert result.exit_code == 0, result.output
+    compiled = change_dir / "compiled"
+    assert (compiled / "graph.json").exists()
+    assert (compiled / "worklist.json").exists()
+    assert (compiled / "worklist.md").exists()
+    assert (compiled / "gaps.md").exists()
+    assert (compiled / "state.yaml").exists()
+    assert (compiled / "projection.md").exists()
+    assert (compiled / "pack.md").exists()
