@@ -1391,24 +1391,37 @@ def _scope_rows(db: sqlite3.Connection, change_id: str) -> list[sqlite3.Row]:
 
 def _scope_ids(db: sqlite3.Connection, root_id: str) -> set[str]:
     scope_relations = _semantic_scope_relations()
+    incoming_scope_relations = _incoming_scope_relations()
     result: set[str] = set()
     seen = {root_id}
     queue = [root_id]
     while queue:
         current = queue.pop(0)
-        rows = db.execute(
+        outgoing_rows = db.execute(
             "SELECT target_id FROM edges WHERE source_id = ? "
             f"AND relation_type IN ({','.join('?' for _ in scope_relations)}) "
             "ORDER BY target_id",
             (current, *sorted(scope_relations)),
         ).fetchall()
-        for row in rows:
+        incoming_rows = db.execute(
+            "SELECT source_id AS target_id FROM edges WHERE target_id = ? "
+            f"AND relation_type IN ({','.join('?' for _ in incoming_scope_relations)}) "
+            "ORDER BY source_id",
+            (current, *sorted(incoming_scope_relations)),
+        ).fetchall()
+        for row in outgoing_rows:
             target_id = row["target_id"]
             if target_id in seen:
                 continue
             seen.add(target_id)
             result.add(target_id)
             queue.append(target_id)
+        for row in incoming_rows:
+            target_id = row["target_id"]
+            if target_id in seen:
+                continue
+            seen.add(target_id)
+            result.add(target_id)
     return result
 
 
@@ -1424,6 +1437,17 @@ def _semantic_scope_relations() -> set[str]:
         "TEST_EVIDENCE",
         "CODE_TRACE",
         "UI_TRACE",
+    }
+
+
+def _incoming_scope_relations() -> set[str]:
+    return {
+        "CODE_TRACE",
+        "IMPLEMENTS",
+        "RENDERS",
+        "TEST_EVIDENCE",
+        "UI_TRACE",
+        "VERIFIES",
     }
 
 
@@ -1585,6 +1609,7 @@ def _render_pack_markdown(payload: dict[str, Any]) -> str:
     lines = [f"# graph-ba pack: {payload['target']}", ""]
     lines.append("## Artifacts")
     for item in payload["artifacts"]:
+        content = _pack_markdown_content(str(item["type"]), str(item["content"]))
         lines.extend([
             "",
             f"### {item['id']} [{item['type']}]",
@@ -1592,7 +1617,7 @@ def _render_pack_markdown(payload: dict[str, Any]) -> str:
             f"Source: {item['source_file']}:{item['line_number']}",
             "",
             "```",
-            item["content"].strip(),
+            content,
             "```",
         ])
     lines.extend(["", "## Edges", ""])
@@ -1601,6 +1626,17 @@ def _render_pack_markdown(payload: dict[str, Any]) -> str:
             f"- `{edge['source_id']}` --{edge['relation_type']}--> `{edge['target_id']}`"
         )
     return "\n".join(lines)
+
+
+def _pack_markdown_content(artifact_type: str, content: str) -> str:
+    content = content.strip()
+    limit = 1200 if artifact_type in {"TEST", "CODE", "REACT_COMPONENT"} else 3500
+    if len(content) <= limit:
+        return content
+    return (
+        content[:limit].rstrip()
+        + f"\n\n[graph-ba pack truncated {len(content) - limit} chars; use source file for full content]"
+    )
 
 
 def _rewrite_change_state(path: Path, state: str) -> None:
