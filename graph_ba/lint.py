@@ -1,4 +1,4 @@
-"""Content quality lint checks for Graph BA artifacts."""
+"""Content quality lint checks for graph-ba artifacts."""
 from __future__ import annotations
 
 import re

@@ -1,4 +1,4 @@
-"""SQLite storage and import helpers for Graph BA."""
+"""SQLite storage and import helpers for graph-ba."""
 from __future__ import annotations
 
 import re
@@ -192,48 +192,19 @@ def _scan_file_mtimes(root: Path, config) -> dict[str, float]:
     if getattr(config, "ui", None):
         for pattern in config.ui.files:
             _remember_files(files, root.glob(pattern))
-    if getattr(config, "mini_registry", None):
-        for dir_str in config.mini_registry.dirs:
+    if getattr(config, "graph_native", None):
+        for dir_str in config.graph_native.dirs:
             p = root / dir_str
             if not p.exists():
                 continue
-            for ext in config.mini_registry.extensions:
-                for f in p.rglob(f"*.{ext}"):
+            for ext in config.graph_native.artifact_extensions:
+                for f in p.rglob(f"*.{ext.lstrip('.')}"):
                     if f.is_file():
                         files[str(f.resolve())] = f.stat().st_mtime
-        for pattern in config.mini_registry.files:
-            for f in root.glob(pattern):
-                if f.is_file():
-                    files[str(f.resolve())] = f.stat().st_mtime
-    if getattr(config, "react_ui", None):
-        for dir_str in config.react_ui.dirs:
-            p = root / dir_str
-            if not p.exists():
-                continue
-            for ext in config.react_ui.extensions:
-                for f in p.rglob(f"*.{ext}"):
-                    if f.is_file():
-                        files[str(f.resolve())] = f.stat().st_mtime
-        for pattern in config.react_ui.files:
-            for f in root.glob(pattern):
-                if f.is_file():
-                    files[str(f.resolve())] = f.stat().st_mtime
-    if getattr(config, "mini_admin_sources", None):
-        for dir_str in config.mini_admin_sources.dirs:
-            p = root / dir_str
-            if not p.exists():
-                continue
-            for ext in config.mini_admin_sources.extensions:
-                for f in p.rglob(f"*.{ext}"):
-                    if f.is_file():
-                        files[str(f.resolve())] = f.stat().st_mtime
-        for pattern in config.mini_admin_sources.files:
-            for f in root.glob(pattern):
-                if f.is_file():
-                    files[str(f.resolve())] = f.stat().st_mtime
-                    trace_file = f.with_name(config.mini_admin_sources.trace_filename)
-                    if trace_file.is_file():
-                        files[str(trace_file.resolve())] = trace_file.stat().st_mtime
+        for pattern in config.graph_native.files:
+            _remember_files(files, root.glob(pattern))
+        for pattern in config.graph_native.change_files:
+            _remember_files(files, root.glob(pattern))
     return files
 
 
@@ -280,18 +251,9 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
             n_ui = db.execute(
                 "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'UI:%'"
             ).fetchone()[0]
-            n_mini = db.execute(
-                "SELECT count(*) FROM artifacts "
-                "WHERE type IN ('REGISTRY_RESOURCE', 'CUSTOM_METHOD', 'CRUDL_RESOURCE')"
-            ).fetchone()[0]
-            n_react = db.execute(
-                "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'REACT:%'"
-            ).fetchone()[0]
             print(f"Imported: {n_nodes} artifacts, {n_edges} edges, "
                   f"{n_clusters} semantic clusters, {n_code} code files, "
-                  f"{n_test} test files, {n_ui} ui trace files, "
-                  f"{n_mini} mini registry artifacts, "
-                  f"{n_react} react ui files "
+                  f"{n_test} test files, {n_ui} ui trace files "
                   "(up to date, no changes)")
             db_path = db.execute("PRAGMA database_list").fetchone()[2]
             print(f"DB: {db_path}")
@@ -303,13 +265,12 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
     code_refs = t.scan_code_references(root, config)
     test_refs = t.scan_test_references(root, config)
     ui_refs = t.scan_ui_references(root, config)
-    mini_registry_traces = t.scan_mini_registry_traces(root, config)
-    react_ui_elements = t.scan_react_ui_elements(root, config)
-    mini_admin_source_traces = t.scan_mini_admin_source_traces(root, config)
-    mini_admin_component_traces = t.scan_mini_admin_component_traces(root, config)
+    graph_native_change_traces = t.scan_graph_native_change_traces(root, config)
+    graph_native_artifact_traces = t.scan_graph_native_artifact_traces(root, config)
     G = t.build_graph(registry, references, config, index_xrefs, code_refs, test_refs,
-                      ui_refs, mini_registry_traces, react_ui_elements,
-                      mini_admin_source_traces, mini_admin_component_traces)
+                      ui_refs,
+                      graph_native_change_traces=graph_native_change_traces,
+                      graph_native_artifact_traces=graph_native_artifact_traces)
 
     # Clear existing data
     db.executescript("""
@@ -379,14 +340,10 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
         file_map[tref.code_file.name] = str(tref.code_file)
     for uref in ui_refs:
         file_map[uref.code_file.name] = str(uref.code_file)
-    for mref in mini_registry_traces:
-        file_map[mref.source_file.name] = str(mref.source_file)
-    for rref in react_ui_elements:
-        file_map[rref.source_file.name] = str(rref.source_file)
-    for aref in mini_admin_source_traces:
-        file_map[aref.source_file.name] = str(aref.source_file)
-    for cref in mini_admin_component_traces:
-        file_map[cref.source_file.name] = str(cref.source_file)
+    for gref in graph_native_change_traces:
+        file_map[gref.source_file.name] = str(gref.source_file)
+    for gref in graph_native_artifact_traces:
+        file_map[gref.source_file.name] = str(gref.source_file)
     for fname, fpath in file_map.items():
         db.execute("INSERT OR IGNORE INTO file_paths (filename, full_path) VALUES (?, ?)",
                    (fname, fpath))
@@ -421,18 +378,10 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
     n_ui = db.execute(
         "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'UI:%'"
     ).fetchone()[0]
-    n_mini = db.execute(
-        "SELECT count(*) FROM artifacts "
-        "WHERE type IN ('REGISTRY_RESOURCE', 'CUSTOM_METHOD', 'CRUDL_RESOURCE')"
-    ).fetchone()[0]
-    n_react = db.execute(
-        "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'REACT:%'"
-    ).fetchone()[0]
     db_path = db.execute("PRAGMA database_list").fetchone()[2]
     print(f"Imported: {n_nodes} artifacts, {n_edges} edges, "
           f"{n_clusters} semantic clusters, {n_code} code files, "
-          f"{n_test} test files, {n_ui} ui trace files, "
-          f"{n_mini} mini registry artifacts, {n_react} react ui files")
+          f"{n_test} test files, {n_ui} ui trace files")
     print(f"DB: {db_path}")
     return True
 

@@ -1,12 +1,15 @@
-"""Click command line interface for Graph BA."""
+"""Click command line interface for graph-ba."""
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sqlite3
 import sys
+import shutil
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, List, Tuple
+from datetime import date
 
 import click
 
@@ -54,6 +57,12 @@ def _json_out(ctx, data):
         return True
     return False
 
+
+def _csv_filter(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {item.strip() for item in value.split(",") if item.strip()}
+
 # ── Schema ────────────────────────────────────────────────────────
 def fmt_table(rows: list, headers: list) -> str:
     """Format rows as a compact aligned table."""
@@ -88,7 +97,7 @@ def fmt_table(rows: list, headers: list) -> str:
               help="Do not rebuild the graph automatically when it is empty or stale")
 @click.pass_context
 def cli(ctx, db, root, json_output, no_auto_import):
-    """Graph BA — query the artifact traceability graph."""
+    """graph-ba — query the artifact traceability graph."""
     ctx.ensure_object(dict)
     ctx.obj["db_path"] = db
     ctx.obj["root"] = str(Path(root).resolve())
@@ -179,7 +188,7 @@ def cmd_init(ctx):
         return
 
     template = '''\
-# graph-ba.toml — project configuration for Graph BA
+# graph-ba.toml — project configuration for graph-ba
 # Defines artifact types, scan rules, and cross-reference patterns.
 
 [scan]
@@ -700,6 +709,913 @@ def coverage(ctx):
             bar = "█" * int(r["pct"] / 5) + "░" * (20 - int(r["pct"] / 5))
             print(f"  UI   → {r['type']:8s}  {r['linked']:3d}/{r['total']:<3d}  "
                   f"{bar}  {r['pct']:5.1f}%  [{r['status']}]")
+
+
+@cli.command("matrix")
+@click.option("--source-type", default=None,
+              help="Comma-separated source artifact types, e.g. TEST,CODE,UIC")
+@click.option("--target-type", default=None,
+              help="Comma-separated target artifact types, e.g. AC,RULE")
+@click.option("--relation", "relation_filter", default=None,
+              help="Comma-separated relation types, e.g. TEST_EVIDENCE,IMPLEMENTS")
+@click.option("--out", "out_path", type=click.Path(path_type=Path), default=None,
+              help="Write sparse matrix JSON to this file")
+@click.pass_context
+def matrix(ctx, source_type, target_type, relation_filter, out_path):
+    """Export sparse artifact relationship matrix as JSON."""
+    db = _conn(ctx)
+    _require_graph(ctx, db)
+
+    source_types = _csv_filter(source_type)
+    target_types = _csv_filter(target_type)
+    relations = _csv_filter(relation_filter)
+
+    query = (
+        "SELECT e.source_id, s.type AS source_type, s.title AS source_title, "
+        "e.target_id, t.type AS target_type, t.title AS target_title, "
+        "e.relation_type, e.context, e.source_file, e.line_number "
+        "FROM edges e "
+        "LEFT JOIN artifacts s ON e.source_id = s.id "
+        "LEFT JOIN artifacts t ON e.target_id = t.id "
+        "WHERE 1 = 1"
+    )
+    params: list[str] = []
+    if source_types:
+        query += f" AND s.type IN ({','.join('?' for _ in source_types)})"
+        params.extend(sorted(source_types))
+    if target_types:
+        query += f" AND t.type IN ({','.join('?' for _ in target_types)})"
+        params.extend(sorted(target_types))
+    if relations:
+        query += f" AND e.relation_type IN ({','.join('?' for _ in relations)})"
+        params.extend(sorted(relations))
+    query += " ORDER BY e.source_id, e.target_id, e.relation_type"
+
+    rows = [dict(row) for row in db.execute(query, params).fetchall()]
+    db.close()
+
+    nodes: dict[str, dict[str, object]] = {}
+    entries: dict[tuple[str, str, str], dict[str, object]] = {}
+    for row in rows:
+        source_id = str(row["source_id"])
+        target_id = str(row["target_id"])
+        relation_type = str(row["relation_type"])
+        nodes[source_id] = {
+            "id": source_id,
+            "type": row.get("source_type") or "UNKNOWN",
+            "title": row.get("source_title") or "",
+        }
+        nodes[target_id] = {
+            "id": target_id,
+            "type": row.get("target_type") or "UNKNOWN",
+            "title": row.get("target_title") or "",
+        }
+        key = (source_id, target_id, relation_type)
+        entry = entries.setdefault(
+            key,
+            {
+                "source": source_id,
+                "target": target_id,
+                "relation_type": relation_type,
+                "source_type": row.get("source_type") or "UNKNOWN",
+                "target_type": row.get("target_type") or "UNKNOWN",
+                "count": 0,
+                "evidence": [],
+            },
+        )
+        entry["count"] = int(entry["count"]) + 1
+        evidence = entry["evidence"]
+        if isinstance(evidence, list):
+            evidence.append(
+                {
+                    "source_file": row.get("source_file") or "",
+                    "line_number": row.get("line_number") or 0,
+                    "context": row.get("context") or "",
+                }
+            )
+
+    payload = {
+        "schema": "graph-ba.sparse-matrix.v1",
+        "filters": {
+            "source_type": sorted(source_types),
+            "target_type": sorted(target_types),
+            "relation": sorted(relations),
+        },
+        "nodes": sorted(nodes.values(), key=lambda item: str(item["id"])),
+        "matrix": {
+            "rows": sorted({entry["source"] for entry in entries.values()}),
+            "columns": sorted({entry["target"] for entry in entries.values()}),
+            "entries": sorted(
+                entries.values(),
+                key=lambda item: (
+                    str(item["source"]),
+                    str(item["target"]),
+                    str(item["relation_type"]),
+                ),
+            ),
+        },
+    }
+
+    text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text + "\n", encoding="utf-8")
+        if not ctx.obj.get("json"):
+            print(f"Wrote sparse matrix JSON: {out_path}")
+            return
+    print(text)
+
+
+@cli.command("artifact-state")
+@click.argument("artifact_id", required=False, default=None)
+@click.option("--snapshot", "snapshot_path", type=click.Path(path_type=Path), default=None,
+              help="Accepted fingerprint snapshot JSON to compare against")
+@click.option("--write-snapshot", "write_snapshot_path", type=click.Path(path_type=Path), default=None,
+              help="Write current fingerprints as accepted snapshot JSON")
+@click.option("--out", "out_path", type=click.Path(path_type=Path), default=None,
+              help="Write artifact state JSON to this file")
+@click.pass_context
+def artifact_state(ctx, artifact_id, snapshot_path, write_snapshot_path, out_path):
+    """Compute lifecycle, fingerprints and implementation/evidence state."""
+    db = _conn(ctx)
+    _require_graph(ctx, db)
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    payload = _artifact_state_payload(db, root, artifact_id, snapshot_path)
+    db.close()
+
+    if write_snapshot_path:
+        snapshot = {
+            "schema": "graph-ba.fingerprint-snapshot.v1",
+            "artifacts": {
+                item["id"]: {
+                    "lifecycle": item["lifecycle"],
+                    "fingerprints": item["fingerprints"],
+                }
+                for item in payload["artifacts"]
+            },
+        }
+        write_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        write_snapshot_path.write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        payload["snapshot_written"] = str(write_snapshot_path)
+
+    text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text + "\n", encoding="utf-8")
+        if not ctx.obj.get("json"):
+            print(f"Wrote artifact state JSON: {out_path}")
+            if write_snapshot_path:
+                print(f"Wrote accepted fingerprint snapshot: {write_snapshot_path}")
+            return
+    print(text)
+
+
+def _artifact_state_payload(
+    db: sqlite3.Connection,
+    root: Path,
+    artifact_id: str | None,
+    snapshot_path: Path | None,
+) -> dict[str, Any]:
+    snapshot = _load_fingerprint_snapshot(snapshot_path)
+    lifecycle_overrides = _graph_native_lifecycle_map(root)
+    change_states = _graph_native_change_state_map(root)
+    rows = _artifact_rows(db, artifact_id)
+    artifacts = [
+        _artifact_state_item(db, row, root, lifecycle_overrides, change_states, snapshot)
+        for row in rows
+    ]
+    return {
+        "schema": "graph-ba.artifact-state.v1",
+        "snapshot_path": str(snapshot_path) if snapshot_path else "",
+        "snapshot_loaded": bool(snapshot),
+        "artifacts": artifacts,
+    }
+
+
+def _artifact_rows(db: sqlite3.Connection, artifact_id: str | None) -> list[sqlite3.Row]:
+    if artifact_id:
+        rows = db.execute(
+            "SELECT * FROM artifacts WHERE id = ? ORDER BY id",
+            (artifact_id,),
+        ).fetchall()
+        if not rows:
+            raise click.ClickException(f"Artifact not found: {artifact_id}")
+        return rows
+    return db.execute("SELECT * FROM artifacts ORDER BY id").fetchall()
+
+
+def _artifact_state_item(
+    db: sqlite3.Connection,
+    row: sqlite3.Row,
+    root: Path,
+    lifecycle_overrides: dict[str, str],
+    change_states: dict[str, dict[str, str]],
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    artifact_id = row["id"]
+    lifecycle = _artifact_lifecycle(row, lifecycle_overrides)
+    fingerprints = _artifact_fingerprints(db, row)
+    active_changes = _active_changes_for_artifact(db, artifact_id, change_states)
+    implemented = _artifact_has_implementation(db, row)
+    verified = _artifact_has_evidence(db, artifact_id)
+    baseline = snapshot.get("artifacts", {}).get(artifact_id, {}) if snapshot else {}
+    baseline_fingerprints = baseline.get("fingerprints", {}) if isinstance(baseline, dict) else {}
+    stale_reasons = _stale_reasons(fingerprints, baseline_fingerprints)
+    return {
+        "id": artifact_id,
+        "type": row["type"],
+        "origin": row["origin"],
+        "title": row["title"],
+        "source_file": row["source_file"],
+        "line_number": row["line_number"],
+        "lifecycle": lifecycle,
+        "computed": {
+            "implemented": implemented,
+            "verified": verified,
+            "changing": bool(active_changes),
+            "stale": bool(stale_reasons),
+            "unimplemented": lifecycle in {"accepted", "planned"} and not implemented,
+            "unverified": lifecycle in {"accepted", "planned"} and not verified,
+        },
+        "active_changes": active_changes,
+        "fingerprints": fingerprints,
+        "baseline": {
+            "present": bool(baseline_fingerprints),
+            "stale_reasons": stale_reasons,
+        },
+    }
+
+
+def _artifact_lifecycle(row: sqlite3.Row, overrides: dict[str, str]) -> str:
+    artifact_id = row["id"]
+    if artifact_id in overrides:
+        return overrides[artifact_id]
+    if row["type"] == "CHG":
+        return overrides.get(artifact_id, "draft")
+    if row["origin"] in {"canonical", "implementation", "evidence"}:
+        return "accepted"
+    return "draft" if int(row["defined"] or 0) else "unknown"
+
+
+def _artifact_fingerprints(db: sqlite3.Connection, row: sqlite3.Row) -> dict[str, str]:
+    artifact_id = row["id"]
+    content = _artifact_content(db, row)
+    links = _edge_tuples(db, "WHERE source_id = ?", (artifact_id,))
+    observed = _edge_tuples(
+        db,
+        "WHERE (source_id = ? OR target_id = ?) "
+        "AND relation_type IN ('IMPLEMENTS', 'RENDERS', 'DEPENDS_ON')",
+        (artifact_id, artifact_id),
+    )
+    evidence = _edge_tuples(
+        db,
+        "WHERE (source_id = ? OR target_id = ?) "
+        "AND relation_type IN ('TEST_EVIDENCE', 'VERIFIES')",
+        (artifact_id, artifact_id),
+    )
+    return {
+        "content": _sha256_text(content),
+        "links": _sha256_json(links),
+        "observed": _sha256_json(observed),
+        "evidence": _sha256_json(evidence),
+    }
+
+
+def _artifact_content(db: sqlite3.Connection, row: sqlite3.Row) -> str:
+    full_path = _resolve_file(db, row["source_file"]) if row["source_file"] else None
+    if not full_path:
+        return f"{row['id']}\n{row['type']}\n{row['title']}"
+    path = Path(full_path)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return f"{row['id']}\n{row['type']}\n{row['title']}"
+    line_number = int(row["line_number"] or 0)
+    if 1 <= line_number <= len(lines) and lines[line_number - 1].lstrip().startswith(":::artifact"):
+        collected = []
+        for line in lines[line_number - 1:]:
+            collected.append(line)
+            if line.strip() == ":::":
+                break
+        return "\n".join(collected)
+    if line_number > 0:
+        return _artifact_section_text(str(path), line_number)
+    return "\n".join(lines)
+
+
+def _edge_tuples(
+    db: sqlite3.Connection,
+    where_clause: str,
+    params: tuple[Any, ...],
+) -> list[dict[str, Any]]:
+    rows = db.execute(
+        "SELECT source_id, target_id, relation_type, context "
+        f"FROM edges {where_clause} "
+        "ORDER BY source_id, target_id, relation_type, context",
+        params,
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _artifact_has_implementation(db: sqlite3.Connection, row: sqlite3.Row) -> bool:
+    if row["origin"] == "implementation":
+        return True
+    artifact_id = row["id"]
+    found = db.execute(
+        "SELECT 1 FROM edges e JOIN artifacts s ON e.source_id = s.id "
+        "WHERE e.target_id = ? "
+        "AND e.relation_type IN ('IMPLEMENTS', 'RENDERS') "
+        "AND (s.origin = 'implementation' OR s.type IN ("
+        "'CRUDL_RESOURCE','CUSTOM_METHOD','INTEGRATION_ACTION',"
+        "'INTEGRATION_CONNECTION','INTEGRATION_TRIGGER','REACT_UI'"
+        ")) LIMIT 1",
+        (artifact_id,),
+    ).fetchone()
+    return bool(found)
+
+
+def _artifact_has_evidence(db: sqlite3.Connection, artifact_id: str) -> bool:
+    found = db.execute(
+        "SELECT 1 FROM edges e JOIN artifacts s ON e.source_id = s.id "
+        "WHERE e.target_id = ? "
+        "AND e.relation_type IN ('TEST_EVIDENCE', 'VERIFIES') "
+        "AND (s.origin = 'evidence' OR s.type IN ('TEST', 'EVD', 'UI')) LIMIT 1",
+        (artifact_id,),
+    ).fetchone()
+    return bool(found)
+
+
+def _active_changes_for_artifact(
+    db: sqlite3.Connection,
+    artifact_id: str,
+    change_states: dict[str, dict[str, str]],
+) -> list[dict[str, str]]:
+    rows = db.execute(
+        "SELECT e.source_id, a.title FROM edges e "
+        "JOIN artifacts a ON e.source_id = a.id "
+        "WHERE e.target_id = ? AND a.type = 'CHG' "
+        "AND e.relation_type IN ('CONTAINS', 'DEPENDS_ON') "
+        "ORDER BY e.source_id",
+        (artifact_id,),
+    ).fetchall()
+    active = []
+    for row in rows:
+        state = change_states.get(row["source_id"], {}).get("state", "draft")
+        if state in {"accepted", "archived"}:
+            continue
+        active.append({
+            "id": row["source_id"],
+            "title": row["title"] or "",
+            "state": state,
+            "mode": change_states.get(row["source_id"], {}).get("mode", ""),
+        })
+    return active
+
+
+def _stale_reasons(current: dict[str, str], baseline: dict[str, str]) -> list[str]:
+    if not baseline:
+        return []
+    return [
+        key
+        for key in ("content", "links", "observed", "evidence")
+        if baseline.get(key) and baseline.get(key) != current.get(key)
+    ]
+
+
+def _load_fingerprint_snapshot(snapshot_path: Path | None) -> dict[str, Any]:
+    if not snapshot_path or not snapshot_path.exists():
+        return {}
+    try:
+        return json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise click.ClickException(f"Cannot read snapshot {snapshot_path}: {exc}") from exc
+
+
+def _graph_native_lifecycle_map(root: Path) -> dict[str, str]:
+    try:
+        from graph_ba.config import load_config, normalize_id
+        from graph_ba.traceability import _graph_native_artifact_files, _parse_graph_native_attrs
+
+        config = load_config(root)
+    except Exception:
+        return {}
+    result: dict[str, str] = {}
+    for filepath in _graph_native_artifact_files(root, config):
+        try:
+            lines = filepath.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            continue
+        for line in lines:
+            marker = re.match(r"^\s*:::artifact\s+(.+?)\s*$", line)
+            if not marker:
+                continue
+            attrs = _parse_graph_native_attrs(marker.group(1))
+            if attrs.get("id") and attrs.get("state"):
+                result[normalize_id(attrs["id"], config)] = attrs["state"]
+    result.update({key: value.get("state", "") for key, value in _graph_native_change_state_map(root).items()})
+    return {key: value for key, value in result.items() if value}
+
+
+def _graph_native_change_state_map(root: Path) -> dict[str, dict[str, str]]:
+    try:
+        from graph_ba.config import load_config, normalize_id
+        from graph_ba.traceability import _graph_native_change_files, _read_graph_native_change
+
+        config = load_config(root)
+    except Exception:
+        return {}
+    result: dict[str, dict[str, str]] = {}
+    for filepath in _graph_native_change_files(root, config):
+        change = _read_graph_native_change(filepath)
+        change_id = change.get("id")
+        if not isinstance(change_id, str) or not change_id:
+            continue
+        result[normalize_id(change_id, config)] = {
+            "state": str(change.get("state") or "draft"),
+            "mode": str(change.get("mode") or ""),
+        }
+    return result
+
+
+def _sha256_text(value: str) -> str:
+    normalized = "\n".join(line.rstrip() for line in value.splitlines()).strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _sha256_json(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+@cli.group("change")
+@click.pass_context
+def change_group(ctx):
+    """Manage graph-native change requests."""
+
+
+@change_group.command("create")
+@click.argument("change_id")
+@click.option("--title", default="", help="Human-readable change title")
+@click.option("--state", default="draft", type=click.Choice(["draft", "planned", "accepted", "archived"]))
+@click.option("--mode", default="dev", type=click.Choice(["explore", "dev", "review", "release"]))
+@click.option("--scope", "scope_items", multiple=True, help="Scoped artifact ID; can be repeated")
+@click.pass_context
+def change_create(ctx, change_id, title, state, mode, scope_items):
+    """Create `.graphba/changes/<change-id>/`."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    path = _change_path(root, change_id)
+    if path.exists():
+        raise click.ClickException(f"Change already exists: {path}")
+    (path / "compiled").mkdir(parents=True)
+    (path / "evidence").mkdir()
+    (path / "archive").mkdir()
+    lines = [
+        f"id: {change_id}",
+        f"title: {title or change_id}",
+        f"state: {state}",
+        f"mode: {mode}",
+        "scope:",
+    ]
+    lines.extend(f"  - {item}" for item in scope_items)
+    (path / "change.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (path / "source.md").write_text(
+        "# Change source\n\n"
+        "<!-- Add graph-native :::artifact blocks here. -->\n",
+        encoding="utf-8",
+    )
+    print(f"Created graph-ba change: {path}")
+
+
+@change_group.command("show")
+@click.argument("change_id")
+@click.pass_context
+def change_show(ctx, change_id):
+    """Show change metadata, scope and computed state."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    db = _conn(ctx)
+    _require_graph(ctx, db)
+    data = _change_payload(db, root, change_id)
+    db.close()
+    if _json_out(ctx, data):
+        return
+    meta = data["change"]
+    print(f"{meta['id']} — {meta.get('title') or ''}")
+    print(f"state={meta.get('state') or 'draft'} mode={meta.get('mode') or ''}")
+    print(f"scope: {len(data['scope'])}")
+    for item in data["scope"]:
+        flags = item["computed"]
+        print(
+            f"  {item['id']} [{item['type']}] "
+            f"implemented={flags['implemented']} verified={flags['verified']} stale={flags['stale']}"
+        )
+
+
+@change_group.command("accept")
+@click.argument("change_id")
+@click.option("--snapshot", "snapshot_path", type=click.Path(path_type=Path), default=None,
+              help="Project accepted fingerprint snapshot path")
+@click.pass_context
+def change_accept(ctx, change_id, snapshot_path):
+    """Write accepted delta/snapshot for a change and optionally update project snapshot."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    db = _conn(ctx)
+    _require_graph(ctx, db)
+    data = _change_payload(db, root, change_id)
+    db.close()
+    change_dir = _change_path(root, change_id)
+    archive_dir = change_dir / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    accepted_delta = {
+        "schema": "graph-ba.accepted-delta.v1",
+        "change": data["change"],
+        "scope": [item["id"] for item in data["scope"]],
+    }
+    accepted_snapshot = {
+        "schema": "graph-ba.fingerprint-snapshot.v1",
+        "artifacts": {
+            item["id"]: {
+                "lifecycle": item["lifecycle"],
+                "fingerprints": item["fingerprints"],
+            }
+            for item in data["scope"]
+        },
+    }
+    (archive_dir / "accepted-delta.json").write_text(
+        json.dumps(accepted_delta, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (archive_dir / "accepted-snapshot.json").write_text(
+        json.dumps(accepted_snapshot, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    if snapshot_path:
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        current = _load_fingerprint_snapshot(snapshot_path)
+        artifacts = dict(current.get("artifacts", {}))
+        artifacts.update(accepted_snapshot["artifacts"])
+        snapshot_path.write_text(
+            json.dumps(
+                {"schema": "graph-ba.fingerprint-snapshot.v1", "artifacts": artifacts},
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ) + "\n",
+            encoding="utf-8",
+        )
+    _rewrite_change_state(change_dir / "change.yaml", "accepted")
+    print(f"Accepted graph-ba change: {change_id}")
+
+
+@change_group.command("archive")
+@click.argument("change_id")
+@click.pass_context
+def change_archive(ctx, change_id):
+    """Move a change under `.graphba/changes/archive/YYYY-MM-DD-<id>/`."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    src = _change_path(root, change_id)
+    if not src.exists():
+        raise click.ClickException(f"Change not found: {src}")
+    dst = root / ".graphba" / "changes" / "archive" / f"{date.today().isoformat()}-{change_id}"
+    if dst.exists():
+        raise click.ClickException(f"Archive target already exists: {dst}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    _rewrite_change_state(src / "change.yaml", "archived")
+    shutil.move(str(src), str(dst))
+    print(f"Archived graph-ba change: {dst}")
+
+
+@cli.command("gate")
+@click.argument("target_id")
+@click.option("--mode", default=None, type=click.Choice(["explore", "dev", "review", "release"]),
+              help="Gate strictness; defaults to change.yaml mode or dev")
+@click.option("--snapshot", "snapshot_path", type=click.Path(path_type=Path), default=None,
+              help="Accepted fingerprint snapshot for stale checks")
+@click.option("--out", "out_path", type=click.Path(path_type=Path), default=None,
+              help="Write gate JSON to this file")
+@click.pass_context
+def gate(ctx, target_id, mode, snapshot_path, out_path):
+    """Evaluate change/release readiness from graph facts."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    db = _conn(ctx)
+    _require_graph(ctx, db)
+    result = _gate_payload(db, root, target_id, mode, snapshot_path)
+    db.close()
+    text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text + "\n", encoding="utf-8")
+        if not ctx.obj.get("json"):
+            print(f"Wrote gate JSON: {out_path}")
+            if not result["pass"]:
+                raise click.ClickException(f"Gate failed: {result['verdict']}")
+            return
+    print(text)
+    if not result["pass"]:
+        raise click.ClickException(f"Gate failed: {result['verdict']}")
+
+
+@cli.command("pack")
+@click.argument("target_id")
+@click.option("--out", "out_path", type=click.Path(path_type=Path), default=None,
+              help="Write pack markdown to this file")
+@click.option("--format", "output_format", type=click.Choice(["md", "json"]), default="md")
+@click.pass_context
+def pack(ctx, target_id, out_path, output_format):
+    """Compile an agent pack for a change, screen family, screen or artifact."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    db = _conn(ctx)
+    _require_graph(ctx, db)
+    payload = _pack_payload(db, root, target_id)
+    db.close()
+    if output_format == "json":
+        text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    else:
+        text = _render_pack_markdown(payload)
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text.rstrip() + "\n", encoding="utf-8")
+        if not ctx.obj.get("json"):
+            print(f"Wrote graph-ba pack: {out_path}")
+            return
+    print(text)
+
+
+def _change_path(root: Path, change_id: str) -> Path:
+    return root / ".graphba" / "changes" / change_id
+
+
+def _change_payload(db: sqlite3.Connection, root: Path, change_id: str) -> dict[str, Any]:
+    change_states = _graph_native_change_state_map(root)
+    row = db.execute("SELECT * FROM artifacts WHERE id = ?", (change_id,)).fetchone()
+    if not row:
+        raise click.ClickException(f"Change not found in graph: {change_id}")
+    scope_rows = _scope_rows(db, change_id)
+    state_items = [
+        _artifact_state_item(
+            db,
+            item,
+            root,
+            _graph_native_lifecycle_map(root),
+            change_states,
+            {},
+        )
+        for item in scope_rows
+    ]
+    return {
+        "schema": "graph-ba.change.v1",
+        "change": {
+            "id": change_id,
+            "title": row["title"],
+            "state": change_states.get(change_id, {}).get("state", "draft"),
+            "mode": change_states.get(change_id, {}).get("mode", ""),
+        },
+        "scope": state_items,
+    }
+
+
+def _scope_rows(db: sqlite3.Connection, change_id: str) -> list[sqlite3.Row]:
+    ids = _scope_ids(db, change_id)
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        return db.execute(
+            f"SELECT * FROM artifacts WHERE id IN ({placeholders}) ORDER BY type, id",
+            tuple(sorted(ids)),
+        ).fetchall()
+    row = db.execute("SELECT * FROM artifacts WHERE id = ?", (change_id,)).fetchone()
+    return [row] if row else []
+
+
+def _scope_ids(db: sqlite3.Connection, root_id: str) -> set[str]:
+    scope_relations = _semantic_scope_relations()
+    result: set[str] = set()
+    seen = {root_id}
+    queue = [root_id]
+    while queue:
+        current = queue.pop(0)
+        rows = db.execute(
+            "SELECT target_id FROM edges WHERE source_id = ? "
+            f"AND relation_type IN ({','.join('?' for _ in scope_relations)}) "
+            "ORDER BY target_id",
+            (current, *sorted(scope_relations)),
+        ).fetchall()
+        for row in rows:
+            target_id = row["target_id"]
+            if target_id in seen:
+                continue
+            seen.add(target_id)
+            result.add(target_id)
+            queue.append(target_id)
+    return result
+
+
+def _semantic_scope_relations() -> set[str]:
+    return {
+        "CONTAINS",
+        "DEPENDS_ON",
+        "TRACES_TO",
+        "NORMALIZES",
+        "IMPLEMENTS",
+        "VERIFIES",
+        "RENDERS",
+        "TEST_EVIDENCE",
+        "CODE_TRACE",
+        "UI_TRACE",
+    }
+
+
+def _direct_scope_rows(db: sqlite3.Connection, change_id: str) -> list[sqlite3.Row]:
+    rows = db.execute(
+        "SELECT DISTINCT a.* FROM edges e JOIN artifacts a ON e.target_id = a.id "
+        "WHERE e.source_id = ? AND e.relation_type IN ('CONTAINS', 'DEPENDS_ON') "
+        "ORDER BY a.id",
+        (change_id,),
+    ).fetchall()
+    if rows:
+        return rows
+    row = db.execute("SELECT * FROM artifacts WHERE id = ?", (change_id,)).fetchone()
+    return [row] if row else []
+
+
+def _gate_payload(
+    db: sqlite3.Connection,
+    root: Path,
+    target_id: str,
+    mode: str | None,
+    snapshot_path: Path | None,
+) -> dict[str, Any]:
+    change_states = _graph_native_change_state_map(root)
+    selected_mode = mode or change_states.get(target_id, {}).get("mode") or "dev"
+    snapshot = _load_fingerprint_snapshot(snapshot_path)
+    rows = _scope_rows(db, target_id)
+    states = [
+        _artifact_state_item(
+            db,
+            row,
+            root,
+            _graph_native_lifecycle_map(root),
+            change_states,
+            snapshot,
+        )
+        for row in rows
+    ]
+    findings = _gate_findings(states, selected_mode, bool(snapshot))
+    fail_count = sum(1 for item in findings if item["severity"] == "fail")
+    warn_count = sum(1 for item in findings if item["severity"] == "warn")
+    return {
+        "schema": "graph-ba.gate.v1",
+        "target": target_id,
+        "mode": selected_mode,
+        "pass": fail_count == 0,
+        "verdict": "PASS" if fail_count == 0 else "FAIL",
+        "summary": {"fail": fail_count, "warn": warn_count, "scope": len(states)},
+        "findings": findings,
+        "scope": [
+            {
+                "id": item["id"],
+                "type": item["type"],
+                "lifecycle": item["lifecycle"],
+                "computed": item["computed"],
+            }
+            for item in states
+        ],
+    }
+
+
+def _gate_findings(states: list[dict[str, Any]], mode: str, snapshot_loaded: bool) -> list[dict[str, Any]]:
+    if mode == "explore":
+        return []
+    findings: list[dict[str, Any]] = []
+    strict = mode in {"review", "release"}
+    release = mode == "release"
+    contract_types = {"AC", "RULE", "DER", "STATE", "EVT", "ENT", "MTH"}
+    for item in states:
+        computed = item["computed"]
+        if item["type"] in contract_types and not computed["implemented"]:
+            findings.append(_gate_finding(item, "unimplemented", "fail" if strict else "warn"))
+        if item["type"] == "AC" and not computed["verified"]:
+            findings.append(_gate_finding(item, "unverified", "fail" if strict else "warn"))
+        if release and computed["stale"]:
+            findings.append(_gate_finding(item, "stale", "fail"))
+    if release and not snapshot_loaded:
+        findings.append({
+            "artifact": "",
+            "type": "",
+            "code": "missing_snapshot",
+            "severity": "fail",
+            "message": "release gate requires accepted fingerprint snapshot",
+        })
+    return findings
+
+
+def _gate_finding(item: dict[str, Any], code: str, severity: str) -> dict[str, str]:
+    return {
+        "artifact": item["id"],
+        "type": item["type"],
+        "code": code,
+        "severity": severity,
+        "message": f"{item['id']} {code.replace('_', ' ')}",
+    }
+
+
+def _pack_payload(db: sqlite3.Connection, root: Path, target_id: str) -> dict[str, Any]:
+    row = db.execute("SELECT * FROM artifacts WHERE id = ?", (target_id,)).fetchone()
+    if not row:
+        raise click.ClickException(f"Artifact not found: {target_id}")
+    if row["type"] == "CHG":
+        rows = [row, *_scope_rows(db, target_id)]
+    else:
+        related_ids = _scope_ids(db, target_id)
+        related_ids.add(target_id)
+        if related_ids:
+            semantic_relations = _semantic_scope_relations()
+            placeholders = ",".join("?" for _ in related_ids)
+            relation_placeholders = ",".join("?" for _ in semantic_relations)
+            adjacent = db.execute(
+                "SELECT source_id, target_id FROM edges "
+                f"WHERE relation_type IN ({relation_placeholders}) "
+                f"AND (source_id IN ({placeholders}) OR target_id IN ({placeholders}))",
+                (*sorted(semantic_relations), *tuple(sorted(related_ids)), *tuple(sorted(related_ids))),
+            ).fetchall()
+            for edge in adjacent:
+                related_ids.add(edge["source_id"])
+                related_ids.add(edge["target_id"])
+        placeholders = ",".join("?" for _ in related_ids)
+        rows = db.execute(
+            f"SELECT * FROM artifacts WHERE id IN ({placeholders}) ORDER BY type, id",
+            tuple(sorted(related_ids)),
+        ).fetchall()
+    artifacts = [
+        {
+            "id": item["id"],
+            "type": item["type"],
+            "title": item["title"],
+            "source_file": item["source_file"],
+            "line_number": item["line_number"],
+            "content": _artifact_content(db, item),
+        }
+        for item in rows
+    ]
+    ids = [item["id"] for item in rows]
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        semantic_relations = _semantic_scope_relations()
+        relation_placeholders = ",".join("?" for _ in semantic_relations)
+        edge_rows = db.execute(
+            "SELECT source_id, target_id, relation_type, context, source_file, line_number "
+            f"FROM edges WHERE relation_type IN ({relation_placeholders}) "
+            f"AND (source_id IN ({placeholders}) OR target_id IN ({placeholders})) "
+            "ORDER BY source_id, target_id, relation_type",
+            (*sorted(semantic_relations), *ids, *ids),
+        ).fetchall()
+    else:
+        edge_rows = []
+    return {
+        "schema": "graph-ba.pack.v1",
+        "target": target_id,
+        "artifacts": artifacts,
+        "edges": [dict(edge) for edge in edge_rows],
+    }
+
+
+def _render_pack_markdown(payload: dict[str, Any]) -> str:
+    lines = [f"# graph-ba pack: {payload['target']}", ""]
+    lines.append("## Artifacts")
+    for item in payload["artifacts"]:
+        lines.extend([
+            "",
+            f"### {item['id']} [{item['type']}]",
+            f"Title: {item['title']}",
+            f"Source: {item['source_file']}:{item['line_number']}",
+            "",
+            "```",
+            item["content"].strip(),
+            "```",
+        ])
+    lines.extend(["", "## Edges", ""])
+    for edge in payload["edges"]:
+        lines.append(
+            f"- `{edge['source_id']}` --{edge['relation_type']}--> `{edge['target_id']}`"
+        )
+    return "\n".join(lines)
+
+
+def _rewrite_change_state(path: Path, state: str) -> None:
+    if not path.exists():
+        return
+    lines = path.read_text(encoding="utf-8").splitlines()
+    replaced = False
+    for index, line in enumerate(lines):
+        if line.strip().startswith("state:"):
+            lines[index] = f"state: {state}"
+            replaced = True
+            break
+    if not replaced:
+        lines.append(f"state: {state}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # ── Code references CLI ──────────────────────────────────────────

@@ -1,3 +1,3 @@
-"""Graph BA — graph-based traceability index for BA artifacts."""
+"""graph-ba — graph-based traceability index for BA artifacts."""
 
-__version__ = "0.2.7"
+__version__ = "0.2.10"

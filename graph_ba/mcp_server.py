@@ -1,4 +1,4 @@
-"""MCP stdio server for structured Graph BA access."""
+"""MCP stdio server for structured graph-ba access."""
 from __future__ import annotations
 
 import sqlite3

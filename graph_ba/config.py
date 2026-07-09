@@ -56,72 +56,82 @@ DEFAULT_ORIGINS = {
 DEFAULT_RELATIONS = {
     "MENTIONS": {
         "label": "Mentions",
-        "description": "A source text mentions the target ID; broad navigation edge.",
+        "description": "Weak textual mention; useful for navigation, not acceptance.",
         "direction": "source_mentions_target",
     },
     "INDEX": {
-        "label": "Index cross-reference",
-        "description": "A configured index table links source row ID to target ID.",
+        "label": "Index",
+        "description": "Configured index-table link.",
         "direction": "source_index_row_to_target",
     },
     "CODE_TRACE": {
         "label": "Code trace",
-        "description": "A CODE: node references an artifact via @trace.",
+        "description": "Code marker references an artifact.",
         "direction": "code_to_artifact",
     },
     "TEST_EVIDENCE": {
         "label": "Test evidence",
-        "description": "A TEST: node references an artifact as verification evidence.",
+        "description": "Test file references an artifact as evidence.",
         "direction": "test_to_artifact",
     },
     "UI_TRACE": {
         "label": "UI trace",
-        "description": "A UI: trace sidecar references an artifact rendered in UI.",
+        "description": "UI trace artifact references a rendered artifact.",
         "direction": "ui_to_artifact",
     },
     "DERIVES_FROM": {
         "label": "Derives from",
-        "description": "A derived artifact was produced from a source artifact.",
+        "description": "Source material used to derive this artifact.",
         "direction": "derived_to_source",
     },
     "NORMALIZES": {
         "label": "Normalizes",
-        "description": "A canonical artifact normalizes a raw/source artifact.",
+        "description": "Canonical artifact refines raw/source material.",
         "direction": "canonical_to_source",
     },
     "IMPLEMENTS": {
         "label": "Implements",
-        "description": "An implementation artifact implements a requirement or criterion.",
+        "description": "Implementation realizes a contract or semantic artifact.",
         "direction": "implementation_to_contract",
     },
     "DEPENDS_ON": {
         "label": "Depends on",
-        "description": "An artifact depends on another artifact for behavior, data or context.",
+        "description": "Artifact needs another artifact for behavior, data or context.",
         "direction": "source_to_dependency",
+    },
+    "CONTAINS": {
+        "label": "Contains",
+        "description": "Container scopes a child artifact.",
+        "direction": "container_to_child",
+    },
+    "TRACES_TO": {
+        "label": "Traces to",
+        "description": "Explicit trace without stronger semantics.",
+        "direction": "source_to_target",
     },
     "VERIFIES": {
         "label": "Verifies",
-        "description": "Evidence verifies a requirement, criterion or behavior.",
+        "description": "Evidence proves the target artifact.",
         "direction": "evidence_to_contract",
     },
     "RENDERS": {
         "label": "Renders",
-        "description": "A UI artifact renders a component, screen or criterion.",
+        "description": "UI/source artifact renders a visible target.",
         "direction": "ui_to_contract",
     },
     "CONFLICTS_WITH": {
         "label": "Conflicts with",
-        "description": "Two artifacts state incompatible requirements or facts.",
+        "description": "Artifacts cannot both be true as written.",
         "direction": "symmetric",
     },
     "SUPERSEDES": {
         "label": "Supersedes",
-        "description": "A newer artifact replaces an older artifact.",
+        "description": "New artifact replaces an older artifact.",
         "direction": "new_to_old",
     },
     "TRACE_GAP": {
         "label": "Trace gap",
-        "description": "An explicit gap where expected traceability is missing.",
+        "description": "Expected edge is deliberately missing.",
         "direction": "source_to_gap",
     },
 }
@@ -213,73 +223,24 @@ class UiConfig:
 
 
 @dataclass
-class MiniRegistryConfig:
-    """Configuration for scanning mini registry declarations.
+class GraphNativeConfig:
+    """Configuration for graph-native Artifact/Change source files.
 
-    Scanner is static and does not import application code. It creates
-    implementation nodes for Resource(...) and CustomMethod(...) declarations
-    and reads trace=Traceability(...) / Traceability.implements(...).
+    Artifact blocks are lightweight markdown blocks:
+    `:::artifact type="AC" id="AC-..." state="draft" title="..."`
+    The body remains free-form markdown and is scanned for normal refs.
+
+    Change files are deliberately small YAML-like files. graph-ba reads only
+    top-level `id`, `title`, `state`, `mode` and a `scope` list so projects do
+    not need a YAML dependency for the core workflow.
     """
     dirs: List[str] = field(default_factory=list)
     files: List[str] = field(default_factory=list)
-    extensions: List[str] = field(default_factory=lambda: ["py"])
-    resource_type: str = "REGISTRY_RESOURCE"
-    custom_method_type: str = "CUSTOM_METHOD"
-    origin: str = "implementation"
-
-
-@dataclass
-class ReactUiConfig:
-    """Configuration for scanning React JSX UI trace attributes.
-
-    By default only component IDs matching `UIC-*` and explicit screen IDs are
-    imported. This keeps technical selectors out of the BA graph unless a
-    project explicitly opts in.
-    """
-    dirs: List[str] = field(default_factory=list)
-    files: List[str] = field(default_factory=list)
-    extensions: List[str] = field(default_factory=lambda: ["tsx", "jsx"])
-    props: List[str] = field(default_factory=lambda: ["data-uic-id"])
-    screen_props: List[str] = field(default_factory=lambda: ["data-screen-id"])
-    screen_family_props: List[str] = field(default_factory=lambda: ["data-screen-family-id"])
-    include_patterns: List[str] = field(default_factory=lambda: [r"^UIC-"])
-    screen_include_patterns: List[str] = field(default_factory=lambda: [r"^SC-", r"^SCR-ADMIN-"])
-    screen_family_include_patterns: List[str] = field(default_factory=lambda: [r"^SCR-ADMIN-"])
-    include_unmatched: bool = False
-    selector_type: str = "UI_SELECTOR"
-    screen_type: str = "SCREEN"
-    screen_family_type: str = "SCREEN_FAMILY"
-    source_type: str = "REACT_UI"
-    relation_type: str = "RENDERS"
-    screen_relation_type: str = "IMPLEMENTS"
-    screen_component_relation_type: str = "CONTAINS"
-    screen_family_relation_type: str = "CONTAINS"
-    origin: str = "implementation"
-
-
-@dataclass
-class MiniAdminSourcesConfig:
-    """Configuration for scanning mini-admin screen data-source metadata.
-
-    Scanner is static and intentionally limited to source metadata files such as
-    `features/<screen>/api/sources.ts`. It maps screen-family artifacts to the
-    CRUDL resources and CustomMethod contracts consumed by that screen.
-    """
-    dirs: List[str] = field(default_factory=list)
-    files: List[str] = field(default_factory=list)
-    extensions: List[str] = field(default_factory=lambda: ["ts", "tsx"])
-    feature_path_segment: str = "features"
-    screen_family_prefix: str = "SCR-ADMIN-"
-    resource_type: str = "CRUDL_RESOURCE"
-    custom_method_type: str = "CUSTOM_METHOD"
-    frontend_computed_type: str = "FRONTEND_COMPUTED"
-    component_type: str = "UIC"
-    component_fallback_prefix: str = "UIC:"
-    relation_type: str = "DEPENDS_ON"
-    component_relation_type: str = "CONTAINS"
-    trace_relation_type: str = "TRACES_TO"
-    trace_filename: str = "trace.json"
-    origin: str = "implementation"
+    artifact_extensions: List[str] = field(default_factory=lambda: ["md"])
+    change_files: List[str] = field(default_factory=lambda: [".graphba/changes/*/change.yaml"])
+    change_type: str = "CHG"
+    change_origin: str = "derived"
+    scope_relation_type: str = "DEPENDS_ON"
 
 
 @dataclass
@@ -317,12 +278,8 @@ class ProjectConfig:
     tests: Optional[TestsConfig] = None
     # UI traceability
     ui: Optional[UiConfig] = None
-    # mini registry traceability
-    mini_registry: Optional[MiniRegistryConfig] = None
-    # React UI test-id traceability
-    react_ui: Optional[ReactUiConfig] = None
-    # mini-admin screen data-source traceability
-    mini_admin_sources: Optional[MiniAdminSourcesConfig] = None
+    # graph-native Artifact/Change workflow
+    graph_native: Optional[GraphNativeConfig] = None
     # Lint
     lint: Optional[LintConfig] = None
 
@@ -470,124 +427,37 @@ def load_config(root: Path) -> ProjectConfig:
             coverage_types=ui_data.get("coverage_types", []),
         )
 
-    # ── mini registry scan config ──
-    mini_registry_data = data.get("mini_registry")
-    mini_registry_config = None
-    if mini_registry_data:
-        mini_registry_config = MiniRegistryConfig(
-            dirs=mini_registry_data.get("dirs", []),
-            files=mini_registry_data.get("files", []),
-            extensions=mini_registry_data.get(
-                "extensions", MiniRegistryConfig().extensions
+    # ── graph-native Artifact/Change workflow ──
+    graph_native_data = data.get("graph_native")
+    graph_native_config = None
+    if graph_native_data:
+        graph_native_defaults = GraphNativeConfig()
+        graph_native_config = GraphNativeConfig(
+            dirs=graph_native_data.get("dirs", []),
+            files=graph_native_data.get("files", []),
+            artifact_extensions=graph_native_data.get(
+                "artifact_extensions",
+                graph_native_defaults.artifact_extensions,
             ),
-            resource_type=mini_registry_data.get(
-                "resource_type", MiniRegistryConfig.resource_type
+            change_files=graph_native_data.get(
+                "change_files",
+                graph_native_defaults.change_files,
             ),
-            custom_method_type=mini_registry_data.get(
-                "custom_method_type", MiniRegistryConfig.custom_method_type
+            change_type=graph_native_data.get("change_type", graph_native_defaults.change_type),
+            change_origin=graph_native_data.get(
+                "change_origin",
+                graph_native_defaults.change_origin,
             ),
-            origin=mini_registry_data.get("origin", MiniRegistryConfig.origin),
+            scope_relation_type=graph_native_data.get(
+                "scope_relation_type",
+                graph_native_defaults.scope_relation_type,
+            ),
         )
-
-    # ── React UI test-id scan config ──
-    react_ui_data = data.get("react_ui")
-    react_ui_config = None
-    if react_ui_data:
-        react_ui_defaults = ReactUiConfig()
-        react_ui_config = ReactUiConfig(
-            dirs=react_ui_data.get("dirs", []),
-            files=react_ui_data.get("files", []),
-            extensions=react_ui_data.get("extensions", react_ui_defaults.extensions),
-            props=react_ui_data.get("props", react_ui_defaults.props),
-            screen_props=react_ui_data.get("screen_props", react_ui_defaults.screen_props),
-            screen_family_props=react_ui_data.get(
-                "screen_family_props", react_ui_defaults.screen_family_props
-            ),
-            include_patterns=react_ui_data.get(
-                "include_patterns", react_ui_defaults.include_patterns
-            ),
-            screen_include_patterns=react_ui_data.get(
-                "screen_include_patterns", react_ui_defaults.screen_include_patterns
-            ),
-            screen_family_include_patterns=react_ui_data.get(
-                "screen_family_include_patterns",
-                react_ui_defaults.screen_family_include_patterns,
-            ),
-            include_unmatched=react_ui_data.get("include_unmatched", False),
-            selector_type=react_ui_data.get("selector_type", react_ui_defaults.selector_type),
-            screen_type=react_ui_data.get("screen_type", react_ui_defaults.screen_type),
-            screen_family_type=react_ui_data.get(
-                "screen_family_type", react_ui_defaults.screen_family_type
-            ),
-            source_type=react_ui_data.get("source_type", react_ui_defaults.source_type),
-            relation_type=react_ui_data.get("relation_type", react_ui_defaults.relation_type),
-            screen_relation_type=react_ui_data.get(
-                "screen_relation_type", react_ui_defaults.screen_relation_type
-            ),
-            screen_component_relation_type=react_ui_data.get(
-                "screen_component_relation_type",
-                react_ui_defaults.screen_component_relation_type,
-            ),
-            screen_family_relation_type=react_ui_data.get(
-                "screen_family_relation_type",
-                react_ui_defaults.screen_family_relation_type,
-            ),
-            origin=react_ui_data.get("origin", react_ui_defaults.origin),
-        )
-
-    # ── mini-admin data-source metadata scan config ──
-    mini_admin_sources_data = data.get("mini_admin_sources")
-    mini_admin_sources_config = None
-    if mini_admin_sources_data:
-        mini_admin_sources_defaults = MiniAdminSourcesConfig()
-        mini_admin_sources_config = MiniAdminSourcesConfig(
-            dirs=mini_admin_sources_data.get("dirs", []),
-            files=mini_admin_sources_data.get("files", []),
-            extensions=mini_admin_sources_data.get(
-                "extensions", mini_admin_sources_defaults.extensions
-            ),
-            feature_path_segment=mini_admin_sources_data.get(
-                "feature_path_segment",
-                mini_admin_sources_defaults.feature_path_segment,
-            ),
-            screen_family_prefix=mini_admin_sources_data.get(
-                "screen_family_prefix",
-                mini_admin_sources_defaults.screen_family_prefix,
-            ),
-            resource_type=mini_admin_sources_data.get(
-                "resource_type", mini_admin_sources_defaults.resource_type
-            ),
-            custom_method_type=mini_admin_sources_data.get(
-                "custom_method_type",
-                mini_admin_sources_defaults.custom_method_type,
-            ),
-            frontend_computed_type=mini_admin_sources_data.get(
-                "frontend_computed_type",
-                mini_admin_sources_defaults.frontend_computed_type,
-            ),
-            component_type=mini_admin_sources_data.get(
-                "component_type", mini_admin_sources_defaults.component_type
-            ),
-            component_fallback_prefix=mini_admin_sources_data.get(
-                "component_fallback_prefix",
-                mini_admin_sources_defaults.component_fallback_prefix,
-            ),
-            relation_type=mini_admin_sources_data.get(
-                "relation_type", mini_admin_sources_defaults.relation_type
-            ),
-            component_relation_type=mini_admin_sources_data.get(
-                "component_relation_type",
-                mini_admin_sources_defaults.component_relation_type,
-            ),
-            trace_relation_type=mini_admin_sources_data.get(
-                "trace_relation_type",
-                mini_admin_sources_defaults.trace_relation_type,
-            ),
-            trace_filename=mini_admin_sources_data.get(
-                "trace_filename", mini_admin_sources_defaults.trace_filename
-            ),
-            origin=mini_admin_sources_data.get("origin", mini_admin_sources_defaults.origin),
-        )
+        if graph_native_config.change_origin not in origins:
+            origins[graph_native_config.change_origin] = EnumDef(
+                id=graph_native_config.change_origin,
+                label=graph_native_config.change_origin,
+            )
 
     # ── Lint config ──
     lint_data = data.get("lint")
@@ -618,9 +488,7 @@ def load_config(root: Path) -> ProjectConfig:
         code=code_config,
         tests=tests_config,
         ui=ui_config,
-        mini_registry=mini_registry_config,
-        react_ui=react_ui_config,
-        mini_admin_sources=mini_admin_sources_config,
+        graph_native=graph_native_config,
         lint=lint_config,
     )
 

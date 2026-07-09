@@ -129,6 +129,43 @@ class MiniAdminComponentTraceEntry:
     trace_gap: str = ""
 
 
+@dataclass
+class GraphNativeChangeTrace:
+    """A Change scope edge declared by graph-native change.yaml."""
+    source_id: str
+    source_file: Path
+    line_number: int
+    target_id: str
+    relation_type: str
+    context: str = ""
+    rel_path: str = ""
+
+
+@dataclass
+class GraphNativeArtifactTrace:
+    """A typed edge declared directly on a graph-native artifact block."""
+    source_id: str
+    source_file: Path
+    line_number: int
+    target_id: str
+    relation_type: str
+    context: str = ""
+    rel_path: str = ""
+
+
+GRAPH_NATIVE_LINK_ATTRS = {
+    "implements": "IMPLEMENTS",
+    "depends_on": "DEPENDS_ON",
+    "verifies": "VERIFIES",
+    "renders": "RENDERS",
+    "contains": "CONTAINS",
+    "traces_to": "TRACES_TO",
+    "normalizes": "NORMALIZES",
+    "supersedes": "SUPERSEDES",
+    "conflicts_with": "CONFLICTS_WITH",
+}
+
+
 # ── Phase 1: Definition scanning ─────────────────────────────────
 
 def _read_lines(path: Path) -> List[str]:
@@ -164,6 +201,7 @@ def scan_definitions(root: Path, config: ProjectConfig) -> Dict[str, Artifact]:
             elif rule.mode == "table":
                 _scan_table_first_col(registry, filepath, rule.pattern, rule.type_id, config)
 
+    _scan_graph_native_definitions(registry, root, config)
     return registry
 
 
@@ -194,6 +232,125 @@ def _scan_table_first_col(registry, filepath, pattern, type_id, config):
             _register(registry, Artifact(raw_id, type_id, filepath, i, title), config)
 
 
+def _scan_graph_native_definitions(
+    registry: Dict[str, Artifact],
+    root: Path,
+    config: ProjectConfig,
+):
+    if not config.graph_native:
+        return
+    for filepath in _graph_native_artifact_files(root, config):
+        _scan_graph_native_artifact_file(registry, filepath, config)
+    for filepath in _graph_native_change_files(root, config):
+        change = _read_graph_native_change(filepath)
+        change_id = change.get("id")
+        if not change_id:
+            continue
+        title = change.get("title", "")
+        _register(
+            registry,
+            Artifact(
+                change_id,
+                config.graph_native.change_type,
+                filepath,
+                int(change.get("_line", 1)),
+                title,
+            ),
+            config,
+        )
+
+
+def _scan_graph_native_artifact_file(
+    registry: Dict[str, Artifact],
+    filepath: Path,
+    config: ProjectConfig,
+):
+    if not filepath.exists():
+        return
+    for line_number, line in enumerate(_read_lines(filepath), 1):
+        marker = re.match(r"^\s*:::artifact\s+(.+?)\s*$", line)
+        if not marker:
+            continue
+        attrs = _parse_graph_native_attrs(marker.group(1))
+        artifact_id = attrs.get("id")
+        type_id = attrs.get("type")
+        if not artifact_id or not type_id:
+            continue
+        title = attrs.get("title", "")
+        _register(registry, Artifact(artifact_id, type_id, filepath, line_number, title), config)
+
+
+def _parse_graph_native_attrs(raw: str) -> Dict[str, str]:
+    attrs: Dict[str, str] = {}
+    for key, double_quoted, single_quoted, bare in re.findall(
+        r"([A-Za-z_][\w-]*)=(?:\"([^\"]*)\"|'([^']*)'|([^\s]+))",
+        raw,
+    ):
+        attrs[key] = double_quoted or single_quoted or bare
+    return attrs
+
+
+def _graph_native_artifact_files(root: Path, config: ProjectConfig) -> List[Path]:
+    if not config.graph_native:
+        return []
+    files: Set[Path] = set()
+    for dir_str in config.graph_native.dirs:
+        base = root / dir_str
+        if not base.exists():
+            continue
+        for ext in config.graph_native.artifact_extensions:
+            files.update(base.rglob(f"*.{ext.lstrip('.')}"))
+    for pattern in config.graph_native.files:
+        files.update(root.glob(pattern))
+    return sorted(path for path in files if path.is_file())
+
+
+def _graph_native_change_files(root: Path, config: ProjectConfig) -> List[Path]:
+    if not config.graph_native:
+        return []
+    files: Set[Path] = set()
+    for pattern in config.graph_native.change_files:
+        files.update(root.glob(pattern))
+    return sorted(path for path in files if path.is_file())
+
+
+def _read_graph_native_change(filepath: Path) -> Dict[str, object]:
+    """Read the small supported subset of change.yaml without extra deps."""
+    data: Dict[str, object] = {}
+    scope: List[str] = []
+    in_scope = False
+    for line_number, raw_line in enumerate(_read_lines(filepath), 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("-") and in_scope:
+            value = line[1:].strip().strip("\"'")
+            if value:
+                scope.append(value)
+            continue
+        in_scope = False
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        if key == "scope":
+            in_scope = True
+            if value.startswith("[") and value.endswith("]"):
+                scope.extend(
+                    item.strip().strip("\"'")
+                    for item in value[1:-1].split(",")
+                    if item.strip()
+                )
+            continue
+        if key in {"id", "title", "state", "mode"}:
+            data[key] = value.strip("\"'")
+            data.setdefault("_line", line_number)
+    if scope:
+        data["scope"] = scope
+    return data
+
+
 # ── Phase 2: Reference extraction ────────────────────────────────
 
 def expand_ranges(text: str, config: ProjectConfig) -> List[str]:
@@ -218,6 +375,85 @@ def scan_index_cross_refs(
         _parse_index_table(results, filepath, rule.first_col_pattern, config)
 
     return results
+
+
+def scan_graph_native_change_traces(
+    root: Path,
+    config: ProjectConfig,
+) -> List[GraphNativeChangeTrace]:
+    """Read Change scope lists and expose them as graph edges."""
+    if not config.graph_native:
+        return []
+    traces: List[GraphNativeChangeTrace] = []
+    for filepath in _graph_native_change_files(root, config):
+        change = _read_graph_native_change(filepath)
+        change_id = change.get("id")
+        if not change_id:
+            continue
+        try:
+            rel_path = str(filepath.relative_to(root))
+        except ValueError:
+            rel_path = str(filepath)
+        line_number = int(change.get("_line", 1))
+        for target in change.get("scope", []):
+            if not isinstance(target, str) or not target:
+                continue
+            traces.append(
+                GraphNativeChangeTrace(
+                    source_id=normalize_id(str(change_id), config),
+                    source_file=filepath,
+                    line_number=line_number,
+                    target_id=normalize_id(target, config),
+                    relation_type=config.graph_native.scope_relation_type,
+                    context="graph_native_change_scope",
+                    rel_path=rel_path,
+                )
+            )
+    return traces
+
+
+def scan_graph_native_artifact_traces(
+    root: Path,
+    config: ProjectConfig,
+) -> List[GraphNativeArtifactTrace]:
+    """Read typed link attributes from graph-native artifact blocks."""
+    if not config.graph_native:
+        return []
+    traces: List[GraphNativeArtifactTrace] = []
+    for filepath in _graph_native_artifact_files(root, config):
+        try:
+            rel_path = str(filepath.relative_to(root))
+        except ValueError:
+            rel_path = str(filepath)
+        for line_number, line in enumerate(_read_lines(filepath), 1):
+            marker = re.match(r"^\s*:::artifact\s+(.+?)\s*$", line)
+            if not marker:
+                continue
+            attrs = _parse_graph_native_attrs(marker.group(1))
+            source_id = attrs.get("id")
+            if not source_id:
+                continue
+            for attr_name, relation_type in GRAPH_NATIVE_LINK_ATTRS.items():
+                raw_targets = attrs.get(attr_name, "")
+                if not raw_targets:
+                    continue
+                for raw_target in _split_graph_native_targets(raw_targets):
+                    traces.append(
+                        GraphNativeArtifactTrace(
+                            source_id=normalize_id(source_id, config),
+                            source_file=filepath,
+                            line_number=line_number,
+                            target_id=normalize_id(raw_target, config),
+                            relation_type=relation_type,
+                            context=f"graph_native:{attr_name}",
+                            rel_path=rel_path,
+                        )
+                    )
+    return traces
+
+
+def _split_graph_native_targets(raw: str) -> List[str]:
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 def _parse_index_table(
@@ -1536,6 +1772,8 @@ def build_graph(
     react_ui_elements: Optional[List[ReactUiElement]] = None,
     mini_admin_source_traces: Optional[List[MiniAdminSourceTrace]] = None,
     mini_admin_component_traces: Optional[List[MiniAdminComponentTrace]] = None,
+    graph_native_change_traces: Optional[List[GraphNativeChangeTrace]] = None,
+    graph_native_artifact_traces: Optional[List[GraphNativeArtifactTrace]] = None,
 ) -> nx.DiGraph:
     G = nx.DiGraph()
 
@@ -1604,6 +1842,8 @@ def build_graph(
     _add_react_ui_nodes(G, react_ui_elements, config)
     _add_mini_admin_source_nodes(G, mini_admin_source_traces, config)
     _add_mini_admin_component_trace_nodes(G, mini_admin_component_traces, config)
+    _add_graph_native_change_nodes(G, graph_native_change_traces, config)
+    _add_graph_native_artifact_nodes(G, graph_native_artifact_traces, config)
 
     for aid in registry:
         G.nodes[aid]["defined"] = True
@@ -1611,6 +1851,66 @@ def build_graph(
     _resolve_dangling_variants(G, registry)
 
     return G
+
+
+def _add_graph_native_change_nodes(
+    G: nx.DiGraph,
+    traces: Optional[List[GraphNativeChangeTrace]],
+    config: ProjectConfig,
+):
+    if not traces:
+        return
+    origin = (
+        config.graph_native.change_origin
+        if config.graph_native
+        else "derived"
+    )
+    change_type = (
+        config.graph_native.change_type
+        if config.graph_native
+        else "CHG"
+    )
+    for trace in traces:
+        if not G.has_node(trace.source_id):
+            G.add_node(trace.source_id, type=change_type, title=trace.source_id,
+                       source_file=trace.rel_path, defined=True, origin=origin)
+        if not G.has_node(trace.target_id):
+            atype = classify_id(trace.target_id, config)
+            target_origin = config.types.get(atype).origin if atype in config.types else ""
+            G.add_node(trace.target_id, type=atype or "UNKNOWN",
+                       title="", source_file="", defined=False,
+                       origin=target_origin)
+        G.add_edge(trace.source_id, trace.target_id,
+                   context=trace.context,
+                   source_file=trace.rel_path,
+                   line=trace.line_number,
+                   relation_type=trace.relation_type)
+
+
+def _add_graph_native_artifact_nodes(
+    G: nx.DiGraph,
+    traces: Optional[List[GraphNativeArtifactTrace]],
+    config: ProjectConfig,
+):
+    if not traces:
+        return
+    for trace in traces:
+        if not G.has_node(trace.source_id):
+            atype = classify_id(trace.source_id, config)
+            source_origin = config.types.get(atype).origin if atype in config.types else ""
+            G.add_node(trace.source_id, type=atype or "UNKNOWN", title=trace.source_id,
+                       source_file=trace.rel_path, defined=False, origin=source_origin)
+        if not G.has_node(trace.target_id):
+            atype = classify_id(trace.target_id, config)
+            target_origin = config.types.get(atype).origin if atype in config.types else ""
+            G.add_node(trace.target_id, type=atype or "UNKNOWN",
+                       title="", source_file="", defined=False,
+                       origin=target_origin)
+        G.add_edge(trace.source_id, trace.target_id,
+                   context=trace.context,
+                   source_file=trace.rel_path,
+                   line=trace.line_number,
+                   relation_type=trace.relation_type)
 
 
 def _add_react_ui_nodes(
@@ -2338,7 +2638,7 @@ _HTML_TEMPLATE = """\
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Graph BA — Artifact Traceability</title>
+<title>graph-ba — Artifact Traceability</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/dist/vis-network.min.css" crossorigin="anonymous"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/vis-network.min.js" crossorigin="anonymous"></script>
 <style>
@@ -2536,11 +2836,24 @@ def main(root: Path, json_out: Optional[Path], dot_out: Optional[Path],
     index_xrefs = scan_index_cross_refs(root, config)
     code_refs = scan_code_references(root, config)
     test_refs = scan_test_references(root, config)
+    graph_native_change_traces = scan_graph_native_change_traces(root, config)
+    graph_native_artifact_traces = scan_graph_native_artifact_traces(root, config)
     if verbose:
         print(f"[scan] {len(references)} references found, {len(index_xrefs)} index cross-refs, "
-              f"{len(code_refs)} code trace refs, {len(test_refs)} test refs")
+              f"{len(code_refs)} code trace refs, {len(test_refs)} test refs, "
+              f"{len(graph_native_change_traces)} graph-native change refs, "
+              f"{len(graph_native_artifact_traces)} graph-native artifact refs")
 
-    G = build_graph(registry, references, config, index_xrefs, code_refs, test_refs)
+    G = build_graph(
+        registry,
+        references,
+        config,
+        index_xrefs,
+        code_refs,
+        test_refs,
+        graph_native_change_traces=graph_native_change_traces,
+        graph_native_artifact_traces=graph_native_artifact_traces,
+    )
     report = verify(G, registry, references, config)
     print_report(report, registry, config, verbose)
 
