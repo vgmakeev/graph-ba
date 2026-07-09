@@ -528,6 +528,97 @@ dirs = [".graphba"]
     assert "TEST:tests/test_kitchen.py" in scope_ids
 
 
+def test_graph_slice_exports_nodes_edges_content_and_findings(tmp_path):
+    (tmp_path / "graph-ba.toml").write_text(
+        """
+[scan]
+dirs = [".graphba", "tests"]
+
+[types.SCR]
+label = "Screens"
+origin = "canonical"
+ref = '(SCR-[A-Z]+)'
+classify = 'SCR-[A-Z]+'
+
+[types.UIC]
+label = "UI Components"
+origin = "human_designed"
+ref = '(UIC-[A-Z]+)'
+classify = 'UIC-[A-Z]+'
+
+[types.AC]
+label = "Acceptance Criteria"
+origin = "canonical"
+ref = '(AC-[A-Z]+-\\d{3})'
+classify = 'AC-[A-Z]+-\\d{3}'
+
+[tests]
+dirs = ["tests"]
+coverage_types = ["AC"]
+
+[graph_native]
+dirs = [".graphba"]
+        """.strip(),
+        encoding="utf-8",
+    )
+    graphba_dir = tmp_path / ".graphba"
+    graphba_dir.mkdir()
+    (graphba_dir / "source.md").write_text(
+        ':::artifact type="SCR" id="SCR-KITCHEN" state="accepted" '
+        'title="Kitchen" contains="UIC-HEADER"\n'
+        'Screen text mentions AC-KIT-001 but the typed edge goes through UIC-HEADER.\n'
+        ':::\n'
+        ':::artifact type="UIC" id="UIC-HEADER" state="accepted" '
+        'title="Header" traces_to="AC-KIT-001"\n:::\n'
+        ':::artifact type="AC" id="AC-KIT-001" state="accepted" '
+        'title="Kitchen AC"\n'
+        'A long acceptance criterion body that should be excerpted.\n'
+        ':::\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_kitchen.py").write_text(
+        "def test_ac_kit_001():\n    # AC-KIT-001\n    assert True\n",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "graph.db"
+    db = get_db(db_path)
+    do_import(tmp_path, db, quiet=True)
+    db.close()
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "--root",
+            str(tmp_path),
+            "--db",
+            str(db_path),
+            "graph",
+            "SCR-KITCHEN",
+            "--content-limit",
+            "32",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["schema"] == "graph-ba.graph-slice.v1"
+    assert payload["target"] == "SCR-KITCHEN"
+    assert payload["summary"]["mentions_included"] is False
+    node_ids = {node["id"] for node in payload["nodes"]}
+    assert {"SCR-KITCHEN", "UIC-HEADER", "AC-KIT-001", "TEST:tests/test_kitchen.py"} <= node_ids
+    assert all(edge["relation"] != "MENTIONS" for edge in payload["edges"])
+    assert {
+        ("SCR-KITCHEN", "CONTAINS", "UIC-HEADER"),
+        ("UIC-HEADER", "TRACES_TO", "AC-KIT-001"),
+        ("TEST:tests/test_kitchen.py", "TEST_EVIDENCE", "AC-KIT-001"),
+    } <= {(edge["from"], edge["relation"], edge["to"]) for edge in payload["edges"]}
+    ac_node = next(node for node in payload["nodes"] if node["id"] == "AC-KIT-001")
+    assert ac_node["content"]["mode"] == "excerpt"
+    assert len(ac_node["content"]["text"]) <= 32
+    assert any(item["relation"] == "TRACES_TO" for item in payload["relation_catalog"])
+
+
 def test_gate_blocks_unimplemented_review_scope(tmp_path):
     (tmp_path / "graph-ba.toml").write_text(
         """

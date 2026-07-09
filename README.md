@@ -91,6 +91,7 @@ graph-ba audit         # structure quality: dangling refs, cycles, coverage gaps
 | `artifact-state` | Fingerprints + computed implemented/verified/changing/stale state |
 | `change create/show/accept/archive` | Minimal graph-native change workflow |
 | `gate <ID>` | Explore/dev/review/release readiness gate |
+| `graph <ID>` | Agent-facing JSON graph slice with nodes, typed edges, content excerpts and findings |
 | `pack <ID>` | Agent pack for a change, screen family, screen or artifact |
 | `code-refs` | Code → artifact links (`@trace` comments) |
 | `sql <query>` | Raw SQL |
@@ -187,10 +188,25 @@ Useful commands:
 ```bash
 graph-ba change create CHG-orders-live-update --scope AC-ORD-001
 graph-ba change show CHG-orders-live-update --json
+graph-ba graph CHG-orders-live-update --out .graphba/changes/CHG-orders-live-update/compiled/graph.json
 graph-ba pack CHG-orders-live-update --out .graphba/changes/CHG-orders-live-update/compiled/pack.md
 graph-ba gate CHG-orders-live-update --mode review
 graph-ba change accept CHG-orders-live-update --snapshot .graphba/state/accepted-fingerprints.json
 ```
+
+Use `graph` as the default agent-facing format. It returns
+`graph-ba.graph-slice.v1` JSON:
+
+- `nodes`: scoped artifacts with type, origin, source location, computed flags
+  and optional content excerpts;
+- `edges`: directed typed relationships inside the scope;
+- `relation_catalog`: relation meanings so agents do not need hard-coded
+  interpretations;
+- `findings`: the same gate findings for the requested mode.
+
+Weak `MENTIONS` edges are excluded by default; pass `--include-mentions` only
+when doing broad investigation rather than acceptance or implementation work.
+Use `pack` when a human-readable markdown bundle is preferable.
 
 `explore` never blocks, `dev` reports warnings, `review` blocks scoped
 contract artifacts that lack observed implementation or AC test evidence, and

@@ -1344,6 +1344,47 @@ def pack(ctx, target_id, out_path, output_format):
     print(text)
 
 
+@cli.command("graph")
+@click.argument("target_id")
+@click.option("--mode", default=None, type=click.Choice(["explore", "dev", "review", "release"]),
+              help="Gate strictness for findings; defaults to change.yaml mode or dev")
+@click.option("--snapshot", "snapshot_path", type=click.Path(path_type=Path), default=None,
+              help="Accepted fingerprint snapshot for stale checks")
+@click.option("--content", "content_mode", type=click.Choice(["none", "excerpt", "full"]), default="excerpt",
+              help="How much artifact content to include")
+@click.option("--content-limit", default=1200, show_default=True,
+              help="Maximum characters per content excerpt")
+@click.option("--include-mentions", is_flag=True,
+              help="Include weak MENTIONS edges; omitted by default for agent/acceptance graph slices")
+@click.option("--out", "out_path", type=click.Path(path_type=Path), default=None,
+              help="Write graph slice JSON to this file")
+@click.pass_context
+def graph_slice(ctx, target_id, mode, snapshot_path, content_mode, content_limit, include_mentions, out_path):
+    """Export scoped nodes, typed edges, content excerpts and findings as JSON."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    db = _conn(ctx)
+    _require_graph(ctx, db)
+    payload = _graph_slice_payload(
+        db,
+        root,
+        target_id,
+        mode,
+        snapshot_path,
+        content_mode,
+        content_limit,
+        include_mentions,
+    )
+    db.close()
+    text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text.rstrip() + "\n", encoding="utf-8")
+        if not ctx.obj.get("json"):
+            print(f"Wrote graph-ba graph slice: {out_path}")
+            return
+    print(text)
+
+
 def _change_path(root: Path, change_id: str) -> Path:
     return root / ".graphba" / "changes" / change_id
 
@@ -1637,6 +1678,169 @@ def _pack_markdown_content(artifact_type: str, content: str) -> str:
         content[:limit].rstrip()
         + f"\n\n[graph-ba pack truncated {len(content) - limit} chars; use source file for full content]"
     )
+
+
+def _graph_slice_payload(
+    db: sqlite3.Connection,
+    root: Path,
+    target_id: str,
+    mode: str | None,
+    snapshot_path: Path | None,
+    content_mode: str,
+    content_limit: int,
+    include_mentions: bool,
+) -> dict[str, Any]:
+    row = db.execute("SELECT * FROM artifacts WHERE id = ?", (target_id,)).fetchone()
+    if not row:
+        raise click.ClickException(f"Artifact not found: {target_id}")
+    ids = _scope_ids(db, target_id)
+    ids.add(target_id)
+    rows = _rows_for_ids(db, ids)
+    gate_data = _gate_payload(db, root, target_id, mode, snapshot_path)
+    computed_by_id = {item["id"]: item for item in gate_data["scope"]}
+    nodes = [
+        _graph_slice_node(db, item, computed_by_id.get(item["id"]), content_mode, max(0, content_limit))
+        for item in rows
+    ]
+    edges = _graph_slice_edges(db, ids, include_mentions)
+    return {
+        "schema": "graph-ba.graph-slice.v1",
+        "target": target_id,
+        "mode": gate_data["mode"],
+        "summary": {
+            **gate_data["summary"],
+            "nodes": len(nodes),
+            "edges": len(edges),
+            "mentions_included": include_mentions,
+            "content": content_mode,
+            "content_limit": max(0, content_limit),
+        },
+        "relation_catalog": _relation_catalog(include_mentions),
+        "findings": gate_data["findings"],
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
+def _rows_for_ids(db: sqlite3.Connection, ids: set[str]) -> list[sqlite3.Row]:
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    rows = db.execute(
+        f"SELECT * FROM artifacts WHERE id IN ({placeholders})",
+        tuple(sorted(ids)),
+    ).fetchall()
+    return sorted(rows, key=_artifact_sort_key)
+
+
+def _artifact_sort_key(row: sqlite3.Row) -> tuple[int, str]:
+    priority = {
+        "CHG": 0,
+        "SCR": 1,
+        "UIC": 2,
+        "AC": 3,
+        "RAC": 4,
+        "RULE": 5,
+        "DER": 6,
+        "REACT_COMPONENT": 7,
+        "DATA_SOURCE": 8,
+        "CRUDL_RESOURCE": 9,
+        "CUSTOM_METHOD": 10,
+        "ENT": 11,
+        "MTH": 12,
+        "PERM": 13,
+        "STATE": 14,
+        "EVT": 15,
+        "TEST": 16,
+        "EVD": 17,
+        "CODE": 18,
+    }.get(row["type"], 100)
+    return (priority, row["id"])
+
+
+def _graph_slice_node(
+    db: sqlite3.Connection,
+    row: sqlite3.Row,
+    computed: dict[str, Any] | None,
+    content_mode: str,
+    content_limit: int,
+) -> dict[str, Any]:
+    content = "" if content_mode == "none" else _artifact_content(db, row)
+    truncated = False
+    if content_mode == "excerpt" and len(content) > content_limit:
+        content = content[:content_limit].rstrip()
+        truncated = True
+    node = {
+        "id": row["id"],
+        "type": row["type"],
+        "origin": row["origin"],
+        "title": row["title"],
+        "defined": bool(row["defined"]),
+        "source": {
+            "file": row["source_file"],
+            "line": row["line_number"],
+        },
+        "computed": computed.get("computed", {}) if computed else {},
+    }
+    if content_mode != "none":
+        node["content"] = {
+            "mode": "full" if content_mode == "full" else "excerpt",
+            "text": content,
+            "truncated": truncated,
+        }
+    return node
+
+
+def _graph_slice_edges(
+    db: sqlite3.Connection,
+    ids: set[str],
+    include_mentions: bool,
+) -> list[dict[str, Any]]:
+    if not ids:
+        return []
+    relations = set(_semantic_scope_relations())
+    if include_mentions:
+        relations.add("MENTIONS")
+    placeholders = ",".join("?" for _ in ids)
+    relation_placeholders = ",".join("?" for _ in relations)
+    rows = db.execute(
+        "SELECT source_id, target_id, relation_type, context, source_file, line_number "
+        f"FROM edges WHERE relation_type IN ({relation_placeholders}) "
+        f"AND source_id IN ({placeholders}) AND target_id IN ({placeholders}) "
+        "ORDER BY source_id, relation_type, target_id, source_file, line_number",
+        (*sorted(relations), *tuple(sorted(ids)), *tuple(sorted(ids))),
+    ).fetchall()
+    return [
+        {
+            "from": row["source_id"],
+            "relation": row["relation_type"],
+            "to": row["target_id"],
+            "source": {
+                "file": row["source_file"],
+                "line": row["line_number"],
+            },
+            "context": row["context"],
+        }
+        for row in rows
+    ]
+
+
+def _relation_catalog(include_mentions: bool = False) -> list[dict[str, str]]:
+    meanings = {
+        "CODE_TRACE": "source/code observation connects implementation to graph artifact",
+        "CONTAINS": "source artifact scopes or structurally contains target artifact",
+        "DEPENDS_ON": "source artifact has a runtime, data, permission or semantic dependency on target",
+        "IMPLEMENTS": "implementation artifact realizes target contract/entity/method",
+        "MENTIONS": "weak text occurrence only; not proof and excluded from agent graph slices by default",
+        "NORMALIZES": "canonical artifact normalizes raw/source artifact",
+        "RENDERS": "UI/component artifact renders target screen or UI zone",
+        "TEST_EVIDENCE": "automated test mentions and provides deterministic evidence for target",
+        "TRACES_TO": "author-declared semantic trace from source to target",
+        "UI_TRACE": "UI observation or metadata trace connects source to target",
+        "VERIFIES": "source evidence verifies target artifact",
+    }
+    relations = sorted(_semantic_scope_relations() | ({"MENTIONS"} if include_mentions else set()))
+    return [{"relation": relation, "meaning": meanings.get(relation, "")} for relation in relations]
 
 
 def _rewrite_change_state(path: Path, state: str) -> None:
