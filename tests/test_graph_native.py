@@ -600,7 +600,7 @@ dirs = [".graphba"]
         ':::artifact type="REACT_COMPONENT" id="REACT_COMPONENT:KitchenHeader" state="accepted" '
         'title="KitchenHeader" renders="UIC-HEADER"\n:::\n'
         ':::artifact type="AC" id="AC-KIT-001" state="accepted" '
-        'title="Kitchen AC"\n'
+        'title="Kitchen screen visible AC"\n'
         'A long acceptance criterion body that should be excerpted.\n'
         ':::\n',
         encoding="utf-8",
@@ -974,3 +974,4 @@ dirs = [".graphba"]
     assert "unit" in item["required_evidence"]
     assert item["observed_kinds"] == ["static_source"]
     assert item["missing_required_evidence"] == ["unit"]
+    assert item["missing_evidence"] == ["unit"]
