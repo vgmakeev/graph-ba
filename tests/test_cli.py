@@ -4,6 +4,7 @@ import json
 import pytest
 from click.testing import CliRunner
 
+from graph_ba import __version__
 from graph_ba.cli import cli
 
 
@@ -11,7 +12,7 @@ def test_version_option():
     runner = CliRunner()
     result = runner.invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "graph-ba, version 0.2.7" in result.output
+    assert f"graph-ba, version {__version__}" in result.output
 
 
 class TestImportCmd:

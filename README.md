@@ -91,6 +91,7 @@ graph-ba audit         # structure quality: dangling refs, cycles, coverage gaps
 | `artifact-state` | Fingerprints + computed implemented/verified/changing/stale state |
 | `change create/show/accept/archive` | Minimal graph-native change workflow |
 | `gate <ID>` | Explore/dev/review/release readiness gate |
+| `evidence-plan <ID>` | Classify scoped AC and explain required test/evidence kinds |
 | `graph <ID>` | Agent-facing JSON graph slice with nodes, typed edges, content excerpts and findings |
 | `pack <ID>` | Agent pack for a change, screen family, screen or artifact |
 | `code-refs` | Code → artifact links (`@trace` comments) |
@@ -189,6 +190,7 @@ Useful commands:
 graph-ba change create CHG-orders-live-update --scope AC-ORD-001
 graph-ba change show CHG-orders-live-update --json
 graph-ba graph CHG-orders-live-update --out .graphba/changes/CHG-orders-live-update/compiled/graph.json
+graph-ba evidence-plan CHG-orders-live-update --format md
 graph-ba pack CHG-orders-live-update --out .graphba/changes/CHG-orders-live-update/compiled/pack.md
 graph-ba gate CHG-orders-live-update --mode review
 graph-ba change accept CHG-orders-live-update --snapshot .graphba/state/accepted-fingerprints.json
@@ -202,6 +204,8 @@ Use `graph` as the default agent-facing format. It returns
 - `edges`: directed typed relationships inside the scope;
 - `relation_catalog`: relation meanings so agents do not need hard-coded
   interpretations;
+- `evidence_plan`: scoped AC classification, required evidence kinds and
+  missing evidence gaps;
 - `findings`: the same gate findings for the requested mode.
 
 Weak `MENTIONS` edges are excluded by default; pass `--include-mentions` only

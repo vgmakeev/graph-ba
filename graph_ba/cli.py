@@ -75,6 +75,49 @@ PROOF_OUTGOING_RELATIONS = {
 
 CONTRACT_ARTIFACT_TYPES = {"AC", "RULE", "DER", "STATE", "EVT", "ENT", "MTH"}
 
+DEFAULT_AC_EVIDENCE_MATRIX = {
+    "algorithm": ["unit"],
+    "backend_behavior": ["backend_integration"],
+    "ui_visible": ["e2e_ui"],
+    "ui_interaction": ["e2e_ui"],
+    "permission": ["backend_integration", "e2e_ui"],
+    "async_event": ["backend_integration", "e2e_ui"],
+    "integration": ["contract"],
+    "contract": ["static_source"],
+    "traceability": ["graph_validation"],
+}
+
+DEFAULT_EVIDENCE_KIND_LABELS = {
+    "unit": "Pure/unit test for deterministic rules, functions and mappers.",
+    "backend_integration": "Backend integration test with runtime/database/service behavior.",
+    "frontend_unit": "Frontend unit/model test, usually Vitest.",
+    "e2e_ui": "End-to-end UI test, usually Playwright.",
+    "contract": "API/schema/provider/contract test.",
+    "static_source": "Static source or trace metadata test.",
+    "manual": "Manual/runtime acceptance evidence.",
+    "graph_validation": "graph-ba validation/audit evidence.",
+}
+
+DEFAULT_AC_KIND_TARGET_TYPES = {
+    "algorithm": {"RULE", "DER", "FUNC"},
+    "backend_behavior": {
+        "ADMIN_PAGE_ACTION",
+        "CRUDL_RESOURCE",
+        "CUSTOM_METHOD",
+        "DATA_SOURCE",
+        "ENT",
+        "JOB",
+        "MTH",
+        "RUNTIME",
+        "STATE",
+    },
+    "ui_visible": {"SCR", "UIC", "REACT_COMPONENT", "UI_TEST_ID"},
+    "permission": {"PERM", "RL"},
+    "async_event": {"EVT", "INTEGRATION_TRIGGER"},
+    "integration": {"INT", "INTEGRATION_ACTION", "INTEGRATION_CONNECTION", "INTEGRATION_TRIGGER"},
+    "contract": {"REGISTRY_DECLARATION", "CRUDL_RESOURCE", "CUSTOM_METHOD", "DATA_SOURCE"},
+}
+
 def _is_meta_node(node_id: str) -> bool:
     """Check if node is a meta-node (FILE:, CODE:, TEST: or UI:) rather than a BA artifact."""
     return (node_id.startswith("FILE:") or node_id.startswith("CODE:")
@@ -1366,8 +1409,16 @@ def change_compile(ctx, change_id, mode, snapshot_path):
         json.dumps(graph_payload["agent_worklist"], ensure_ascii=False, indent=2, default=str).rstrip() + "\n",
         encoding="utf-8",
     )
+    (compiled_dir / "evidence-plan.json").write_text(
+        json.dumps(graph_payload["evidence_plan"], ensure_ascii=False, indent=2, default=str).rstrip() + "\n",
+        encoding="utf-8",
+    )
     (compiled_dir / "state.yaml").write_text(_render_change_state_yaml(state_payload), encoding="utf-8")
     (compiled_dir / "gaps.md").write_text(_render_gaps_markdown(gate_payload), encoding="utf-8")
+    (compiled_dir / "evidence-plan.md").write_text(
+        _render_evidence_plan_markdown(graph_payload["evidence_plan"]),
+        encoding="utf-8",
+    )
     (compiled_dir / "worklist.md").write_text(_render_worklist_markdown(graph_payload), encoding="utf-8")
     (compiled_dir / "projection.md").write_text(_render_projection_markdown(graph_payload), encoding="utf-8")
     (compiled_dir / "pack.md").write_text(_render_pack_markdown(pack_payload).rstrip() + "\n", encoding="utf-8")
@@ -1564,6 +1615,36 @@ def graph_slice(ctx, target_id, mode, snapshot_path, content_mode, content_limit
     print(text)
 
 
+@cli.command("evidence-plan")
+@click.argument("target_id")
+@click.option("--mode", default=None, type=click.Choice(["explore", "dev", "review", "release"]),
+              help="Gate strictness for evidence policy findings; defaults to change.yaml mode or dev")
+@click.option("--snapshot", "snapshot_path", type=click.Path(path_type=Path), default=None,
+              help="Accepted fingerprint snapshot for stale checks")
+@click.option("--format", "output_format", type=click.Choice(["json", "md"]), default="json")
+@click.option("--out", "out_path", type=click.Path(path_type=Path), default=None,
+              help="Write evidence plan to this file")
+@click.pass_context
+def evidence_plan(ctx, target_id, mode, snapshot_path, output_format, out_path):
+    """Explain which evidence kinds each scoped AC requires and why."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    db = _conn(ctx)
+    _require_graph(ctx, db)
+    payload = _gate_payload(db, root, target_id, mode, snapshot_path)["evidence_plan"]
+    db.close()
+    if output_format == "md":
+        text = _render_evidence_plan_markdown(payload)
+    else:
+        text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text.rstrip() + "\n", encoding="utf-8")
+        if not ctx.obj.get("json"):
+            print(f"Wrote graph-ba evidence plan: {out_path}")
+            return
+    print(text)
+
+
 def _change_path(root: Path, change_id: str) -> Path:
     return root / ".graphba" / "changes" / change_id
 
@@ -1740,7 +1821,9 @@ def _gate_payload(
         )
         for row in rows
     ]
+    evidence_plan = _evidence_plan_for_states(db, root, states)
     findings = _gate_findings(states, selected_mode, bool(snapshot))
+    findings.extend(_evidence_plan_findings(evidence_plan, selected_mode))
     evidence_profile = _evidence_profile(db, states)
     quality_axes = _quality_axes(states, findings, evidence_profile, bool(snapshot))
     fail_count = sum(1 for item in findings if item["severity"] == "fail")
@@ -1755,6 +1838,7 @@ def _gate_payload(
         "quality_axes": quality_axes,
         "overall_confidence": _overall_confidence(quality_axes),
         "evidence_profile": evidence_profile,
+        "evidence_plan": evidence_plan,
         "findings": findings,
         "scope": [
             {
@@ -1845,6 +1929,338 @@ def _evidence_profile(db: sqlite3.Connection, states: list[dict[str, Any]]) -> d
             if evidence
         },
     }
+
+
+def _evidence_plan_for_states(
+    db: sqlite3.Connection,
+    root: Path,
+    states: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Classify AC artifacts and compute required vs observed evidence kinds."""
+    ac_ids = [item["id"] for item in states if item["type"] == "AC"]
+    policy = _load_evidence_policy(root)
+    if not ac_ids:
+        return _empty_evidence_plan(policy)
+
+    ids = {item["id"] for item in states}
+    rows = _rows_for_ids(db, ids)
+    by_id = {
+        row["id"]: {
+            "id": row["id"],
+            "type": row["type"],
+            "title": row["title"],
+            "source_file": row["source_file"],
+            "line_number": row["line_number"],
+        }
+        for row in rows
+    }
+    edges = _graph_slice_edges(db, ids, include_mentions=False)
+    evidence_by_ac = _observed_evidence_by_ac(db, ac_ids)
+    items: list[dict[str, Any]] = []
+    for ac_id in sorted(ac_ids):
+        row = next((item for item in rows if item["id"] == ac_id), None)
+        if row is None:
+            continue
+        kinds = _infer_ac_kinds(ac_id, row["title"] or "", edges, by_id, policy)
+        required = _required_evidence_for_ac(ac_id, kinds, policy)
+        observed = evidence_by_ac.get(ac_id, [])
+        observed_kinds = sorted({item["kind"] for item in observed})
+        missing = [
+            kind
+            for kind in required
+            if not _evidence_requirement_satisfied(kind, observed_kinds, policy)
+        ]
+        related_targets = _related_target_summary(ac_id, edges, by_id)
+        items.append({
+            "artifact": ac_id,
+            "kinds": kinds,
+            "required_evidence": required,
+            "observed_evidence": observed,
+            "observed_kinds": observed_kinds,
+            "missing_required_evidence": missing,
+            "status": "GAP" if missing else "OK",
+            "reason": _evidence_plan_reason(kinds, related_targets),
+            "related_targets": related_targets,
+        })
+
+    gaps = [item for item in items if item["missing_required_evidence"]]
+    return {
+        "schema": "graph-ba.evidence-plan.v1",
+        "policy": {
+            "providers": policy["providers"],
+            "gate_blocking_modes": policy["gate_blocking_modes"],
+            "synthesis_policy": policy.get("synthesis_policy", {}),
+        },
+        "evidence_kinds": DEFAULT_EVIDENCE_KIND_LABELS,
+        "summary": {
+            "ac_total": len(items),
+            "ok": len(items) - len(gaps),
+            "gap": len(gaps),
+        },
+        "items": items,
+    }
+
+
+def _empty_evidence_plan(policy: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "graph-ba.evidence-plan.v1",
+        "policy": {
+            "providers": policy["providers"],
+            "gate_blocking_modes": policy["gate_blocking_modes"],
+            "synthesis_policy": policy.get("synthesis_policy", {}),
+        },
+        "evidence_kinds": DEFAULT_EVIDENCE_KIND_LABELS,
+        "summary": {"ac_total": 0, "ok": 0, "gap": 0},
+        "items": [],
+    }
+
+
+def _load_evidence_policy(root: Path) -> dict[str, Any]:
+    policy: dict[str, Any] = {
+        "providers": ["graph-ba-default"],
+        "matrix": {key: list(value) for key, value in DEFAULT_AC_EVIDENCE_MATRIX.items()},
+        "overrides": {},
+        "kind_target_types": {
+            key: set(value)
+            for key, value in DEFAULT_AC_KIND_TARGET_TYPES.items()
+        },
+        "satisfies": {},
+        "gate_blocking_modes": [],
+        "synthesis_policy": {},
+    }
+    for data in _evidence_policy_files(root):
+        provider = str(data.get("provider") or data.get("project") or data.get("schema") or "project")
+        policy["providers"].append(provider)
+        matrix = data.get("evidence_matrix")
+        if isinstance(matrix, dict):
+            for kind, requirements in matrix.items():
+                if isinstance(requirements, list):
+                    policy["matrix"][str(kind)] = [str(item) for item in requirements]
+        overrides = data.get("overrides")
+        if isinstance(overrides, dict):
+            for artifact_id, override in overrides.items():
+                if isinstance(override, dict):
+                    policy["overrides"][str(artifact_id)] = override
+        target_types = data.get("kind_target_types")
+        if isinstance(target_types, dict):
+            for kind, values in target_types.items():
+                if isinstance(values, list):
+                    policy["kind_target_types"].setdefault(str(kind), set()).update(str(item) for item in values)
+        satisfies = data.get("satisfies")
+        if isinstance(satisfies, dict):
+            for required, observed in satisfies.items():
+                if isinstance(observed, list):
+                    policy["satisfies"][str(required)] = {str(item) for item in observed}
+        blocking = data.get("gate_blocking_modes")
+        if isinstance(blocking, list):
+            policy["gate_blocking_modes"] = [str(item) for item in blocking]
+        synthesis = data.get("synthesis_policy")
+        if isinstance(synthesis, dict):
+            policy["synthesis_policy"] = synthesis
+    return policy
+
+
+def _evidence_policy_files(root: Path) -> list[dict[str, Any]]:
+    candidates = [
+        root / "reports" / "graphba" / "mini-evidence-policy.json",
+        root / ".graphba" / "evidence-policy.json",
+    ]
+    loaded: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        _append_evidence_policy(loaded, seen, path)
+        if path.name == "evidence-policy.json" and loaded:
+            for upstream in loaded[-1].get("upstream_policies", []):
+                upstream_path = upstream.get("path") if isinstance(upstream, dict) else None
+                if upstream_path:
+                    _append_evidence_policy(loaded, seen, root / upstream_path)
+    return loaded
+
+
+def _append_evidence_policy(loaded: list[dict[str, Any]], seen: set[Path], path: Path) -> None:
+    resolved = path.resolve()
+    if resolved in seen or not resolved.exists():
+        return
+    seen.add(resolved)
+    try:
+        data = json.loads(resolved.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if isinstance(data, dict):
+        loaded.append(data)
+
+
+def _infer_ac_kinds(
+    ac_id: str,
+    title: str,
+    edges: list[dict[str, Any]],
+    by_id: dict[str, dict[str, Any]],
+    policy: dict[str, Any],
+) -> list[str]:
+    override = policy["overrides"].get(ac_id, {})
+    if isinstance(override, dict) and isinstance(override.get("kinds"), list):
+        return _dedupe_worklist_ids([str(item) for item in override["kinds"]])
+
+    related_types = {
+        by_id.get(edge["from"], {}).get("type")
+        for edge in edges
+        if edge["to"] == ac_id
+    } | {
+        by_id.get(edge["to"], {}).get("type")
+        for edge in edges
+        if edge["from"] == ac_id
+    }
+    related_types.discard(None)
+    kinds: list[str] = []
+    for kind, target_types in policy["kind_target_types"].items():
+        if related_types & target_types:
+            kinds.append(kind)
+
+    text = f"{ac_id} {title}".lower()
+    keyword_rules = {
+        "algorithm": (
+            "algorithm", "calculate", "computed", "derived", "formula", "mapper", "round",
+            "sort", "threshold", "алгоритм", "вычис", "порог", "процент", "расчет", "расчёт", "сорт",
+        ),
+        "backend_behavior": (
+            "backend", "capacity", "command", "database", "db", "recalculate", "service",
+            "slot", "status", "емк", "ёмк", "заказ", "пересчет", "пересчёт", "слот", "статус",
+        ),
+        "ui_visible": (
+            "banner", "display", "render", "screen", "show", "timeline", "visible",
+            "баннер", "виден", "видна", "отображ", "показы", "экран",
+        ),
+        "ui_interaction": (
+            "action", "button", "click", "confirm", "dialog", "input", "modal", "reject",
+            "диалог", "кноп", "модал", "нажим", "отклон", "подтверж",
+        ),
+        "permission": ("access", "permission", "role", "доступ", "прав", "роль"),
+        "async_event": (
+            "async", "event", "live", "polling", "sse", "update", "websocket",
+            "обнов", "событ",
+        ),
+        "integration": ("external", "integration", "provider", "webhook", "интеграц", "провайдер"),
+        "contract": ("api", "contract", "custommethod", "dto", "registry", "schema"),
+    }
+    for kind, markers in keyword_rules.items():
+        if any(marker in text for marker in markers):
+            kinds.append(kind)
+    if not kinds:
+        kinds.append("contract")
+    return sorted(_dedupe_worklist_ids(kinds))
+
+
+def _required_evidence_for_ac(ac_id: str, kinds: list[str], policy: dict[str, Any]) -> list[str]:
+    override = policy["overrides"].get(ac_id, {})
+    if isinstance(override, dict) and isinstance(override.get("required_evidence"), list):
+        return _dedupe_worklist_ids([str(item) for item in override["required_evidence"]])
+    required: list[str] = []
+    for kind in kinds:
+        required.extend(policy["matrix"].get(kind, []))
+    return sorted(_dedupe_worklist_ids(required))
+
+
+def _observed_evidence_by_ac(db: sqlite3.Connection, ac_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+    by_target: dict[str, list[dict[str, Any]]] = {artifact_id: [] for artifact_id in ac_ids}
+    if not ac_ids:
+        return by_target
+    placeholders = ",".join("?" for _ in ac_ids)
+    rows = db.execute(
+        "SELECT e.target_id, e.relation_type, s.id AS source_id, s.type AS source_type, "
+        "s.origin AS source_origin, s.title AS source_title, s.source_file AS source_file "
+        "FROM edges e JOIN artifacts s ON e.source_id = s.id "
+        f"WHERE e.target_id IN ({placeholders}) "
+        "AND e.relation_type IN ('TEST_EVIDENCE', 'VERIFIES') "
+        "ORDER BY e.target_id, s.id",
+        tuple(ac_ids),
+    ).fetchall()
+    for row in rows:
+        by_target.setdefault(row["target_id"], []).append({
+            "source": row["source_id"],
+            "source_type": row["source_type"],
+            "relation": row["relation_type"],
+            "kind": _observed_evidence_kind(row),
+            "source_file": row["source_file"],
+        })
+    return by_target
+
+
+def _observed_evidence_kind(row: sqlite3.Row) -> str:
+    source_type = row["source_type"]
+    source = f"{row['source_id']} {row['source_title']} {row['source_file']}".lower()
+    if source_type == "EVD":
+        return "manual"
+    if any(marker in source for marker in ("graphba", "graph-ba", "validate", "audit")):
+        return "graph_validation"
+    if any(marker in source for marker in ("trace.test", "trace-strict", "traceability", "sources.test")):
+        return "static_source"
+    if any(marker in source for marker in ("contract", "schema", "api_contract")):
+        return "contract"
+    if any(marker in source for marker in ("playwright", "admin/e2e", "/e2e/", ".spec.", "acceptance")):
+        return "e2e_ui"
+    if any(marker in source for marker in ("vitest", "admin/src", ".test.ts", ".test.tsx")):
+        return "frontend_unit"
+    if any(marker in source for marker in ("/tests/unit/", "tests/unit/", "/unit/")):
+        return "unit"
+    if any(marker in source for marker in ("/tests/integration/", "tests/integration/", "/integration/")):
+        return "backend_integration"
+    if source_type == "TEST" and source.endswith(".py"):
+        return "backend_integration"
+    if source_type == "TEST":
+        return "unit"
+    return "manual" if row["source_origin"] == "evidence" else "static_source"
+
+
+def _evidence_requirement_satisfied(required: str, observed_kinds: list[str], policy: dict[str, Any]) -> bool:
+    accepted = {required}
+    accepted.update(policy.get("satisfies", {}).get(required, set()))
+    return bool(accepted & set(observed_kinds))
+
+
+def _related_target_summary(
+    ac_id: str,
+    edges: list[dict[str, Any]],
+    by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, str]]:
+    related: list[dict[str, str]] = []
+    for edge in edges:
+        if edge["to"] == ac_id:
+            node = by_id.get(edge["from"], {})
+            related.append({"id": edge["from"], "type": node.get("type", ""), "relation": edge["relation"]})
+        elif edge["from"] == ac_id:
+            node = by_id.get(edge["to"], {})
+            related.append({"id": edge["to"], "type": node.get("type", ""), "relation": edge["relation"]})
+    return related[:12]
+
+
+def _evidence_plan_reason(kinds: list[str], related_targets: list[dict[str, str]]) -> str:
+    related_types = sorted({item["type"] for item in related_targets if item.get("type")})
+    if related_types:
+        return f"AC classified as {', '.join(kinds)} from typed links to {', '.join(related_types)}"
+    return f"AC classified as {', '.join(kinds)} from title/content heuristics"
+
+
+def _evidence_plan_findings(evidence_plan: dict[str, Any], mode: str) -> list[dict[str, Any]]:
+    if mode == "explore":
+        return []
+    blocking_modes = set(evidence_plan.get("policy", {}).get("gate_blocking_modes", []))
+    severity = "fail" if mode in blocking_modes else "warn"
+    findings = []
+    for item in evidence_plan.get("items", []):
+        missing = item.get("missing_required_evidence") or []
+        if not missing:
+            continue
+        findings.append({
+            "artifact": item["artifact"],
+            "type": "AC",
+            "code": "missing_required_evidence",
+            "gap_type": "GAP-TEST",
+            "severity": severity,
+            "blocking": severity == "fail",
+            "message": f"{item['artifact']} missing required evidence: {', '.join(missing)}",
+            "suggested_fix": _required_evidence_suggested_fix(item["artifact"], missing),
+        })
+    return findings
 
 
 def _evidence_kind(row: sqlite3.Row) -> str:
@@ -2183,6 +2599,7 @@ def _graph_slice_payload(
         "quality_axes": gate_data["quality_axes"],
         "overall_confidence": gate_data["overall_confidence"],
         "evidence_profile": gate_data["evidence_profile"],
+        "evidence_plan": gate_data["evidence_plan"],
         "relation_catalog": _relation_catalog(include_mentions),
         "class_matrices": _graph_class_matrices(root),
         "findings": gate_data["findings"],
@@ -2243,6 +2660,8 @@ def _agent_worklist(
             add("add_implementation", artifact, "artifact has no typed implementation proof path", source=finding)
         elif code in {"unverified", "missing_evidence"}:
             add("add_evidence", artifact, "artifact has no TEST/EVD verification path", source=finding)
+        elif code == "missing_required_evidence":
+            add("add_required_evidence", artifact, finding.get("message") or "artifact lacks required evidence kind", source=finding)
         elif code in {"stale", "missing_snapshot"}:
             add("refresh_acceptance", artifact, "accepted fingerprint or evidence is stale or missing", source=finding)
         else:
@@ -2265,7 +2684,6 @@ def _agent_worklist(
             "AC has only trace evidence; add behavior/runtime evidence",
             source={"code": "trace_only_evidence", "severity": "warn"},
         )
-
     for node in nodes:
         artifact = node["id"]
         artifact_type = node["type"]
@@ -2282,6 +2700,9 @@ def _agent_worklist(
                 add("add_implementation", artifact, "AC is verified but has no implementation proof")
         if artifact_type == "UIC" and _is_interactive_or_visible_uic(node) and not _has_outgoing_to_type(artifact, "TRACES_TO", "AC", outgoing, by_id):
             add("add_trace", artifact, "visible UI zone has no canonical AC trace")
+        synthesis_gap = _raw_to_canonical_synthesis_gap(node, incoming, by_id, gate_data)
+        if synthesis_gap:
+            add("synthesize_ac", artifact, synthesis_gap)
         if computed.get("stale"):
             add("refresh_acceptance", artifact, "artifact fingerprint changed after acceptance")
 
@@ -2294,8 +2715,10 @@ def _worklist_priority(kind: str, source: dict[str, Any] | None) -> str:
     return {
         "add_implementation": "P0",
         "add_evidence": "P1",
+        "add_required_evidence": "P1",
         "add_trace": "P1",
         "add_behavior_rule": "P1",
+        "synthesize_ac": "P2",
         "refresh_acceptance": "P0",
     }.get(kind, "P2")
 
@@ -2315,6 +2738,11 @@ def _worklist_suggested_actions(kind: str, artifact: str) -> list[str]:
             f"add or link TEST/EVD that verifies {artifact}",
             "mention the canonical artifact id in deterministic test/evidence",
         ]
+    if kind == "add_required_evidence":
+        return [
+            f"add the missing evidence kind for {artifact}",
+            "choose unit/backend integration/frontend unit/e2e UI/contract/static source evidence according to AC classification",
+        ]
     if kind == "add_behavior_rule":
         return [
             f"add graph-native RULE/DER/STATE/EVT artifacts for {artifact}",
@@ -2325,16 +2753,72 @@ def _worklist_suggested_actions(kind: str, artifact: str) -> list[str]:
             f"refresh evidence or accepted fingerprint for {artifact}",
             "accept the delta through a graph-ba change",
         ]
+    if kind == "synthesize_ac":
+        return [
+            f"synthesize a draft canonical AC from {artifact}",
+            "link it with NORMALIZES/TRACES_TO and keep human/OpenSpec acceptance separate",
+        ]
     return [
         f"add an explicit typed trace for {artifact}",
         "prefer the project class matrix relation instead of text-only mention",
     ]
 
 
+def _required_evidence_suggested_fix(artifact: str, missing: list[str]) -> list[str]:
+    actions = []
+    for kind in missing:
+        if kind == "unit":
+            actions.append(f"add a unit test for deterministic logic behind {artifact}")
+        elif kind == "backend_integration":
+            actions.append(f"add a backend integration test for runtime/database/service behavior behind {artifact}")
+        elif kind == "frontend_unit":
+            actions.append(f"add a frontend model/mapper/selector test for {artifact}")
+        elif kind == "e2e_ui":
+            actions.append(f"add or link a Playwright/e2e UI test for visible or interactive behavior in {artifact}")
+        elif kind == "contract":
+            actions.append(f"add a contract/schema/API test for {artifact}")
+        elif kind == "static_source":
+            actions.append(f"add a source/trace metadata test for {artifact}")
+        elif kind == "graph_validation":
+            actions.append(f"add graph-ba validation evidence for {artifact}")
+        else:
+            actions.append(f"add {kind} evidence for {artifact}")
+    return actions
+
+
 def _worklist_blocking_modes(kind: str) -> list[str]:
     if kind == "refresh_acceptance":
         return ["release"]
+    if kind == "synthesize_ac":
+        return ["review", "release"]
     return ["review", "release"]
+
+
+def _raw_to_canonical_synthesis_gap(
+    node: dict[str, Any],
+    incoming: dict[str, list[dict[str, Any]]],
+    by_id: dict[str, dict[str, Any]],
+    gate_data: dict[str, Any],
+) -> str:
+    policy = gate_data.get("evidence_plan", {}).get("policy", {}).get("synthesis_policy", {})
+    raw_to_canonical = policy.get("raw_to_canonical") if isinstance(policy, dict) else None
+    if not isinstance(raw_to_canonical, dict):
+        return ""
+    raw_types = set(raw_to_canonical.get("raw_types") or raw_to_canonical.get("source_types") or [])
+    canonical_types = set(raw_to_canonical.get("canonical_types") or [raw_to_canonical.get("output_type", "AC")])
+    relation = str(raw_to_canonical.get("required_relation") or "NORMALIZES")
+    if node.get("type") not in raw_types:
+        return ""
+    has_canonical = any(
+        edge["relation"] == relation and by_id.get(edge["from"], {}).get("type") in canonical_types
+        for edge in incoming.get(node["id"], [])
+    )
+    if has_canonical:
+        return ""
+    return (
+        f"{node['id']} is raw source material without canonical "
+        f"{'/'.join(sorted(canonical_types)) or 'AC'} via {relation}"
+    )
 
 
 def _worklist_related_nodes(
@@ -2649,6 +3133,51 @@ def _render_worklist_markdown(payload: dict[str, Any]) -> str:
         if actions:
             lines.append("- suggested_actions:")
             lines.extend(f"  - {action}" for action in actions)
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_evidence_plan_markdown(payload: dict[str, Any]) -> str:
+    summary = payload.get("summary", {})
+    lines = [
+        "# graph-ba evidence plan",
+        "",
+        f"AC: {summary.get('ac_total', 0)}  OK: {summary.get('ok', 0)}  GAP: {summary.get('gap', 0)}",
+        "",
+    ]
+    providers = payload.get("policy", {}).get("providers", [])
+    if providers:
+        lines.extend([
+            f"Policy: {', '.join(f'`{provider}`' for provider in providers)}",
+            "",
+        ])
+    items = payload.get("items", [])
+    if not items:
+        lines.append("No AC artifacts in scope.")
+        return "\n".join(lines) + "\n"
+    for item in items:
+        missing = item.get("missing_required_evidence") or []
+        status = "GAP" if missing else "OK"
+        lines.extend([
+            f"## {status} {item['artifact']}",
+            "",
+            f"- kinds: {', '.join(f'`{kind}`' for kind in item.get('kinds', [])) or 'none'}",
+            f"- required_evidence: {', '.join(f'`{kind}`' for kind in item.get('required_evidence', [])) or 'none'}",
+            f"- observed_evidence: {', '.join(f'`{kind}`' for kind in item.get('observed_kinds', [])) or 'none'}",
+            f"- reason: {item.get('reason', '')}",
+        ])
+        if missing:
+            lines.append(f"- missing: {', '.join(f'`{kind}`' for kind in missing)}")
+            lines.append("- suggested_fix:")
+            lines.extend(f"  - {action}" for action in _required_evidence_suggested_fix(item["artifact"], missing))
+        observed = item.get("observed_evidence") or []
+        if observed:
+            lines.append("- evidence_sources:")
+            for evidence in observed[:8]:
+                lines.append(
+                    f"  - `{evidence.get('kind', '')}` `{evidence.get('source', '')}` "
+                    f"({evidence.get('source_file', '')})"
+                )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

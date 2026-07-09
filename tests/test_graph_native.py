@@ -538,7 +538,7 @@ def test_graph_slice_exports_nodes_edges_content_and_findings(tmp_path):
     (tmp_path / "graph-ba.toml").write_text(
         """
 [scan]
-dirs = [".graphba", "tests"]
+dirs = [".graphba", "admin/e2e/tests"]
 
 [types.SCR]
 label = "Screens"
@@ -558,8 +558,14 @@ origin = "canonical"
 ref = '(AC-[A-Z]+-\\d{3})'
 classify = 'AC-[A-Z]+-\\d{3}'
 
+[types.REACT_COMPONENT]
+label = "React components"
+origin = "implementation"
+ref = '(REACT_COMPONENT:[A-Za-z0-9_:\\-]+)'
+classify = 'REACT_COMPONENT:[A-Za-z0-9_:\\-]+'
+
 [tests]
-dirs = ["tests"]
+dirs = ["admin/e2e/tests"]
 coverage_types = ["AC"]
 
 [graph_native]
@@ -599,9 +605,10 @@ dirs = [".graphba"]
         ':::\n',
         encoding="utf-8",
     )
-    (tmp_path / "tests").mkdir()
-    (tmp_path / "tests" / "test_kitchen.py").write_text(
-        "def test_ac_kit_001():\n    # AC-KIT-001\n    assert True\n",
+    e2e_dir = tmp_path / "admin" / "e2e" / "tests"
+    e2e_dir.mkdir(parents=True)
+    (e2e_dir / "kitchen.spec.ts").write_text(
+        "test('AC-KIT-001 renders kitchen', async () => {})\n",
         encoding="utf-8",
     )
     db_path = tmp_path / "graph.db"
@@ -629,13 +636,13 @@ dirs = [".graphba"]
     assert payload["target"] == "SCR-KITCHEN"
     assert payload["summary"]["mentions_included"] is False
     node_ids = {node["id"] for node in payload["nodes"]}
-    assert {"SCR-KITCHEN", "UIC-HEADER", "AC-KIT-001", "TEST:tests/test_kitchen.py"} <= node_ids
+    assert {"SCR-KITCHEN", "UIC-HEADER", "AC-KIT-001", "TEST:admin/e2e/tests/kitchen.spec.ts"} <= node_ids
     assert all(edge["relation"] != "MENTIONS" for edge in payload["edges"])
     assert {
         ("SCR-KITCHEN", "CONTAINS", "UIC-HEADER"),
         ("REACT_COMPONENT:KitchenHeader", "RENDERS", "UIC-HEADER"),
         ("UIC-HEADER", "TRACES_TO", "AC-KIT-001"),
-        ("TEST:tests/test_kitchen.py", "TEST_EVIDENCE", "AC-KIT-001"),
+        ("TEST:admin/e2e/tests/kitchen.spec.ts", "TEST_EVIDENCE", "AC-KIT-001"),
     } <= {(edge["from"], edge["relation"], edge["to"]) for edge in payload["edges"]}
     ac_node = next(node for node in payload["nodes"] if node["id"] == "AC-KIT-001")
     assert ac_node["computed"]["implemented"] is True
@@ -896,9 +903,74 @@ scope_relation_type = "CONTAINS"
     assert result.exit_code == 0, result.output
     compiled = change_dir / "compiled"
     assert (compiled / "graph.json").exists()
+    assert (compiled / "evidence-plan.json").exists()
+    assert (compiled / "evidence-plan.md").exists()
     assert (compiled / "worklist.json").exists()
     assert (compiled / "worklist.md").exists()
     assert (compiled / "gaps.md").exists()
     assert (compiled / "state.yaml").exists()
     assert (compiled / "projection.md").exists()
     assert (compiled / "pack.md").exists()
+
+
+def test_evidence_plan_classifies_ac_and_reports_missing_required_kind(tmp_path):
+    (tmp_path / "graph-ba.toml").write_text(
+        """
+[scan]
+dirs = [".graphba", "tests"]
+
+[types.SCR]
+label = "Screens"
+origin = "canonical"
+ref = '(SCR-[A-Z]+)'
+classify = 'SCR-[A-Z]+'
+
+[types.AC]
+label = "Acceptance Criteria"
+origin = "canonical"
+ref = '(AC-[A-Z]+-\\d{3})'
+classify = 'AC-[A-Z]+-\\d{3}'
+
+[types.RULE]
+label = "Rules"
+origin = "canonical"
+ref = '(RULE-[A-Z]+)'
+classify = 'RULE-[A-Z]+'
+
+[tests]
+dirs = ["tests"]
+coverage_types = ["AC"]
+
+[graph_native]
+dirs = [".graphba"]
+        """.strip(),
+        encoding="utf-8",
+    )
+    graphba_dir = tmp_path / ".graphba"
+    graphba_dir.mkdir()
+    (graphba_dir / "source.md").write_text(
+        ':::artifact type="SCR" id="SCR-KITCHEN" state="accepted" title="Kitchen" contains="AC-KIT-001"\n:::\n'
+        ':::artifact type="AC" id="AC-KIT-001" state="accepted" title="Formula rule" traces_to="RULE-LOAD"\n:::\n'
+        ':::artifact type="RULE" id="RULE-LOAD" state="accepted" title="Deterministic rule"\n:::\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "trace.test.ts").write_text("// AC-KIT-001\n", encoding="utf-8")
+    db_path = tmp_path / "graph.db"
+    db = get_db(db_path)
+    do_import(tmp_path, db, quiet=True)
+    db.close()
+
+    result = CliRunner().invoke(
+        cli,
+        ["--root", str(tmp_path), "--db", str(db_path), "evidence-plan", "SCR-KITCHEN"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    item = payload["items"][0]
+    assert item["artifact"] == "AC-KIT-001"
+    assert "algorithm" in item["kinds"]
+    assert "unit" in item["required_evidence"]
+    assert item["observed_kinds"] == ["static_source"]
+    assert item["missing_required_evidence"] == ["unit"]
