@@ -66,6 +66,7 @@ glossary_file = "docs/glossary.md"
 meetings_dir = "meetings_refined"
 stale_threshold_days = 5
 todo_patterns = ["TODO", "TBD", "FIXME", "???", "CLARIFY"]
+terminology_ignore_types = ["UIC"]
 """
 
 FEATURES_MD = """\
@@ -328,6 +329,24 @@ class TestTerminology:
             key = (f["artifact_id"], f["message"].split('"')[1].lower())
             assert key not in seen, f"Duplicate term finding: {key}"
             seen.add(key)
+
+    def test_terminology_ignore_types_skip_configured_artifacts(self, lint_project, lint_db):
+        """Observed UI artifacts can be excluded from human terminology checks."""
+        db = get_db(lint_db)
+        db.execute(
+            "INSERT OR REPLACE INTO artifacts "
+            "(id, type, origin, title, source_file, line_number, defined) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("UIC-IGNORED", "UIC", "implementation", "Order UI", "docs/features.md", 3, 1),
+        )
+        db.commit()
+
+        from graph_ba.config import load_config
+        config = load_config(lint_project)
+        findings = do_lint(db, lint_project, config, node_id="UIC-IGNORED", quick=True)
+        db.close()
+
+        assert [f for f in findings if f["category"] == "TERMINOLOGY"] == []
 
 
 # ── Check 4: Stale artifacts ────────────────────────────────────

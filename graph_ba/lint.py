@@ -197,10 +197,15 @@ def _lint_terminology(db, fcache: _FileCache, root: Path, config,
         return findings
     term_re = re.compile(r'\b(' + '|'.join(patterns) + r')\b', re.IGNORECASE)
 
+    ignore_types = {"FILE", "CODE", "TEST"}
+    if lint_cfg and lint_cfg.terminology_ignore_types:
+        ignore_types.update(str(item) for item in lint_cfg.terminology_ignore_types)
+
     # Scan artifacts
+    placeholders = ",".join("?" for _ in sorted(ignore_types))
     query = ("SELECT id, source_file, line_number FROM artifacts "
-             "WHERE defined = 1 AND type NOT IN ('FILE', 'CODE', 'TEST')")
-    params: list = []
+             f"WHERE defined = 1 AND type NOT IN ({placeholders})")
+    params: list = sorted(ignore_types)
     if node_id:
         query += " AND id = ?"
         params.append(node_id)

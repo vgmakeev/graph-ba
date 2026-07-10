@@ -90,6 +90,9 @@ class TestLoadConfig:
         pairs = project_config.expected_cross_layer["FEAT"]
         assert ("REQ", "requirements") in pairs
 
+    def test_lint_terminology_ignore_types(self, project_config):
+        assert project_config.lint.terminology_ignore_types == ["UIC", "DATA_SOURCE"]
+
     def test_missing_config_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             load_config(tmp_path)

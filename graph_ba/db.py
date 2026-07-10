@@ -192,6 +192,8 @@ def _scan_file_mtimes(root: Path, config) -> dict[str, float]:
     if getattr(config, "ui", None):
         for pattern in config.ui.files:
             _remember_files(files, root.glob(pattern))
+    _remember_configured_sources(root, files, getattr(config, "mini_admin_sources", None))
+    _remember_configured_sources(root, files, getattr(config, "react_ui", None))
     if getattr(config, "graph_native", None):
         for dir_str in config.graph_native.dirs:
             p = root / dir_str
@@ -225,6 +227,50 @@ def graph_is_stale(db: sqlite3.Connection, root: Path, config) -> bool:
     return stored != current
 
 
+def _import_counts(db: sqlite3.Connection) -> tuple[int, int, int, int, int, int, int, int]:
+    n_nodes = db.execute("SELECT count(*) FROM artifacts").fetchone()[0]
+    n_edges = db.execute("SELECT count(*) FROM edges").fetchone()[0]
+    n_clusters = db.execute("SELECT count(DISTINCT cluster_name) FROM semantic_clusters").fetchone()[0]
+    n_code = db.execute(
+        "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'CODE:%'"
+    ).fetchone()[0]
+    n_test = db.execute(
+        "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'TEST:%'"
+    ).fetchone()[0]
+    n_ui = db.execute(
+        "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'UI:%'"
+    ).fetchone()[0]
+    n_mini_admin_source = db.execute(
+        "SELECT count(*) FROM artifacts "
+        "WHERE type IN ('DATA_SOURCE', 'FRONTEND_COMPUTED')"
+    ).fetchone()[0]
+    n_react_ui = db.execute(
+        "SELECT count(*) FROM artifacts "
+        "WHERE type IN ('REACT_COMPONENT', 'UI_TEST_ID')"
+    ).fetchone()[0]
+    return n_nodes, n_edges, n_clusters, n_code, n_test, n_ui, n_mini_admin_source, n_react_ui
+
+
+def _print_import_summary(db: sqlite3.Connection, *, suffix: str = "") -> None:
+    (
+        n_nodes,
+        n_edges,
+        n_clusters,
+        n_code,
+        n_test,
+        n_ui,
+        n_mini_admin_source,
+        n_react_ui,
+    ) = _import_counts(db)
+    print(f"Imported: {n_nodes} artifacts, {n_edges} edges, "
+          f"{n_clusters} semantic clusters, {n_code} code files, "
+          f"{n_test} test files, {n_ui} ui trace files, "
+          f"{n_mini_admin_source} mini-admin source artifacts, "
+          f"{n_react_ui} react ui artifacts{suffix}")
+    db_path = db.execute("PRAGMA database_list").fetchone()[2]
+    print(f"DB: {db_path}")
+
+
 def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
               force: bool = False) -> bool:
     """Import graph by running traceability scan and loading into SQLite."""
@@ -237,26 +283,7 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
     has_data = db.execute("SELECT count(*) FROM artifacts").fetchone()[0] > 0
     if not force and has_data and _stored_file_mtimes(db) == current_files:
         if not quiet:
-            n_nodes = db.execute("SELECT count(*) FROM artifacts").fetchone()[0]
-            n_edges = db.execute("SELECT count(*) FROM edges").fetchone()[0]
-            n_clusters = db.execute(
-                "SELECT count(DISTINCT cluster_name) FROM semantic_clusters"
-            ).fetchone()[0]
-            n_code = db.execute(
-                "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'CODE:%'"
-            ).fetchone()[0]
-            n_test = db.execute(
-                "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'TEST:%'"
-            ).fetchone()[0]
-            n_ui = db.execute(
-                "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'UI:%'"
-            ).fetchone()[0]
-            print(f"Imported: {n_nodes} artifacts, {n_edges} edges, "
-                  f"{n_clusters} semantic clusters, {n_code} code files, "
-                  f"{n_test} test files, {n_ui} ui trace files "
-                  "(up to date, no changes)")
-            db_path = db.execute("PRAGMA database_list").fetchone()[2]
-            print(f"DB: {db_path}")
+            _print_import_summary(db, suffix=" (up to date, no changes)")
         return False
 
     registry = t.scan_definitions(root, config)
@@ -366,23 +393,7 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
     if quiet:
         return
 
-    n_nodes = db.execute("SELECT count(*) FROM artifacts").fetchone()[0]
-    n_edges = db.execute("SELECT count(*) FROM edges").fetchone()[0]
-    n_clusters = db.execute("SELECT count(DISTINCT cluster_name) FROM semantic_clusters").fetchone()[0]
-    n_code = db.execute(
-        "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'CODE:%'"
-    ).fetchone()[0]
-    n_test = db.execute(
-        "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'TEST:%'"
-    ).fetchone()[0]
-    n_ui = db.execute(
-        "SELECT count(DISTINCT source_id) FROM edges WHERE source_id LIKE 'UI:%'"
-    ).fetchone()[0]
-    db_path = db.execute("PRAGMA database_list").fetchone()[2]
-    print(f"Imported: {n_nodes} artifacts, {n_edges} edges, "
-          f"{n_clusters} semantic clusters, {n_code} code files, "
-          f"{n_test} test files, {n_ui} ui trace files")
-    print(f"DB: {db_path}")
+    _print_import_summary(db)
     return True
 
 

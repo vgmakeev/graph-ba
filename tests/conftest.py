@@ -144,6 +144,9 @@ coverage_types = ["REQ"]
 [ui]
 files = ["ui/*/trace.json"]
 coverage_types = ["REQ"]
+
+[lint]
+terminology_ignore_types = ["UIC", "DATA_SOURCE"]
 """
 
 # ── Synthetic markdown files ──────────────────────────────────────

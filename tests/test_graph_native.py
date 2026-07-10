@@ -532,6 +532,8 @@ dirs = [".graphba"]
     scope_ids = {item["id"] for item in payload["scope"]}
     assert "AC-KIT-001" in scope_ids
     assert "TEST:tests/test_kitchen.py" in scope_ids
+    assert payload["summary"]["evidence_plan"]["ac_total"] == 1
+    assert payload["summary"]["evidence_plan"]["gap"] == 1
 
 
 def test_graph_slice_exports_nodes_edges_content_and_findings(tmp_path):
@@ -975,3 +977,68 @@ dirs = [".graphba"]
     assert item["observed_kinds"] == ["static_source"]
     assert item["missing_required_evidence"] == ["unit"]
     assert item["missing_evidence"] == ["unit"]
+    assert payload["policy"]["evidence_kind_rules"]
+
+
+def test_evidence_plan_uses_project_evidence_kind_rules(tmp_path):
+    (tmp_path / "graph-ba.toml").write_text(
+        """
+[scan]
+dirs = [".graphba", "tests"]
+
+[types.SCR]
+label = "Screens"
+origin = "canonical"
+ref = '(SCR-[A-Z]+)'
+classify = 'SCR-[A-Z]+'
+
+[types.AC]
+label = "Acceptance Criteria"
+origin = "canonical"
+ref = '(AC-[A-Z]+-\\d{3})'
+classify = 'AC-[A-Z]+-\\d{3}'
+
+[tests]
+dirs = ["tests"]
+coverage_types = ["AC"]
+
+[graph_native]
+dirs = [".graphba"]
+        """.strip(),
+        encoding="utf-8",
+    )
+    graphba_dir = tmp_path / ".graphba"
+    graphba_dir.mkdir()
+    (graphba_dir / "evidence-policy.json").write_text(
+        json.dumps(
+            {
+                "schema": "graph-ba.evidence-policy.v1",
+                "evidence_kind_rules": [
+                    {"kind": "backend_integration", "pattern": "tests/integration/.*contract"},
+                    {"kind": "contract", "pattern": "contract"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (graphba_dir / "source.md").write_text(
+        ':::artifact type="SCR" id="SCR-KITCHEN" state="accepted" title="Kitchen" contains="AC-KIT-001"\n:::\n'
+        ':::artifact type="AC" id="AC-KIT-001" state="accepted" title="Kitchen AC"\n:::\n',
+        encoding="utf-8",
+    )
+    integration_dir = tmp_path / "tests" / "integration"
+    integration_dir.mkdir(parents=True)
+    (integration_dir / "test_orders_contract.py").write_text("# AC-KIT-001\n", encoding="utf-8")
+    db_path = tmp_path / "graph.db"
+    db = get_db(db_path)
+    do_import(tmp_path, db, quiet=True)
+    db.close()
+
+    result = CliRunner().invoke(
+        cli,
+        ["--root", str(tmp_path), "--db", str(db_path), "evidence-plan", "SCR-KITCHEN"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["items"][0]["observed_kinds"] == ["backend_integration"]

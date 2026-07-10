@@ -98,6 +98,16 @@ DEFAULT_EVIDENCE_KIND_LABELS = {
     "graph_validation": "graph-ba validation/audit evidence.",
 }
 
+DEFAULT_EVIDENCE_KIND_RULES = [
+    {"kind": "graph_validation", "pattern": r"graphba|graph-ba|validate|audit"},
+    {"kind": "static_source", "pattern": r"trace\.test|trace-strict|traceability|sources\.test"},
+    {"kind": "e2e_ui", "pattern": r"playwright|admin/e2e|/e2e/|\.spec\.|acceptance"},
+    {"kind": "frontend_unit", "pattern": r"vitest|admin/src|\.test\.ts|\.test\.tsx"},
+    {"kind": "unit", "pattern": r"/tests/unit/|tests/unit/|/unit/"},
+    {"kind": "backend_integration", "pattern": r"/tests/integration/|tests/integration/|/integration/"},
+    {"kind": "contract", "pattern": r"contract|schema|api_contract"},
+]
+
 DEFAULT_AC_KIND_TARGET_TYPES = {
     "algorithm": {"RULE", "DER", "FUNC"},
     "backend_behavior": {
@@ -1824,6 +1834,7 @@ def _gate_payload(
     findings.extend(_evidence_plan_findings(evidence_plan, selected_mode))
     evidence_profile = _evidence_profile(db, states)
     quality_axes = _quality_axes(states, findings, evidence_profile, bool(snapshot))
+    evidence_plan_summary = evidence_plan.get("summary", {})
     fail_count = sum(1 for item in findings if item["severity"] == "fail")
     warn_count = sum(1 for item in findings if item["severity"] == "warn")
     return {
@@ -1832,7 +1843,16 @@ def _gate_payload(
         "mode": selected_mode,
         "pass": fail_count == 0,
         "verdict": "PASS" if fail_count == 0 else "FAIL",
-        "summary": {"fail": fail_count, "warn": warn_count, "scope": len(states)},
+        "summary": {
+            "fail": fail_count,
+            "warn": warn_count,
+            "scope": len(states),
+            "evidence_plan": {
+                "ac_total": evidence_plan_summary.get("ac_total", 0),
+                "ok": evidence_plan_summary.get("ok", 0),
+                "gap": evidence_plan_summary.get("gap", 0),
+            },
+        },
         "quality_axes": quality_axes,
         "overall_confidence": _overall_confidence(quality_axes),
         "evidence_profile": evidence_profile,
@@ -1953,7 +1973,7 @@ def _evidence_plan_for_states(
         for row in rows
     }
     edges = _graph_slice_edges(db, ids, include_mentions=False)
-    evidence_by_ac = _observed_evidence_by_ac(db, ac_ids)
+    evidence_by_ac = _observed_evidence_by_ac(db, ac_ids, policy)
     items: list[dict[str, Any]] = []
     for ac_id in sorted(ac_ids):
         row = next((item for item in rows if item["id"] == ac_id), None)
@@ -1989,6 +2009,7 @@ def _evidence_plan_for_states(
             "providers": policy["providers"],
             "gate_blocking_modes": policy["gate_blocking_modes"],
             "synthesis_policy": policy.get("synthesis_policy", {}),
+            "evidence_kind_rules": policy.get("evidence_kind_rules", []),
         },
         "evidence_kinds": DEFAULT_EVIDENCE_KIND_LABELS,
         "summary": {
@@ -2007,6 +2028,7 @@ def _empty_evidence_plan(policy: dict[str, Any]) -> dict[str, Any]:
             "providers": policy["providers"],
             "gate_blocking_modes": policy["gate_blocking_modes"],
             "synthesis_policy": policy.get("synthesis_policy", {}),
+            "evidence_kind_rules": policy.get("evidence_kind_rules", []),
         },
         "evidence_kinds": DEFAULT_EVIDENCE_KIND_LABELS,
         "summary": {"ac_total": 0, "ok": 0, "gap": 0},
@@ -2024,6 +2046,7 @@ def _load_evidence_policy(root: Path) -> dict[str, Any]:
             for key, value in DEFAULT_AC_KIND_TARGET_TYPES.items()
         },
         "satisfies": {},
+        "evidence_kind_rules": list(DEFAULT_EVIDENCE_KIND_RULES),
         "gate_blocking_modes": [],
         "synthesis_policy": {},
     }
@@ -2050,6 +2073,18 @@ def _load_evidence_policy(root: Path) -> dict[str, Any]:
             for required, observed in satisfies.items():
                 if isinstance(observed, list):
                     policy["satisfies"][str(required)] = {str(item) for item in observed}
+        evidence_kind_rules = data.get("evidence_kind_rules")
+        if isinstance(evidence_kind_rules, list):
+            normalized_rules = []
+            for item in evidence_kind_rules:
+                if not isinstance(item, dict):
+                    continue
+                kind = item.get("kind")
+                pattern = item.get("pattern")
+                if kind and pattern:
+                    normalized_rules.append({"kind": str(kind), "pattern": str(pattern)})
+            if normalized_rules:
+                policy["evidence_kind_rules"] = normalized_rules
         blocking = data.get("gate_blocking_modes")
         if isinstance(blocking, list):
             policy["gate_blocking_modes"] = [str(item) for item in blocking]
@@ -2159,7 +2194,11 @@ def _required_evidence_for_ac(ac_id: str, kinds: list[str], policy: dict[str, An
     return sorted(_dedupe_worklist_ids(required))
 
 
-def _observed_evidence_by_ac(db: sqlite3.Connection, ac_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+def _observed_evidence_by_ac(
+    db: sqlite3.Connection,
+    ac_ids: list[str],
+    policy: dict[str, Any] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     by_target: dict[str, list[dict[str, Any]]] = {artifact_id: [] for artifact_id in ac_ids}
     if not ac_ids:
         return by_target
@@ -2178,31 +2217,24 @@ def _observed_evidence_by_ac(db: sqlite3.Connection, ac_ids: list[str]) -> dict[
             "source": row["source_id"],
             "source_type": row["source_type"],
             "relation": row["relation_type"],
-            "kind": _observed_evidence_kind(row),
+            "kind": _observed_evidence_kind(row, policy),
             "source_file": row["source_file"],
         })
     return by_target
 
 
-def _observed_evidence_kind(row: sqlite3.Row) -> str:
+def _observed_evidence_kind(row: sqlite3.Row, policy: dict[str, Any] | None = None) -> str:
     source_type = row["source_type"]
     source = f"{row['source_id']} {row['source_title']} {row['source_file']}".lower()
     if source_type == "EVD":
         return "manual"
-    if any(marker in source for marker in ("graphba", "graph-ba", "validate", "audit")):
-        return "graph_validation"
-    if any(marker in source for marker in ("trace.test", "trace-strict", "traceability", "sources.test")):
-        return "static_source"
-    if any(marker in source for marker in ("contract", "schema", "api_contract")):
-        return "contract"
-    if any(marker in source for marker in ("playwright", "admin/e2e", "/e2e/", ".spec.", "acceptance")):
-        return "e2e_ui"
-    if any(marker in source for marker in ("vitest", "admin/src", ".test.ts", ".test.tsx")):
-        return "frontend_unit"
-    if any(marker in source for marker in ("/tests/unit/", "tests/unit/", "/unit/")):
-        return "unit"
-    if any(marker in source for marker in ("/tests/integration/", "tests/integration/", "/integration/")):
-        return "backend_integration"
+    for rule in (policy or {}).get("evidence_kind_rules", DEFAULT_EVIDENCE_KIND_RULES):
+        if not isinstance(rule, dict):
+            continue
+        kind = rule.get("kind")
+        pattern = rule.get("pattern")
+        if kind and pattern and re.search(str(pattern), source, flags=re.IGNORECASE):
+            return str(kind)
     if source_type == "TEST" and source.endswith(".py"):
         return "backend_integration"
     if source_type == "TEST":

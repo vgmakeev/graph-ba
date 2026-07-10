@@ -223,6 +223,34 @@ class UiConfig:
 
 
 @dataclass
+class MiniAdminSourcesConfig:
+    """Configuration for native mini-admin source/component tracing."""
+    dirs: List[str] = field(default_factory=list)
+    files: List[str] = field(default_factory=list)
+    extensions: List[str] = field(default_factory=lambda: ["ts", "tsx"])
+    trace_filename: str = "trace.json"
+    feature_path_segment: str = "features"
+    screen_family_prefix: str = "SCR-ADMIN-"
+    resource_type: str = "CRUDL_RESOURCE"
+    custom_method_type: str = "CUSTOM_METHOD"
+    frontend_computed_type: str = "FRONTEND_COMPUTED"
+    component_type: str = "UIC"
+    relation_type: str = "DEPENDS_ON"
+    trace_relation_type: str = "TRACES_TO"
+    component_relation_type: str = "RENDERS"
+    component_fallback_prefix: str = "UIC:"
+    origin: str = "implementation"
+
+
+@dataclass
+class ReactUiConfig:
+    """Configuration for scanning React UI trace attributes."""
+    dirs: List[str] = field(default_factory=list)
+    files: List[str] = field(default_factory=list)
+    extensions: List[str] = field(default_factory=lambda: ["ts", "tsx"])
+
+
+@dataclass
 class GraphNativeConfig:
     """Configuration for graph-native Artifact/Change source files.
 
@@ -249,6 +277,7 @@ class LintConfig:
     glossary_file: Optional[str] = None
     meetings_dir: str = "00_Inputs/meetings_refined"
     stale_threshold_days: int = 30
+    terminology_ignore_types: List[str] = field(default_factory=list)
     todo_patterns: List[str] = field(default_factory=lambda: [
         "TODO", "TBD", "FIXME", "???",
     ])
@@ -278,6 +307,10 @@ class ProjectConfig:
     tests: Optional[TestsConfig] = None
     # UI traceability
     ui: Optional[UiConfig] = None
+    # mini-admin native source/component traceability
+    mini_admin_sources: Optional[MiniAdminSourcesConfig] = None
+    # React UI attribute scanning
+    react_ui: Optional[ReactUiConfig] = None
     # graph-native Artifact/Change workflow
     graph_native: Optional[GraphNativeConfig] = None
     # Lint
@@ -427,6 +460,81 @@ def load_config(root: Path) -> ProjectConfig:
             coverage_types=ui_data.get("coverage_types", []),
         )
 
+    # ── mini-admin native source/component traceability ──
+    mini_admin_sources_data = data.get("mini_admin_sources")
+    mini_admin_sources_config = None
+    if mini_admin_sources_data:
+        mini_admin_defaults = MiniAdminSourcesConfig()
+        mini_admin_sources_config = MiniAdminSourcesConfig(
+            dirs=mini_admin_sources_data.get("dirs", mini_admin_defaults.dirs),
+            files=mini_admin_sources_data.get("files", mini_admin_defaults.files),
+            extensions=mini_admin_sources_data.get(
+                "extensions",
+                mini_admin_defaults.extensions,
+            ),
+            trace_filename=mini_admin_sources_data.get(
+                "trace_filename",
+                mini_admin_defaults.trace_filename,
+            ),
+            feature_path_segment=mini_admin_sources_data.get(
+                "feature_path_segment",
+                mini_admin_defaults.feature_path_segment,
+            ),
+            screen_family_prefix=mini_admin_sources_data.get(
+                "screen_family_prefix",
+                mini_admin_defaults.screen_family_prefix,
+            ),
+            resource_type=mini_admin_sources_data.get(
+                "resource_type",
+                mini_admin_defaults.resource_type,
+            ),
+            custom_method_type=mini_admin_sources_data.get(
+                "custom_method_type",
+                mini_admin_defaults.custom_method_type,
+            ),
+            frontend_computed_type=mini_admin_sources_data.get(
+                "frontend_computed_type",
+                mini_admin_defaults.frontend_computed_type,
+            ),
+            component_type=mini_admin_sources_data.get(
+                "component_type",
+                mini_admin_defaults.component_type,
+            ),
+            relation_type=mini_admin_sources_data.get(
+                "relation_type",
+                mini_admin_defaults.relation_type,
+            ),
+            trace_relation_type=mini_admin_sources_data.get(
+                "trace_relation_type",
+                mini_admin_defaults.trace_relation_type,
+            ),
+            component_relation_type=mini_admin_sources_data.get(
+                "component_relation_type",
+                mini_admin_defaults.component_relation_type,
+            ),
+            component_fallback_prefix=mini_admin_sources_data.get(
+                "component_fallback_prefix",
+                mini_admin_defaults.component_fallback_prefix,
+            ),
+            origin=mini_admin_sources_data.get("origin", mini_admin_defaults.origin),
+        )
+        if mini_admin_sources_config.origin not in origins:
+            origins[mini_admin_sources_config.origin] = EnumDef(
+                id=mini_admin_sources_config.origin,
+                label=mini_admin_sources_config.origin,
+            )
+
+    # ── React UI trace attributes ──
+    react_ui_data = data.get("react_ui")
+    react_ui_config = None
+    if react_ui_data:
+        react_ui_defaults = ReactUiConfig()
+        react_ui_config = ReactUiConfig(
+            dirs=react_ui_data.get("dirs", react_ui_defaults.dirs),
+            files=react_ui_data.get("files", react_ui_defaults.files),
+            extensions=react_ui_data.get("extensions", react_ui_defaults.extensions),
+        )
+
     # ── graph-native Artifact/Change workflow ──
     graph_native_data = data.get("graph_native")
     graph_native_config = None
@@ -467,6 +575,7 @@ def load_config(root: Path) -> ProjectConfig:
             glossary_file=lint_data.get("glossary_file"),
             meetings_dir=lint_data.get("meetings_dir", "00_Inputs/meetings_refined"),
             stale_threshold_days=lint_data.get("stale_threshold_days", 30),
+            terminology_ignore_types=lint_data.get("terminology_ignore_types", []),
             todo_patterns=lint_data.get("todo_patterns", LintConfig().todo_patterns),
         )
 
@@ -488,6 +597,8 @@ def load_config(root: Path) -> ProjectConfig:
         code=code_config,
         tests=tests_config,
         ui=ui_config,
+        mini_admin_sources=mini_admin_sources_config,
+        react_ui=react_ui_config,
         graph_native=graph_native_config,
         lint=lint_config,
     )
