@@ -523,9 +523,14 @@ def scan_code_references(
         raw_ids_str = m.group(1).strip()
         return [s.strip() for s in re.split(r"[,\s]+", raw_ids_str) if s.strip()]
 
-    return _scan_source_references(
+    refs = _scan_source_references(
         root, config.code.dirs, config.code.extensions, extract, config
     )
+    if config.codegraph:
+        from .codegraph_provider import enrich_code_references
+
+        enrich_code_references(root, refs, config.codegraph.database)
+    return refs
 
 
 def scan_test_references(

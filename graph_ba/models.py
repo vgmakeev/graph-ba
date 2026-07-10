@@ -33,6 +33,9 @@ class CodeReference:
     target_ids: list[str]  # normalized artifact IDs
     context: str = ""  # the raw comment line
     rel_path: str = ""  # relative path from project root
+    provider_id: str = ""  # external symbol ID, when resolved by a provider
+    provider_kind: str = ""
+    provider_title: str = ""
 
 
 @dataclass

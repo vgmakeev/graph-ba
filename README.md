@@ -309,6 +309,12 @@ required_sections = { "FEAT" = ["Goal", "Scope"] }
 dirs = ["src"]
 coverage_types = ["FEAT", "REQ"]
 
+# Optional symbol-level enrichment. When enabled, graph-ba resolves each
+# @trace file:line to the enclosing function/class in a local CodeGraph index.
+# Missing indexes or unmatched symbols gracefully keep the existing file node.
+[providers.codegraph]
+database = ".codegraph/codegraph.db"
+
 # Test traceability — test files become TEST: nodes; any artifact ID
 # in a test file (comments, names, asserts) counts as test evidence.
 # `coverage` shows a "Test coverage" block per listed type.

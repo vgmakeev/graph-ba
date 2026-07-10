@@ -282,15 +282,18 @@ def _add_source_ref_nodes(
     if not refs:
         return
     for cref in refs:
-        node_id = f"{prefix}{cref.rel_path}"
+        provider_id = cref.provider_id if prefix == "CODE:" else ""
+        node_id = f"{prefix}{provider_id or cref.rel_path}"
         if not G.has_node(node_id):
             G.add_node(
                 node_id,
                 type=node_type,
-                title=cref.rel_path,
+                title=cref.provider_title or cref.rel_path,
                 source_file=cref.rel_path,
                 defined=True,
                 origin=origin,
+                provider="codegraph" if provider_id else "",
+                provider_kind=cref.provider_kind,
             )
         for target_id in cref.target_ids:
             if target_id not in G:

@@ -181,6 +181,11 @@ pattern = '^##\\s+(FEAT-\\d{2,4})\\s*[—–\\-]\\s*(.*)'
 # marker = "@trace"
 # coverage_types = ["FEAT", "REQ"]
 
+# Optional: resolve each @trace location to its enclosing CodeGraph symbol.
+# Falls back to the file-level CODE: node when the index or symbol is unavailable.
+# [providers.codegraph]
+# database = ".codegraph/codegraph.db"
+
 # ── Test traceability ──
 # Test files become TEST: nodes; any artifact ID found in a test file
 # counts as test evidence (no marker needed).
@@ -718,9 +723,11 @@ def code_refs(ctx, by_artifact, art_type):
     query = (
         "SELECT e.source_id as code_node, e.target_id as artifact_id, "
         "a.type as art_type, a.title, e.relation_type, "
-        "e.source_file, e.line_number, e.context "
+        "e.source_file, e.line_number, e.context, "
+        "c.title as code_title, c.source_file as code_file "
         "FROM edges e "
         "LEFT JOIN artifacts a ON e.target_id = a.id "
+        "LEFT JOIN artifacts c ON e.source_id = c.id "
         "WHERE e.source_id LIKE 'CODE:%'"
     )
     params: list = []
@@ -754,19 +761,22 @@ def code_refs(ctx, by_artifact, art_type):
             title = refs[0]["title"] or ""
             print(f"  [{art_type_str}] {aid} — {title[:50]}")
             for r in refs:
-                code_path = r["code_node"].removeprefix("CODE:")
-                print(f"    {code_path}:{r['line_number']}")
+                code_source = r["code_file"] or r["source_file"]
+                code_label = r["code_title"] or code_source
+                print(f"    {code_label} — {code_source}:{r['line_number']}")
             print()
     else:
         groups = {}
         for r in rows:
             groups.setdefault(r["code_node"], []).append(r)
 
-        print(f"Code references by file ({len(groups)} files):\n")
+        print(f"Code references by source ({len(groups)} sources):\n")
         for code_node in sorted(groups):
-            code_path = code_node.removeprefix("CODE:")
             refs = groups[code_node]
-            print(f"  {code_path}")
+            code_source = refs[0]["code_file"] or refs[0]["source_file"]
+            code_label = refs[0]["code_title"] or code_source
+            suffix = f" ({code_source})" if code_label != code_source else ""
+            print(f"  {code_label}{suffix}")
             for r in refs:
                 print(
                     f"    L{r['line_number']:>4d}  → [{r['art_type'] or '?'}] "

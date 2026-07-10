@@ -335,8 +335,9 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
         if code_in:
             print(f"\n── Code References ({len(code_in)}) ──")
             for r in code_in:
-                code_path = r["ref_id"].removeprefix("CODE:")
-                print(f"  {code_path}:{r['line_number']}")
+                code_source = r.get("source_file") or r["ref_id"].removeprefix("CODE:")
+                code_label = r.get("title") or code_source
+                print(f"  {code_label} — {code_source}:{r['line_number']}")
                 if r.get("context"):
                     print(f"    {r['context'][:70]}")
         return
@@ -366,8 +367,9 @@ def review(ctx, node_id_or_file, lines, nums, semantic, types):
     if code_in:
         print(f"\n── Code References ({len(code_in)}) ──")
         for r in code_in:
-            code_path = r["ref_id"].removeprefix("CODE:")
-            print(f"  {code_path}:{r['line_number']}")
+            code_source = r.get("source_file") or r["ref_id"].removeprefix("CODE:")
+            code_label = r.get("title") or code_source
+            print(f"  {code_label} — {code_source}:{r['line_number']}")
             if r.get("context"):
                 print(f"    {r['context'][:70]}")
 

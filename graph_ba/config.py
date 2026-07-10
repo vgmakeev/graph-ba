@@ -198,6 +198,12 @@ class CodeConfig:
 
 
 @dataclass
+class CodeGraphConfig:
+    """Optional CodeGraph provider for resolving code traces to symbols."""
+    database: str = ".codegraph/codegraph.db"
+
+
+@dataclass
 class TestsConfig:
     """Configuration for scanning test files for artifact ID references."""
     dirs: List[str]
@@ -278,6 +284,8 @@ class ProjectConfig:
     expected_cross_layer: Dict[str, List[Tuple[str, str]]]  # type -> [(target_type, label)]
     # Code traceability
     code: Optional[CodeConfig] = None
+    # Optional symbol-level enrichment for code traces
+    codegraph: Optional[CodeGraphConfig] = None
     # Test traceability
     tests: Optional[TestsConfig] = None
     # UI traceability
@@ -411,6 +419,16 @@ def load_config(root: Path) -> ProjectConfig:
             coverage_types=code_data.get("coverage_types", []),
         )
 
+    # ── Optional providers ──
+    providers_data = data.get("providers", {})
+    codegraph_config = None
+    if "codegraph" in providers_data:
+        codegraph_data = providers_data.get("codegraph") or {}
+        if codegraph_data.get("enabled", True):
+            codegraph_config = CodeGraphConfig(
+                database=codegraph_data.get("database", ".codegraph/codegraph.db"),
+            )
+
     # ── Tests scan config ──
     tests_data = data.get("tests")
     tests_config = None
@@ -491,6 +509,7 @@ def load_config(root: Path) -> ProjectConfig:
         expected_bidir=expected_bidir,
         expected_cross_layer=expected_cross_layer,
         code=code_config,
+        codegraph=codegraph_config,
         tests=tests_config,
         ui=ui_config,
         graph_native=graph_native_config,

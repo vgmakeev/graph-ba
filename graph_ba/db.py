@@ -205,6 +205,10 @@ def _scan_file_mtimes(root: Path, config) -> dict[str, float]:
             _remember_files(files, root.glob(pattern))
         for pattern in config.graph_native.change_files:
             _remember_files(files, root.glob(pattern))
+    if getattr(config, "codegraph", None):
+        configured_path = Path(config.codegraph.database).expanduser()
+        db_path = configured_path if configured_path.is_absolute() else root / configured_path
+        _remember_files(files, [db_path])
     return files
 
 
