@@ -153,7 +153,14 @@ def _scan_graph_native_artifact_file(
         title = attrs.get("title", "")
         _register(
             registry,
-            Artifact(artifact_id, type_id, filepath, line_number, title),
+            Artifact(
+                artifact_id,
+                type_id,
+                filepath,
+                line_number,
+                title,
+                attrs.get("origin", ""),
+            ),
             config,
         )
 

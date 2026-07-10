@@ -89,7 +89,7 @@ graph-ba audit         # structure quality: dangling refs, cycles, coverage gaps
 | `coverage` | Cross-layer coverage matrix |
 | `matrix` | Sparse JSON matrix of typed artifact relationships |
 | `artifact-state` | Fingerprints + computed implemented/verified/changing/stale state |
-| `change init/diff/context/compile/check` | Git-native semantic change workflow |
+| `change init/discover/diff/context/compile/check/approve/status` | Git-native semantic change workflow |
 | `gate <ID>` | Explore/dev/review/release readiness gate |
 | `evidence-plan <ID>` | Classify scoped AC and explain required test/evidence kinds |
 | `graph <ID>` | Agent-facing JSON graph slice with nodes, typed edges, content excerpts and findings |
@@ -173,10 +173,14 @@ canonical artifacts are edited in place and are never copied into a change
 directory.
 
 ```md
-:::artifact type="AC" id="AC-ORD-001" state="planned" title="Order live updates"
+:::artifact type="AC" id="AC-ORD-001" state="planned" origin="canonical" title="Order live updates"
 Orders update without reloading the screen.
 :::
 ```
+
+`origin` may override the type default for a block. Provider adapters must mark
+observed aliases as `implementation` or `evidence`; sharing a semantic type
+with a canonical artifact must not make an observation part of the proposal.
 
 ```yaml
 # .graphba/changes/CHG-orders-live-update.yaml
@@ -197,24 +201,37 @@ Useful commands:
 graph-ba change init CHG-orders-live-update \
   --intent "Keep the order board current without an operator reload" \
   --source RAC-ORD-014 --base-ref main
+graph-ba change discover CHG-orders-live-update
 graph-ba change diff CHG-orders-live-update
 graph-ba change check CHG-orders-live-update --stage proposal
 graph-ba change context CHG-orders-live-update
 graph-ba change compile CHG-orders-live-update
+graph-ba change approve CHG-orders-live-update --reviewer "reviewer@example.com"
+graph-ba change status CHG-orders-live-update
 graph-ba change show CHG-orders-live-update --json
 graph-ba evidence-plan CHG-orders-live-update --format md
 graph-ba change check CHG-orders-live-update --stage release --mode release
 ```
 
-`change compile` writes regeneratable review files under
-`reports/graphba/changes/<change-id>/`. The proposal fingerprint covers only
-the base commit and canonical stable-ID delta, so implementation and test edits
-do not invalidate an approved contract. `change accept` and `change archive`
-remain available only for the legacy directory layout; Git-native changes are
-accepted and archived by review, merge and Git history.
+`change init` creates `change/<change-id>` by default and refuses to mix a new
+change with a dirty worktree. Use `--no-branch` only when the caller owns the
+current Git lifecycle. `change compile` builds separate base, proposed-contract
+and delivery views, then writes the typed graph delta and transitive impact
+paths under `reports/graphba/changes/<change-id>/`.
 
-Agents can use the same read/review surface through MCP tools
-`ba_change_diff`, `ba_change_context` and `ba_change_check`.
+The canonical artifact is the accepted set of stable-ID graph-native artifact
+blocks in normal project files, not the change manifest or a generated bundle.
+The manifest records intent, sources, scope hints and the Git base. A human
+approval attestation binds reviewer, base commit and canonical proposal
+fingerprint; any later contract edit makes it stale. Implementation and test
+edits do not invalidate that approval. Merge and Git history accept and archive
+the change. `change accept` and `change archive` remain compatibility commands
+for the legacy directory layout.
+
+Agents can use the same service through MCP tools `ba_change_init`,
+`ba_change_discover`, `ba_change_diff`, `ba_change_context`,
+`ba_change_check` and `ba_change_status`. Approval is deliberately CLI-only so
+an agent-facing MCP connection cannot attest its own proposal.
 
 Use `graph` as the default agent-facing format. It returns
 `graph-ba.graph-slice.v1` JSON:

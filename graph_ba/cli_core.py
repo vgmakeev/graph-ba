@@ -13,23 +13,16 @@ import click
 from graph_ba import __version__
 from graph_ba.change_workflow import (
     ChangeWorkflowError,
-)
-from graph_ba.change_workflow import (
-    change_context as _git_change_context,
-)
-from graph_ba.change_workflow import (
-    proposal_check as _proposal_check,
-)
-from graph_ba.change_workflow import (
-    semantic_diff as _semantic_change_diff,
+    ChangeWorkflowService,
+    create_change_branch,
+    init_change,
 )
 from graph_ba.db import _fts_query, _load_nx, do_import, get_db, graph_is_stale
 
+from .gate_analysis import _change_payload, _pack_payload
 from .gates import (
-    _change_payload,
     _gate_payload,
     _graph_slice_payload,
-    _pack_payload,
     delivery_gate_payload,
 )
 from .rendering import (
@@ -572,10 +565,24 @@ def change_create(ctx, change_id, title, state, mode, scope_items):
 @click.option(
     "--scope", "scope_items", multiple=True, help="Scoped artifact ID; can be repeated"
 )
+@click.option(
+    "--branch/--no-branch",
+    "create_branch",
+    default=True,
+    help="Create change/<change-id> from the current clean branch",
+)
 @click.pass_context
-def change_init(ctx, change_id, title, intent, source_items, base_ref, scope_items):
+def change_init(
+    ctx, change_id, title, intent, source_items, base_ref, scope_items, create_branch
+):
     """Create one Git-native change manifest."""
     root = Path(ctx.obj.get("root", ".")).resolve()
+    if create_branch:
+        try:
+            binding = create_change_branch(root, change_id, base_ref=base_ref)
+        except ChangeWorkflowError as exc:
+            raise click.ClickException(str(exc)) from exc
+        base_ref = binding["base_ref"]
     path = _create_change_manifest(
         root,
         change_id,
@@ -615,30 +622,24 @@ def change_compile(ctx, change_id, mode, snapshot_path):
     compiled_dir = _change_output_path(root, change_id, manifest_path)
     compiled_dir.mkdir(parents=True, exist_ok=True)
     manifest = _read_change_manifest(manifest_path)
-    semantic_payload = None
+    service = ChangeWorkflowService(root, db)
+    compiled_change = None
     try:
-        semantic_payload = _semantic_change_diff(
-            root,
-            base_ref=str(manifest.get("base_ref") or "") or None,
-        )
+        compiled_change = service.compile(change_id)
     except ChangeWorkflowError as exc:
         if manifest_path.parent == root / ".graphba" / "changes":
             db.close()
             raise click.ClickException(str(exc)) from exc
+    semantic_payload = compiled_change["semantic"] if compiled_change else None
     graph_payload = _graph_slice_payload(
         db, root, change_id, mode, snapshot_path, "excerpt", 1200, False
     )
     gate_payload = _gate_payload(db, root, change_id, mode, snapshot_path)
     state_payload = _change_payload(db, root, change_id)
     pack_payload = _pack_payload(db, root, change_id)
-    context_payload = (
-        _git_change_context(db, semantic_payload, scope_hints=manifest.get("scope", []))
-        if semantic_payload
-        else None
-    )
-    proposal_payload = (
-        _proposal_check(semantic_payload, manifest) if semantic_payload else None
-    )
+    context_payload = compiled_change["impact"] if compiled_change else None
+    proposal_payload = service.proposal_check(change_id) if semantic_payload else None
+    approval_payload = service.approval(change_id) if semantic_payload else None
     delivery_payload = (
         delivery_gate_payload(
             db,
@@ -647,6 +648,8 @@ def change_compile(ctx, change_id, mode, snapshot_path):
             proposal_fingerprint=semantic_payload["proposal_fingerprint"],
             mode=mode,
             snapshot_path=snapshot_path,
+            approval=approval_payload,
+            require_approval=True,
         )
         if semantic_payload
         else None
@@ -663,6 +666,20 @@ def change_compile(ctx, change_id, mode, snapshot_path):
         (compiled_dir / "context.json").write_text(
             json.dumps(
                 context_payload, ensure_ascii=False, indent=2, default=str
+            ).rstrip()
+            + "\n",
+            encoding="utf-8",
+        )
+        (compiled_dir / "graph-delta.json").write_text(
+            json.dumps(
+                compiled_change["graph_delta"], ensure_ascii=False, indent=2, default=str
+            ).rstrip()
+            + "\n",
+            encoding="utf-8",
+        )
+        (compiled_dir / "impact.json").write_text(
+            json.dumps(
+                compiled_change["impact"], ensure_ascii=False, indent=2, default=str
             ).rstrip()
             + "\n",
             encoding="utf-8",
@@ -768,26 +785,18 @@ def _create_change_manifest(
     base_ref: str | None,
     scope_items: tuple[str, ...],
 ) -> Path:
-    if not re.fullmatch(r"CHG-[A-Za-z0-9][A-Za-z0-9-]*", change_id):
-        raise click.ClickException("Change ID must match CHG-<name>")
-    path = root / ".graphba" / "changes" / f"{change_id}.yaml"
-    legacy = _change_path(root, change_id)
-    if path.exists() or legacy.exists():
-        raise click.ClickException(f"Change already exists: {change_id}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [
-        f"id: {change_id}",
-        f"title: {json.dumps(title or change_id, ensure_ascii=False)}",
-        f"intent: {json.dumps(intent, ensure_ascii=False)}",
-    ]
-    if base_ref:
-        lines.append(f"base_ref: {json.dumps(base_ref, ensure_ascii=False)}")
-    lines.append("sources:")
-    lines.extend(f"  - {item}" for item in source_items)
-    lines.append("scope:")
-    lines.extend(f"  - {item}" for item in scope_items)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return path
+    try:
+        return init_change(
+            root,
+            change_id,
+            title=title,
+            intent=intent,
+            sources=source_items,
+            scope=scope_items,
+            base_ref=base_ref,
+        )
+    except ChangeWorkflowError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _create_change_dir(

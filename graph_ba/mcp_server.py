@@ -8,11 +8,8 @@ from typing import Optional
 from graph_ba.audit import run_anomalies, run_audit, run_coverage
 from graph_ba.change_workflow import (
     ChangeWorkflowError,
-    change_context,
-    find_change_manifest,
-    proposal_check,
-    read_change_manifest,
-    semantic_diff,
+    ChangeWorkflowService,
+    init_change,
 )
 from graph_ba.config import load_config
 from graph_ba.db import _fts_query, _load_nx, do_import, get_db, graph_is_stale
@@ -239,16 +236,8 @@ def ba_path(from_id: str, to_id: str, root: str = ".",
 @mcp.tool()
 def ba_change_diff(change_id: str, root: str = ".") -> dict:
     """Return the stable-ID contract delta for a Git-native change."""
-    project_root = Path(root).resolve()
-    manifest_path = find_change_manifest(project_root, change_id)
-    if not manifest_path:
-        return {"error": f"Change '{change_id}' not found", "change": change_id}
-    manifest = read_change_manifest(manifest_path)
     try:
-        return semantic_diff(
-            project_root,
-            base_ref=str(manifest.get("base_ref") or "") or None,
-        )
+        return ChangeWorkflowService(Path(root)).diff(change_id)
     except ChangeWorkflowError as exc:
         return {"error": str(exc), "change": change_id}
 
@@ -260,40 +249,77 @@ def ba_change_context(
     db_path: Optional[str] = None,
 ) -> dict:
     """Return bounded typed context for implementing a proposed contract delta."""
-    project_root = Path(root).resolve()
-    manifest_path = find_change_manifest(project_root, change_id)
-    if not manifest_path:
-        return {"error": f"Change '{change_id}' not found", "change": change_id}
-    manifest = read_change_manifest(manifest_path)
+    _, _, db = _open(root, db_path)
     try:
-        delta = semantic_diff(
-            project_root,
-            base_ref=str(manifest.get("base_ref") or "") or None,
-        )
+        return ChangeWorkflowService(Path(root), db).context(change_id)
     except ChangeWorkflowError as exc:
         return {"error": str(exc), "change": change_id}
-    _, _, db = _open(root, db_path)
-    result = change_context(db, delta, scope_hints=manifest.get("scope", []))
-    db.close()
-    return result
+    finally:
+        db.close()
 
 
 @mcp.tool()
 def ba_change_check(change_id: str, root: str = ".") -> dict:
     """Check whether a Git-native contract proposal is ready for human review."""
-    project_root = Path(root).resolve()
-    manifest_path = find_change_manifest(project_root, change_id)
-    if not manifest_path:
-        return {"error": f"Change '{change_id}' not found", "change": change_id}
-    manifest = read_change_manifest(manifest_path)
     try:
-        delta = semantic_diff(
-            project_root,
-            base_ref=str(manifest.get("base_ref") or "") or None,
-        )
+        return ChangeWorkflowService(Path(root)).proposal_check(change_id)
     except ChangeWorkflowError as exc:
         return {"error": str(exc), "change": change_id}
-    return proposal_check(delta, manifest)
+
+
+@mcp.tool()
+def ba_change_init(
+    change_id: str,
+    intent: str,
+    root: str = ".",
+    title: str = "",
+    base_ref: Optional[str] = None,
+    sources: Optional[list[str]] = None,
+    scope: Optional[list[str]] = None,
+) -> dict:
+    """Create one change manifest; branch creation remains a human CLI action."""
+    try:
+        path = init_change(
+            Path(root),
+            change_id,
+            title=title,
+            intent=intent,
+            base_ref=base_ref,
+            sources=sources or (),
+            scope=scope or (),
+        )
+        return {"change": change_id, "manifest": str(path), "created": True}
+    except ChangeWorkflowError as exc:
+        return {"error": str(exc), "change": change_id}
+
+
+@mcp.tool()
+def ba_change_discover(
+    change_id: str,
+    query: str = "",
+    root: str = ".",
+    db_path: Optional[str] = None,
+    limit: int = 20,
+) -> dict:
+    """Find likely current contract and source artifacts for a change."""
+    _, _, db = _open(root, db_path)
+    service = ChangeWorkflowService(Path(root), db)
+    try:
+        manifest = service.manifest(change_id)
+        return service.discover(query or str(manifest.get("intent") or ""), limit=limit)
+    except ChangeWorkflowError as exc:
+        return {"error": str(exc), "change": change_id}
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def ba_change_status(change_id: str, root: str = ".") -> dict:
+    """Return Git lifecycle and approval status for a change."""
+    try:
+        return ChangeWorkflowService(Path(root)).status(change_id)
+    except ChangeWorkflowError as exc:
+        return {"error": str(exc), "change": change_id}
 
 
 @mcp.tool()

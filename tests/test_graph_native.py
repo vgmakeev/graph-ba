@@ -72,7 +72,7 @@ The order screen uses ENT-Order.
     observed_dir.mkdir(parents=True)
     (observed_dir / "mini.md").write_text(
         """
-:::artifact type="ENT" id="ENT-Order" state="accepted" title="Order" depends_on="AC-ORD-001"
+:::artifact type="ENT" id="ENT-Order" state="observed" origin="implementation" title="Order" depends_on="AC-ORD-001"
 Observed mini resource.
 :::
         """.strip(),
@@ -95,6 +95,7 @@ Observed mini resource.
     assert graph.has_edge("AC-ORD-001", "ENT-Order")
     assert graph.has_edge("ENT-Order", "AC-ORD-001")
     assert graph["ENT-Order"]["AC-ORD-001"]["relation_type"] == "DEPENDS_ON"
+    assert graph.nodes["ENT-Order"]["origin"] == "implementation"
 
 
 def test_graph_native_imports_to_sqlite(tmp_path):

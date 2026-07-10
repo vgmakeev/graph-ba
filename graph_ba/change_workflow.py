@@ -7,13 +7,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import tempfile
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 from graph_ba.config import ProjectConfig, load_config
+from graph_ba.db import _fts_query
+from graph_ba.graph_snapshots import (
+    GraphSnapshotError,
+    graph_delta,
+    graph_views,
+    impact_paths,
+)
 from graph_ba.models import Artifact
 from graph_ba.traceability import scan_definitions
 
@@ -36,6 +45,119 @@ CONTEXT_RELATIONS = {
 }
 
 
+class ChangeWorkflowService:
+    """Shared Git-native workflow used by CLI and MCP adapters."""
+
+    def __init__(self, root: Path, db=None):
+        self.root = root.resolve()
+        self.db = db
+
+    def manifest_path(self, change_id: str) -> Path:
+        path = find_change_manifest(self.root, change_id)
+        if not path:
+            raise ChangeWorkflowError(f"Change not found: {change_id}")
+        return path
+
+    def manifest(self, change_id: str) -> dict[str, Any]:
+        return read_change_manifest(self.manifest_path(change_id))
+
+    def diff(self, change_id: str) -> dict[str, Any]:
+        manifest = self.manifest(change_id)
+        return semantic_diff(
+            self.root,
+            base_ref=str(manifest.get("base_ref") or "") or None,
+        )
+
+    def discover(self, query: str, *, limit: int = 20) -> dict[str, Any]:
+        if self.db is None:
+            raise ChangeWorkflowError("discover requires an imported graph")
+        return discover_candidates(self.db, query, root=self.root, limit=limit)
+
+    def compile(self, change_id: str) -> dict[str, Any]:
+        if self.db is None:
+            raise ChangeWorkflowError("compile requires an imported graph")
+        manifest = self.manifest(change_id)
+        semantic = self.diff(change_id)
+        try:
+            with graph_views(self.root, self.db, semantic["git"]["base_commit"]) as views:
+                delta = graph_delta(views, semantic)
+                impact = impact_paths(
+                    views,
+                    delta,
+                    scope_hints=tuple(manifest.get("scope", [])),
+                )
+        except GraphSnapshotError as exc:
+            raise ChangeWorkflowError(str(exc)) from exc
+        return {
+            "schema": "graph-ba.compiled-change.v1",
+            "change": change_id,
+            "semantic": semantic,
+            "graph_delta": delta,
+            "impact": impact,
+        }
+
+    def context(self, change_id: str) -> dict[str, Any]:
+        return self.compile(change_id)["impact"]
+
+    def proposal_check(self, change_id: str) -> dict[str, Any]:
+        return proposal_check(self.diff(change_id), self.manifest(change_id))
+
+    def approval(self, change_id: str) -> dict[str, Any]:
+        return approval_status(self.root, change_id, self.diff(change_id))
+
+    def approve(self, change_id: str, reviewer: str) -> dict[str, Any]:
+        if not reviewer.strip():
+            raise ChangeWorkflowError("reviewer is required")
+        change = self.diff(change_id)
+        record = {
+            "schema": "graph-ba.approval.v1",
+            "change": change_id,
+            "reviewer": reviewer.strip(),
+            "approved_at": datetime.now(timezone.utc).isoformat(),
+            "base_commit": change["git"]["base_commit"],
+            "proposal_fingerprint": change["proposal_fingerprint"],
+        }
+        path = approval_path(self.root, change_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return {**record, "path": str(path)}
+
+    def status(self, change_id: str) -> dict[str, Any]:
+        manifest_path = self.manifest_path(change_id)
+        change = self.diff(change_id)
+        approval = approval_status(self.root, change_id, change)
+        tracked = bool(
+            _git(
+                self.root,
+                "ls-files",
+                "--error-unmatch",
+                str(manifest_path.relative_to(self.root)),
+                check=False,
+                allow_empty=True,
+            )
+        )
+        lifecycle = "draft"
+        if tracked and change["git"]["branch"] not in {"main", "master", "dev"}:
+            lifecycle = "proposed"
+        if approval["valid"]:
+            lifecycle = "approved"
+        if tracked and approval["valid"] and change["git"]["branch"] in {"main", "master", "dev"}:
+            lifecycle = "accepted"
+        return {
+            "schema": "graph-ba.change-status.v1",
+            "change": change_id,
+            "lifecycle": lifecycle,
+            "git": change["git"],
+            "manifest": str(manifest_path.relative_to(self.root)),
+            "proposal_fingerprint": change["proposal_fingerprint"],
+            "contract_changes": len(change["contract"]),
+            "approval": approval,
+        }
+
+
 def find_change_manifest(root: Path, change_id: str) -> Path | None:
     """Resolve the Git-native manifest, falling back to the legacy layout."""
     root = root.resolve()
@@ -44,6 +166,67 @@ def find_change_manifest(root: Path, change_id: str) -> Path | None:
         return single_file
     legacy = root / ".graphba" / "changes" / change_id / "change.yaml"
     return legacy if legacy.is_file() else None
+
+
+def create_change_branch(
+    root: Path,
+    change_id: str,
+    *,
+    base_ref: str | None = None,
+) -> dict[str, str]:
+    """Create a clean Git branch for a change and return its binding."""
+    root = root.resolve()
+    if _git(root, "status", "--porcelain", allow_empty=True):
+        raise ChangeWorkflowError(
+            "working tree must be clean before change init; use --no-branch to keep the current branch"
+        )
+    current = _git(root, "branch", "--show-current", allow_empty=True)
+    selected_base = base_ref or current or _default_base_ref(root)
+    branch = f"change/{change_id.lower()}"
+    if current == branch:
+        return {"branch": branch, "base_ref": selected_base}
+    if _git(root, "show-ref", "--verify", f"refs/heads/{branch}", check=False, allow_empty=True):
+        raise ChangeWorkflowError(f"branch already exists: {branch}")
+    _git(root, "switch", "-c", branch, allow_empty=True)
+    return {"branch": branch, "base_ref": selected_base}
+
+
+def init_change(
+    root: Path,
+    change_id: str,
+    *,
+    title: str = "",
+    intent: str = "",
+    sources: Iterable[str] = (),
+    scope: Iterable[str] = (),
+    base_ref: str | None = None,
+    create_branch: bool = False,
+) -> Path:
+    """Create the single Git-native manifest used by both CLI and MCP."""
+    root = root.resolve()
+    if not re.fullmatch(r"CHG-[A-Za-z0-9][A-Za-z0-9-]*", change_id):
+        raise ChangeWorkflowError("Change ID must match CHG-<name>")
+    path = root / ".graphba" / "changes" / f"{change_id}.yaml"
+    legacy = root / ".graphba" / "changes" / change_id
+    if path.exists() or legacy.exists():
+        raise ChangeWorkflowError(f"Change already exists: {change_id}")
+    if create_branch:
+        binding = create_change_branch(root, change_id, base_ref=base_ref)
+        base_ref = binding["base_ref"]
+    lines = [
+        f"id: {change_id}",
+        f"title: {json.dumps(title or change_id, ensure_ascii=False)}",
+        f"intent: {json.dumps(intent, ensure_ascii=False)}",
+    ]
+    if base_ref:
+        lines.append(f"base_ref: {json.dumps(base_ref, ensure_ascii=False)}")
+    lines.append("sources:")
+    lines.extend(f"  - {item}" for item in sources)
+    lines.append("scope:")
+    lines.extend(f"  - {item}" for item in scope)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
 
 
 def read_change_manifest(path: Path) -> dict[str, Any]:
@@ -141,6 +324,102 @@ def proposal_check(change: dict[str, Any], manifest: dict[str, Any]) -> dict[str
             "findings": len(findings),
         },
         "findings": findings,
+    }
+
+
+def discover_candidates(
+    db,
+    query: str,
+    *,
+    root: Path | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Find likely contract/source artifacts for a change intent."""
+    fq = _fts_query(query)
+    sql = (
+        "SELECT a.id, a.type, a.origin, a.title, a.source_file, a.line_number, "
+        "fp.full_path AS full_source_file "
+        "FROM artifacts_fts f JOIN artifacts a ON f.rowid = a.rowid "
+        "LEFT JOIN file_paths fp ON fp.filename = a.source_file "
+        "WHERE artifacts_fts MATCH ? AND a.defined = 1 "
+        "ORDER BY CASE a.origin "
+        "WHEN 'canonical' THEN 0 WHEN 'human' THEN 1 WHEN 'derived' THEN 2 ELSE 3 END, "
+        "rank LIMIT ?"
+    )
+    rows = db.execute(sql, (fq, limit)).fetchall()
+    strategy = "all_terms"
+    if not rows:
+        tokens = list(dict.fromkeys(re.findall(r"[\w-]{3,}", query, re.UNICODE)))
+        fallback = " OR ".join(f'"{token.replace(chr(34), "")}"*' for token in tokens)
+        if fallback:
+            rows = db.execute(sql, (fallback, limit)).fetchall()
+            strategy = "any_term"
+    candidates = []
+    for row in rows:
+        neighbors = db.execute(
+            "SELECT source_id, target_id, relation_type FROM edges "
+            "WHERE (source_id = ? OR target_id = ?) AND relation_type != 'MENTIONS' "
+            "ORDER BY relation_type LIMIT 8",
+            (row["id"], row["id"]),
+        ).fetchall()
+        item = dict(row)
+        full_source = item.pop("full_source_file", "") or ""
+        if root and full_source:
+            try:
+                item["source_file"] = str(Path(full_source).resolve().relative_to(root.resolve()))
+            except ValueError:
+                item["source_file"] = full_source
+        candidates.append({
+            **item,
+            "typed_neighbors": [dict(item) for item in neighbors],
+        })
+    return {
+        "schema": "graph-ba.change-discovery.v1",
+        "query": query,
+        "strategy": strategy,
+        "candidates": candidates,
+    }
+
+
+def approval_path(root: Path, change_id: str) -> Path:
+    return root / ".graphba" / "approvals" / f"{change_id}.json"
+
+
+def approval_status(
+    root: Path,
+    change_id: str,
+    change: dict[str, Any],
+) -> dict[str, Any]:
+    path = approval_path(root, change_id)
+    if not path.is_file():
+        return {
+            "present": False,
+            "valid": False,
+            "path": str(path),
+            "reason": "missing_approval",
+        }
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "present": True,
+            "valid": False,
+            "path": str(path),
+            "reason": f"invalid_approval: {exc}",
+        }
+    expected = change["proposal_fingerprint"]
+    valid = (
+        record.get("change") == change_id
+        and record.get("base_commit") == change["git"]["base_commit"]
+        and record.get("proposal_fingerprint") == expected
+        and bool(record.get("reviewer"))
+    )
+    return {
+        "present": True,
+        "valid": valid,
+        "path": str(path),
+        "reason": "matched" if valid else "fingerprint_or_base_mismatch",
+        "record": record,
     }
 
 
@@ -290,7 +569,7 @@ def _artifact_snapshot(root: Path, config: ProjectConfig) -> dict[str, dict[str,
             snapshot[artifact.id] = {
                 "id": artifact.id,
                 "type": artifact.artifact_type,
-                "origin": type_def.origin if type_def else "",
+                "origin": artifact.origin or (type_def.origin if type_def else ""),
                 "title": artifact.title,
                 "source_file": str(path.relative_to(root)),
                 "line_number": artifact.line_number,

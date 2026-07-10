@@ -11,23 +11,13 @@ from pathlib import Path
 import click
 
 from graph_ba.audit import _issue_fingerprints, run_audit
-from graph_ba.change_workflow import (
-    ChangeWorkflowError,
-)
-from graph_ba.change_workflow import (
-    change_context as _git_change_context,
-)
-from graph_ba.change_workflow import (
-    proposal_check as _proposal_check,
-)
-from graph_ba.change_workflow import (
-    semantic_diff as _semantic_change_diff,
-)
+from graph_ba.change_workflow import ChangeWorkflowError, ChangeWorkflowService
 from graph_ba.lint import do_lint
 from graph_ba.review import run_review
 
 from .artifact_state import _load_fingerprint_snapshot
-from .gates import _change_payload, _gate_payload, delivery_gate_payload
+from .gate_analysis import _change_payload
+from .gates import _gate_payload, delivery_gate_payload
 
 from .cli_core import (
     _change_manifest_path,
@@ -48,24 +38,13 @@ from .cli_core import (
 def change_context(ctx, change_id):
     """Show bounded implementation context for the proposed contract delta."""
     root = Path(ctx.obj.get("root", ".")).resolve()
-    manifest_path = _change_manifest_path(root, change_id)
-    if not manifest_path:
-        raise click.ClickException(f"Change not found: {change_id}")
-    manifest = _read_change_manifest(manifest_path)
-    try:
-        semantic_payload = _semantic_change_diff(
-            root,
-            base_ref=str(manifest.get("base_ref") or "") or None,
-        )
-    except ChangeWorkflowError as exc:
-        raise click.ClickException(str(exc)) from exc
     db = _conn(ctx)
     _require_graph(ctx, db)
-    payload = _git_change_context(
-        db,
-        semantic_payload,
-        scope_hints=manifest.get("scope", []),
-    )
+    try:
+        payload = ChangeWorkflowService(root, db).context(change_id)
+    except ChangeWorkflowError as exc:
+        db.close()
+        raise click.ClickException(str(exc)) from exc
     db.close()
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
@@ -96,36 +75,25 @@ def change_check(ctx, change_id, stage, mode, snapshot_path):
     """Evaluate proposal readability or the existing delivery gate."""
     root = Path(ctx.obj.get("root", ".")).resolve()
     if stage == "proposal":
-        manifest_path = _change_manifest_path(root, change_id)
-        if not manifest_path:
-            raise click.ClickException(f"Change not found: {change_id}")
-        manifest = _read_change_manifest(manifest_path)
         try:
-            semantic_payload = _semantic_change_diff(
-                root,
-                base_ref=str(manifest.get("base_ref") or "") or None,
-            )
+            result = ChangeWorkflowService(root).proposal_check(change_id)
         except ChangeWorkflowError as exc:
             raise click.ClickException(str(exc)) from exc
-        result = _proposal_check(semantic_payload, manifest)
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         if not result["pass"]:
             raise click.ClickException(f"Proposal check failed: {result['verdict']}")
         return
     if stage == "release":
-        manifest_path = _change_manifest_path(root, change_id)
-        if not manifest_path:
-            raise click.ClickException(f"Change not found: {change_id}")
-        manifest = _read_change_manifest(manifest_path)
-        try:
-            semantic_payload = _semantic_change_diff(
-                root,
-                base_ref=str(manifest.get("base_ref") or "") or None,
-            )
-        except ChangeWorkflowError as exc:
-            raise click.ClickException(str(exc)) from exc
         db = _conn(ctx)
         _require_graph(ctx, db)
+        service = ChangeWorkflowService(root, db)
+        try:
+            semantic_payload = service.diff(change_id)
+            manifest = service.manifest(change_id)
+            approval = service.approval(change_id)
+        except ChangeWorkflowError as exc:
+            db.close()
+            raise click.ClickException(str(exc)) from exc
         result = delivery_gate_payload(
             db,
             root,
@@ -133,6 +101,8 @@ def change_check(ctx, change_id, stage, mode, snapshot_path):
             proposal_fingerprint=semantic_payload["proposal_fingerprint"],
             mode=mode,
             snapshot_path=snapshot_path,
+            approval=approval,
+            require_approval=True,
         )
         db.close()
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
@@ -146,6 +116,20 @@ def change_check(ctx, change_id, stage, mode, snapshot_path):
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     if not result["pass"]:
         raise click.ClickException(f"Gate failed: {result['verdict']}")
+
+
+@change_group.command("approve")
+@click.argument("change_id")
+@click.option("--reviewer", required=True, help="Human reviewer identity")
+@click.pass_context
+def change_approve(ctx, change_id, reviewer):
+    """Write a human approval attestation for the current contract fingerprint."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    try:
+        payload = ChangeWorkflowService(root).approve(change_id, reviewer)
+    except ChangeWorkflowError as exc:
+        raise click.ClickException(str(exc)) from exc
+    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
 
 @change_group.command("accept")

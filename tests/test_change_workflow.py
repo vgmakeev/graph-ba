@@ -3,13 +3,14 @@ import subprocess
 
 from click.testing import CliRunner
 
-from graph_ba.change_workflow import proposal_check, semantic_diff
+from graph_ba.change_workflow import ChangeWorkflowService, proposal_check, semantic_diff
 from graph_ba.cli import cli
+from graph_ba.db import do_import, get_db
 
 
 CONFIG = r"""
 [scan]
-dirs = ["docs", ".graphba"]
+dirs = ["docs", ".graphba", "reports/graphba/observed"]
 
 [types.CHG]
 label = "Changes"
@@ -23,6 +24,12 @@ origin = "canonical"
 ref = '(AC-[A-Z]+-\d{3})'
 classify = 'AC-[A-Z]+-\d{3}'
 
+[types.ENT]
+label = "Entities"
+origin = "canonical"
+ref = '(ENT-[A-Za-z0-9-]+)'
+classify = 'ENT-[A-Za-z0-9-]+'
+
 [[definitions]]
 type = "AC"
 file = "docs/spec.md"
@@ -30,7 +37,7 @@ mode = "heading"
 pattern = '^##\s+(AC-[A-Z]+-\d{3})\s+-\s+(.*)'
 
 [graph_native]
-dirs = [".graphba"]
+dirs = [".graphba", "reports/graphba/observed"]
 change_files = [".graphba/changes/*/change.yaml"]
 """
 
@@ -51,6 +58,12 @@ def _project(tmp_path):
     (tmp_path / "docs" / "spec.md").write_text(
         "## AC-ORD-001 - Create order\nOriginal behavior.\n\n"
         "## AC-ORD-002 - Cancel order\nCancellation behavior.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".graphba").mkdir()
+    (tmp_path / ".graphba" / "linked.md").write_text(
+        ':::artifact type="AC" id="AC-ORD-003" title="Legacy order rule" '
+        'traces_to="AC-ORD-001"\nLegacy behavior.\n:::\n',
         encoding="utf-8",
     )
     _git(tmp_path, "init", "-b", "main")
@@ -183,3 +196,123 @@ def test_proposal_check_requires_intent_and_contract_delta():
         "missing_intent",
         "empty_contract_delta",
     }
+
+
+def test_compiled_graph_keeps_removed_artifact_and_base_impact_path(tmp_path):
+    root = _project(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root",
+            str(root),
+            "change",
+            "init",
+            "CHG-remove-legacy",
+            "--intent",
+            "Remove legacy behavior",
+            "--base-ref",
+            "main",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    (root / ".graphba" / "linked.md").unlink()
+    db = get_db(root / "reports" / "graph.db")
+    do_import(root, db, quiet=True, force=True)
+
+    compiled = ChangeWorkflowService(root, db).compile("CHG-remove-legacy")
+    db.close()
+
+    removed = [
+        item for item in compiled["graph_delta"]["nodes"]
+        if item["operation"] == "remove"
+    ]
+    assert [item["id"] for item in removed] == ["AC-ORD-003"]
+    ac_001 = next(item for item in compiled["impact"]["nodes"] if item["id"] == "AC-ORD-001")
+    assert ac_001["path"][0]["view"] == "base"
+    assert ac_001["path"][0]["relation"] == "TRACES_TO"
+
+
+def test_approval_is_invalidated_by_contract_edit(tmp_path):
+    root = _project(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root",
+            str(root),
+            "change",
+            "init",
+            "CHG-approve-order",
+            "--intent",
+            "Clarify order behavior",
+            "--base-ref",
+            "main",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    spec = root / "docs" / "spec.md"
+    spec.write_text(spec.read_text().replace("Original behavior.", "Approved behavior."))
+    service = ChangeWorkflowService(root)
+
+    service.approve("CHG-approve-order", "reviewer@example.test")
+    assert service.approval("CHG-approve-order")["valid"] is True
+
+    spec.write_text(spec.read_text().replace("Approved behavior.", "Changed after approval."))
+    assert service.approval("CHG-approve-order")["valid"] is False
+
+
+def test_discover_returns_source_location(tmp_path):
+    root = _project(tmp_path)
+    db = get_db(root / "reports" / "graph.db")
+    do_import(root, db, quiet=True, force=True)
+
+    payload = ChangeWorkflowService(root, db).discover("Create order")
+    db.close()
+
+    candidate = next(item for item in payload["candidates"] if item["id"] == "AC-ORD-001")
+    assert candidate["source_file"] == "docs/spec.md"
+    assert candidate["line_number"] == 1
+
+    fallback_db = get_db(root / "reports" / "graph.db")
+    payload = ChangeWorkflowService(root, fallback_db).discover("unmatched words plus order")
+    fallback_db.close()
+    assert payload["strategy"] == "any_term"
+    assert any(item["id"] == "AC-ORD-001" for item in payload["candidates"])
+
+
+def test_observed_alias_and_dangling_reference_are_not_contract_delta(tmp_path):
+    root = _project(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root",
+            str(root),
+            "change",
+            "init",
+            "CHG-observed-order",
+            "--intent",
+            "Observe delivery without changing the contract",
+            "--base-ref",
+            "main",
+            "--scope",
+            "AC-ORD-001",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    observed = root / "reports" / "graphba" / "observed"
+    observed.mkdir(parents=True)
+    (observed / "mini.md").write_text(
+        ':::artifact type="ENT" id="ENT-Order" state="observed" '
+        'origin="implementation" title="Order" traces_to="AC-MISSING-999"\n'
+        "Observed provider alias.\n:::\n",
+        encoding="utf-8",
+    )
+    db = get_db(root / "reports" / "graph.db")
+    do_import(root, db, quiet=True, force=True)
+
+    compiled = ChangeWorkflowService(root, db).compile("CHG-observed-order")
+    db.close()
+
+    assert compiled["graph_delta"]["nodes"] == []
