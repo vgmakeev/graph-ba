@@ -265,7 +265,10 @@ class GraphNativeConfig:
     dirs: List[str] = field(default_factory=list)
     files: List[str] = field(default_factory=list)
     artifact_extensions: List[str] = field(default_factory=lambda: ["md"])
-    change_files: List[str] = field(default_factory=lambda: [".graphba/changes/*/change.yaml"])
+    change_files: List[str] = field(default_factory=lambda: [
+        ".graphba/changes/*.yaml",
+        ".graphba/changes/*/change.yaml",
+    ])
     change_type: str = "CHG"
     change_origin: str = "derived"
     scope_relation_type: str = "DEPENDS_ON"

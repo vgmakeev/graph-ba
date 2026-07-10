@@ -89,7 +89,7 @@ graph-ba audit         # structure quality: dangling refs, cycles, coverage gaps
 | `coverage` | Cross-layer coverage matrix |
 | `matrix` | Sparse JSON matrix of typed artifact relationships |
 | `artifact-state` | Fingerprints + computed implemented/verified/changing/stale state |
-| `change create/show/accept/archive` | Minimal graph-native change workflow |
+| `change init/diff/context/compile/check` | Git-native semantic change workflow |
 | `gate <ID>` | Explore/dev/review/release readiness gate |
 | `evidence-plan <ID>` | Classify scoped AC and explain required test/evidence kinds |
 | `graph <ID>` | Agent-facing JSON graph slice with nodes, typed edges, content excerpts and findings |
@@ -164,10 +164,13 @@ Everything else is computed from graph facts:
 - `stale`: current content/link/observed/evidence fingerprint differs from
   the accepted snapshot.
 
-### graph-native changes, gates and packs
+### Git-native changes, gates and packs
 
-Graph-native projects can define artifacts in markdown blocks and scope them
-through `.graphba/changes/<change-id>/change.yaml`:
+Git owns the change lifecycle: branch is the draft, pull request is the
+proposal, protected review is approval, and merge is acceptance. graph-ba adds
+one semantic manifest and computes the actual artifact delta from stable IDs;
+canonical artifacts are edited in place and are never copied into a change
+directory.
 
 ```md
 :::artifact type="AC" id="AC-ORD-001" state="planned" title="Order live updates"
@@ -176,10 +179,14 @@ Orders update without reloading the screen.
 ```
 
 ```yaml
+# .graphba/changes/CHG-orders-live-update.yaml
 id: CHG-orders-live-update
 title: Live updates for orders
-state: planned
-mode: review
+intent: Keep the order board current without an operator reload
+base_ref: main
+sources:
+  - RAC-ORD-014
+# Optional discovery hints; the actual scope comes from semantic Git diff.
 scope:
   - AC-ORD-001
 ```
@@ -187,14 +194,27 @@ scope:
 Useful commands:
 
 ```bash
-graph-ba change create CHG-orders-live-update --scope AC-ORD-001
+graph-ba change init CHG-orders-live-update \
+  --intent "Keep the order board current without an operator reload" \
+  --source RAC-ORD-014 --base-ref main
+graph-ba change diff CHG-orders-live-update
+graph-ba change check CHG-orders-live-update --stage proposal
+graph-ba change context CHG-orders-live-update
+graph-ba change compile CHG-orders-live-update
 graph-ba change show CHG-orders-live-update --json
-graph-ba graph CHG-orders-live-update --out .graphba/changes/CHG-orders-live-update/compiled/graph.json
 graph-ba evidence-plan CHG-orders-live-update --format md
-graph-ba pack CHG-orders-live-update --out .graphba/changes/CHG-orders-live-update/compiled/pack.md
-graph-ba gate CHG-orders-live-update --mode review
-graph-ba change accept CHG-orders-live-update --snapshot .graphba/state/accepted-fingerprints.json
+graph-ba change check CHG-orders-live-update --stage release --mode release
 ```
+
+`change compile` writes regeneratable review files under
+`reports/graphba/changes/<change-id>/`. The proposal fingerprint covers only
+the base commit and canonical stable-ID delta, so implementation and test edits
+do not invalidate an approved contract. `change accept` and `change archive`
+remain available only for the legacy directory layout; Git-native changes are
+accepted and archived by review, merge and Git history.
+
+Agents can use the same read/review surface through MCP tools
+`ba_change_diff`, `ba_change_context` and `ba_change_check`.
 
 Use `graph` as the default agent-facing format. It returns
 `graph-ba.graph-slice.v1` JSON:
