@@ -12,6 +12,7 @@ import click
 
 from graph_ba.audit import _issue_fingerprints, run_audit
 from graph_ba.change_workflow import ChangeWorkflowError, ChangeWorkflowService
+from graph_ba.change_review import build_change_review, render_change_review
 from graph_ba.lint import do_lint
 from graph_ba.review import run_review
 
@@ -47,6 +48,84 @@ def change_context(ctx, change_id):
         raise click.ClickException(str(exc)) from exc
     db.close()
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+
+
+@change_group.command("rebase-check")
+@click.argument("change_id")
+@click.pass_context
+def change_rebase_check(ctx, change_id):
+    """Detect semantic conflicts with the configured integration target ref."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    try:
+        payload = ChangeWorkflowService(root).rebase_status(change_id)
+    except ChangeWorkflowError as exc:
+        raise click.ClickException(str(exc)) from exc
+    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    if payload["status"] in {"conflict", "unavailable"}:
+        raise click.ClickException(f"Semantic rebase check failed: {payload['status']}")
+
+
+@change_group.command("review")
+@click.argument("change_id")
+@click.option(
+    "--mode",
+    default="review",
+    type=click.Choice(["explore", "dev", "review", "release"]),
+)
+@click.option(
+    "--snapshot",
+    "snapshot_path",
+    type=click.Path(path_type=Path),
+    default=None,
+)
+@click.option("--out", "out_path", type=click.Path(path_type=Path), default=None)
+@click.pass_context
+def change_review(ctx, change_id, mode, snapshot_path, out_path):
+    """Render one human review across intent, delta, impact and delivery gates."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    db = _conn(ctx)
+    _require_graph(ctx, db)
+    service = ChangeWorkflowService(root, db)
+    try:
+        manifest = service.manifest(change_id)
+        compiled = service.compile(change_id)
+        proposal = service.proposal_check(change_id)
+        approval = service.approval(change_id)
+    except ChangeWorkflowError as exc:
+        db.close()
+        raise click.ClickException(str(exc)) from exc
+    semantic = compiled["semantic"]
+    delivery = delivery_gate_payload(
+        db,
+        root,
+        _delivery_target_ids(db, semantic, manifest),
+        proposal_fingerprint=semantic["proposal_fingerprint"],
+        mode=mode,
+        snapshot_path=snapshot_path,
+        approval=approval,
+        require_approval=True,
+    )
+    db.close()
+    payload = build_change_review(
+        change_id,
+        manifest,
+        compiled,
+        proposal,
+        approval,
+        delivery,
+    )
+    text = (
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n"
+        if ctx.obj.get("json")
+        else render_change_review(payload)
+    )
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text, encoding="utf-8")
+        if not ctx.obj.get("json"):
+            print(f"Wrote change review: {out_path}")
+        return
+    print(text, end="")
 
 
 @change_group.command("check")
@@ -121,12 +200,17 @@ def change_check(ctx, change_id, stage, mode, snapshot_path):
 @change_group.command("approve")
 @click.argument("change_id")
 @click.option("--reviewer", required=True, help="Human reviewer identity")
+@click.option(
+    "--evidence",
+    required=True,
+    help="Protected PR/review URL or other external human-review evidence",
+)
 @click.pass_context
-def change_approve(ctx, change_id, reviewer):
+def change_approve(ctx, change_id, reviewer, evidence):
     """Write a human approval attestation for the current contract fingerprint."""
     root = Path(ctx.obj.get("root", ".")).resolve()
     try:
-        payload = ChangeWorkflowService(root).approve(change_id, reviewer)
+        payload = ChangeWorkflowService(root).approve(change_id, reviewer, evidence)
     except ChangeWorkflowError as exc:
         raise click.ClickException(str(exc)) from exc
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))

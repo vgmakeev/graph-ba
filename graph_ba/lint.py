@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from graph_ba.db import _FileCache, _resolve_file
+from graph_ba.scanning import canonical_ownership_findings
 
 _TODO_DEFAULT = re.compile(
     r'(?:TODO|TBD|FIXME|\?\?\?)', re.IGNORECASE
@@ -373,6 +374,14 @@ def do_lint(db, root: Path, config, node_id: Optional[str] = None,
         findings.extend(_lint_stale(db, root, config, node_id))
 
     findings.extend(_lint_code_coverage(db, config, node_id))
+    if config:
+        findings.extend(
+            canonical_ownership_findings(
+                root,
+                config,
+                {node_id} if node_id else None,
+            )
+        )
 
     # Sort: ERR first, then WARN, then INFO; within same severity — by artifact
     sev_order = {"ERR": 0, "WARN": 1, "INFO": 2}

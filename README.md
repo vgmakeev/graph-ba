@@ -187,7 +187,8 @@ with a canonical artifact must not make an observation part of the proposal.
 id: CHG-orders-live-update
 title: Live updates for orders
 intent: Keep the order board current without an operator reload
-base_ref: main
+base_ref: 0123456789abcdef0123456789abcdef01234567
+target_ref: main
 sources:
   - RAC-ORD-014
 # Optional discovery hints; the actual scope comes from semantic Git diff.
@@ -200,23 +201,32 @@ Useful commands:
 ```bash
 graph-ba change init CHG-orders-live-update \
   --intent "Keep the order board current without an operator reload" \
-  --source RAC-ORD-014 --base-ref main
+  --source RAC-ORD-014 --base-ref main \
+  --worktree ../project-chg-orders-live-update
 graph-ba change discover CHG-orders-live-update
+graph-ba change add-artifact CHG-orders-live-update FLOW FLOW-ORDERS-LIVE \
+  --title "Keep the order board live" --link TRACES_TO=AC-ORD-001
+graph-ba change add-link CHG-orders-live-update FLOW-ORDERS-LIVE CONTAINS AC-ORD-001
 graph-ba change diff CHG-orders-live-update
+graph-ba change rebase-check CHG-orders-live-update
 graph-ba change check CHG-orders-live-update --stage proposal
 graph-ba change context CHG-orders-live-update
 graph-ba change compile CHG-orders-live-update
-graph-ba change approve CHG-orders-live-update --reviewer "reviewer@example.com"
+graph-ba change review CHG-orders-live-update --out reports/change-review.md
+graph-ba change approve CHG-orders-live-update \
+  --reviewer "reviewer@example.com" \
+  --evidence "https://github.com/org/repo/pull/123"
 graph-ba change status CHG-orders-live-update
 graph-ba change show CHG-orders-live-update --json
 graph-ba evidence-plan CHG-orders-live-update --format md
 graph-ba change check CHG-orders-live-update --stage release --mode release
 ```
 
-`change init` creates `change/<change-id>` by default and refuses to mix a new
-change with a dirty worktree. Use `--no-branch` only when the caller owns the
-current Git lifecycle. A dedicated Git worktree is the recommended way to run
-parallel changes without mixing their filesystem state.
+`change init --worktree PATH` is the recommended default. It creates an
+isolated `change/<change-id>` branch without touching a dirty primary checkout,
+stores an immutable `base_ref` commit and remembers the integration
+`target_ref`. Plain `change init` switches the current clean checkout to a
+change branch. Use `--no-branch` only when the caller owns the Git lifecycle.
 
 `change discover` starts with manifest `sources` and `scope`; free-text search
 only supplements those seeds. `change diff` preserves the complete Git file
@@ -229,20 +239,43 @@ then writes the typed graph delta and transitive impact paths under
 `reports/graphba/changes/<change-id>/`. Historical base graphs are cached per
 repository, commit and graph-ba schema in the user cache directory; repeated
 `compile`, `context` and release checks do not rescan the same Git tree.
+`change rebase-check` compares stable-ID changes on `target_ref` since the
+recorded base and fails only on overlapping artifacts or proposal-policy
+changes. `change review` renders intent, sources, files, semantic/graph delta,
+impact, rebase state, approval and delivery findings as one Markdown or JSON
+payload.
+
+Proposal fingerprints bind both canonical artifact deltas and the project
+files that define graph/gate meaning (`graph-ba.toml`, project/class matrices
+and evidence policy). Changing those files invalidates approval. Duplicate
+canonical definitions fail proposal review unless exactly one owning file has
+the migration marker:
+
+```md
+<!-- graph-ba: canonical-owner -->
+```
+
+`change add-artifact` and `change add-link` validate type/ID classification,
+relation vocabulary, owner ambiguity and target paths before editing. The same
+agent-safe operations are exposed through MCP.
 
 The canonical artifact is the accepted set of stable-ID graph-native artifact
 blocks in normal project files, not the change manifest or a generated bundle.
 The manifest records intent, sources, scope hints and the Git base. A human
-approval attestation binds reviewer, base commit and canonical proposal
-fingerprint; any later contract edit makes it stale. Implementation and test
-edits do not invalidate that approval. Merge and Git history accept and archive
-the change. `change accept` and `change archive` remain compatibility commands
-for the legacy directory layout.
+approval attestation binds reviewer, external review evidence, review commit,
+base commit and canonical proposal fingerprint. Proposal files must be
+committed before approval; the approval record must itself be committed before
+release accepts it. Later contract/policy edits or a non-ancestor review commit
+make it stale. Implementation and test edits do not invalidate approval. A
+protected PR/branch remains the external trust boundary. Merge and Git history
+accept and archive the change. `change accept` and `change archive` remain
+compatibility commands for the legacy directory layout.
 
 Agents can use the same service through MCP tools `ba_change_init`,
 `ba_change_discover`, `ba_change_diff`, `ba_change_context`,
-`ba_change_check` and `ba_change_status`. Approval is deliberately CLI-only so
-an agent-facing MCP connection cannot attest its own proposal.
+`ba_change_check`, `ba_change_rebase_check`, `ba_change_add_artifact`,
+`ba_change_add_link` and `ba_change_status`. Approval is deliberately CLI-only
+so an agent-facing MCP connection cannot attest its own proposal.
 
 Use `graph` as the default agent-facing format. It returns
 `graph-ba.graph-slice.v1` JSON:

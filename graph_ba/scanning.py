@@ -79,6 +79,121 @@ def scan_definitions(root: Path, config: ProjectConfig) -> dict[str, Artifact]:
     return registry
 
 
+def scan_definition_occurrences(
+    root: Path,
+    config: ProjectConfig,
+) -> dict[str, list[Artifact]]:
+    """Return every definition occurrence before stable-ID owner selection."""
+    occurrences: dict[str, list[Artifact]] = {}
+
+    def add(artifact: Artifact) -> None:
+        artifact.id = normalize_id(artifact.id, config)
+        occurrences.setdefault(artifact.id, []).append(artifact)
+
+    for rule in config.definitions:
+        paths = (
+            sorted(root.glob(rule.file))
+            if "*" in rule.file or "?" in rule.file
+            else [root / rule.file]
+        )
+        for filepath in paths:
+            if not filepath.exists():
+                continue
+            for line_number, line in enumerate(_read_lines(filepath), 1):
+                match = rule.pattern.match(line)
+                if not match or match.group(1) is None:
+                    continue
+                title = ""
+                if rule.mode == "heading" and match.lastindex and match.lastindex >= 2:
+                    title = match.group(2).strip()
+                elif rule.mode == "table":
+                    columns = [column.strip() for column in line.split("|")]
+                    title = columns[2] if len(columns) > 2 else ""
+                add(Artifact(match.group(1), rule.type_id, filepath, line_number, title))
+
+    if config.graph_native:
+        for filepath in _graph_native_artifact_files(root, config):
+            for line_number, line in enumerate(_read_lines(filepath), 1):
+                marker = re.match(r"^\s*:::artifact\s+(.+?)\s*$", line)
+                if not marker:
+                    continue
+                attrs = _parse_graph_native_attrs(marker.group(1))
+                if attrs.get("id") and attrs.get("type"):
+                    add(
+                        Artifact(
+                            attrs["id"],
+                            attrs["type"],
+                            filepath,
+                            line_number,
+                            attrs.get("title", ""),
+                            attrs.get("origin", ""),
+                        )
+                    )
+    return occurrences
+
+
+def canonical_ownership_findings(
+    root: Path,
+    config: ProjectConfig,
+    artifact_ids: set[str] | None = None,
+) -> list[dict[str, object]]:
+    """Report ambiguous canonical definitions or explicit migration shadows."""
+    findings: list[dict[str, object]] = []
+    occurrences = scan_definition_occurrences(root, config)
+    for artifact_id, items in sorted(occurrences.items()):
+        if artifact_ids is not None and artifact_id not in artifact_ids:
+            continue
+        canonical = [
+            item
+            for item in items
+            if (item.origin or getattr(config.types.get(item.artifact_type), "origin", ""))
+            == "canonical"
+        ]
+        if len(canonical) < 2:
+            continue
+        files = {item.source_file.resolve() for item in canonical}
+        if len(files) == 1:
+            path = next(iter(files))
+            relative = str(path.relative_to(root))
+            findings.append({
+                "severity": "ERR",
+                "category": "DUPLICATE_CANONICAL_OWNER",
+                "artifact_id": artifact_id,
+                "file": relative,
+                "line": 0,
+                "message": f"duplicate canonical definitions in one file: {relative}",
+            })
+            continue
+        owners = [
+            path
+            for path in files
+            if "<!-- graph-ba: canonical-owner -->" in path.read_text(encoding="utf-8")
+        ]
+        relative_files = sorted(str(path.relative_to(root)) for path in files)
+        if len(owners) == 1:
+            owner = str(owners[0].relative_to(root))
+            findings.append({
+                "severity": "INFO",
+                "category": "CANONICAL_MIGRATION_SHADOW",
+                "artifact_id": artifact_id,
+                "file": owner,
+                "line": 0,
+                "message": f"canonical owner {owner}; shadowed definitions: "
+                + ", ".join(path for path in relative_files if path != owner),
+            })
+        else:
+            findings.append({
+                "severity": "ERR",
+                "category": "DUPLICATE_CANONICAL_OWNER",
+                "artifact_id": artifact_id,
+                "file": "",
+                "line": 0,
+                "message": "expected exactly one canonical-owner marker across: "
+                + ", ".join(relative_files),
+            })
+    return findings
+
+
 def _scan_heading(registry, filepath, pattern, type_id, config):
     if not filepath.exists():
         return
@@ -231,7 +346,15 @@ def _read_graph_native_change(filepath: Path) -> dict[str, object]:
                     if item.strip()
                 )
             continue
-        if key in {"id", "title", "intent", "base_ref", "state", "mode"}:
+        if key in {
+            "id",
+            "title",
+            "intent",
+            "base_ref",
+            "target_ref",
+            "state",
+            "mode",
+        }:
             data[key] = value.strip("\"'")
             data.setdefault("_line", line_number)
     for key, values in lists.items():

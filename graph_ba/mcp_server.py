@@ -11,6 +11,7 @@ from graph_ba.change_workflow import (
     ChangeWorkflowService,
     init_change,
 )
+from graph_ba.change_authoring import ChangeAuthoringError, add_artifact, add_link
 from graph_ba.config import load_config
 from graph_ba.db import _fts_query, _load_nx, do_import, get_db, graph_is_stale
 from graph_ba.review import run_review
@@ -274,6 +275,7 @@ def ba_change_init(
     root: str = ".",
     title: str = "",
     base_ref: Optional[str] = None,
+    target_ref: Optional[str] = None,
     sources: Optional[list[str]] = None,
     scope: Optional[list[str]] = None,
 ) -> dict:
@@ -285,6 +287,7 @@ def ba_change_init(
             title=title,
             intent=intent,
             base_ref=base_ref,
+            target_ref=target_ref,
             sources=sources or (),
             scope=scope or (),
         )
@@ -306,7 +309,11 @@ def ba_change_discover(
     service = ChangeWorkflowService(Path(root), db)
     try:
         manifest = service.manifest(change_id)
-        return service.discover(query or str(manifest.get("intent") or ""), limit=limit)
+        return service.discover(
+            query or str(manifest.get("intent") or ""),
+            limit=limit,
+            seed_ids=[*manifest.get("sources", []), *manifest.get("scope", [])],
+        )
     except ChangeWorkflowError as exc:
         return {"error": str(exc), "change": change_id}
     finally:
@@ -319,6 +326,61 @@ def ba_change_status(change_id: str, root: str = ".") -> dict:
     try:
         return ChangeWorkflowService(Path(root)).status(change_id)
     except ChangeWorkflowError as exc:
+        return {"error": str(exc), "change": change_id}
+
+
+@mcp.tool()
+def ba_change_rebase_check(change_id: str, root: str = ".") -> dict:
+    """Return semantic overlap with the change target ref; never mutates Git."""
+    try:
+        return ChangeWorkflowService(Path(root)).rebase_status(change_id)
+    except ChangeWorkflowError as exc:
+        return {"error": str(exc), "change": change_id}
+
+
+@mcp.tool()
+def ba_change_add_artifact(
+    change_id: str,
+    artifact_type: str,
+    artifact_id: str,
+    title: str,
+    root: str = ".",
+    body: str = "",
+    target_file: Optional[str] = None,
+    state: str = "active",
+    links: Optional[list[str]] = None,
+    migrate: bool = False,
+) -> dict:
+    """Append one validated graph-native artifact; cannot approve a change."""
+    try:
+        return add_artifact(
+            Path(root),
+            change_id,
+            artifact_type,
+            artifact_id,
+            title=title,
+            body=body,
+            target_file=target_file,
+            state=state,
+            links=links or (),
+            migrate=migrate,
+        )
+    except ChangeAuthoringError as exc:
+        return {"error": str(exc), "change": change_id}
+
+
+@mcp.tool()
+def ba_change_add_link(
+    change_id: str,
+    source_id: str,
+    relation: str,
+    target_id: str,
+    root: str = ".",
+) -> dict:
+    """Add one validated typed link; cannot approve a change."""
+    try:
+        return add_link(Path(root), change_id, source_id, relation, target_id)
+    except ChangeAuthoringError as exc:
         return {"error": str(exc), "change": change_id}
 
 

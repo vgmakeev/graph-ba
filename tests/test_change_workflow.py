@@ -189,6 +189,15 @@ def test_change_init_is_one_manifest_and_proposal_check_uses_computed_delta(tmp_
     assert (report_dir / "proposal-check.json").is_file()
     assert (report_dir / "delivery-check.json").is_file()
 
+    review_result = runner.invoke(
+        cli,
+        ["--root", str(root), "change", "review", "CHG-order-create"],
+    )
+    assert review_result.exit_code == 0, review_result.output
+    assert "# graph-ba review: CHG-order-create" in review_result.output
+    assert "## Semantic Delta" in review_result.output
+    assert "AC-ORD-001" in review_result.output
+
     release_result = runner.invoke(
         cli,
         [
@@ -280,11 +289,237 @@ def test_approval_is_invalidated_by_contract_edit(tmp_path):
     spec.write_text(spec.read_text().replace("Original behavior.", "Approved behavior."))
     service = ChangeWorkflowService(root)
 
-    service.approve("CHG-approve-order", "reviewer@example.test")
+    _git(root, "add", ".graphba/changes/CHG-approve-order.yaml", "docs/spec.md")
+    _git(root, "commit", "-m", "Propose approved order behavior")
+    service.approve(
+        "CHG-approve-order",
+        "reviewer@example.test",
+        "https://example.test/reviews/1",
+    )
+    assert service.approval("CHG-approve-order")["reason"] == "approval_not_committed"
+    _git(root, "add", ".graphba/approvals/CHG-approve-order.json")
+    _git(root, "commit", "-m", "Record human approval")
     assert service.approval("CHG-approve-order")["valid"] is True
+
+    approval = root / ".graphba" / "approvals" / "CHG-approve-order.json"
+    approval.write_text(approval.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    status = service.approval("CHG-approve-order")
+    assert status["valid"] is False
+    assert status["reason"] == "approval_not_committed"
+    _git(root, "checkout", "--", ".graphba/approvals/CHG-approve-order.json")
 
     spec.write_text(spec.read_text().replace("Approved behavior.", "Changed after approval."))
     assert service.approval("CHG-approve-order")["valid"] is False
+
+
+def test_approval_is_invalidated_by_proposal_policy_edit(tmp_path):
+    root = _project(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root",
+            str(root),
+            "change",
+            "init",
+            "CHG-policy-order",
+            "--intent",
+            "Bind evidence policy",
+            "--base-ref",
+            "main",
+            "--no-branch",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    spec = root / "docs" / "spec.md"
+    spec.write_text(spec.read_text().replace("Original behavior.", "Policy-bound behavior."))
+    service = ChangeWorkflowService(root)
+    _git(root, "add", ".graphba/changes/CHG-policy-order.yaml", "docs/spec.md")
+    _git(root, "commit", "-m", "Propose policy-bound behavior")
+    service.approve(
+        "CHG-policy-order",
+        "reviewer@example.test",
+        "https://example.test/reviews/2",
+    )
+    _git(root, "add", ".graphba/approvals/CHG-policy-order.json")
+    _git(root, "commit", "-m", "Record policy approval")
+    assert service.approval("CHG-policy-order")["valid"] is True
+
+    (root / ".graphba" / "evidence-policy.json").write_text(
+        '{"gate_blocking_modes":["release"]}\n',
+        encoding="utf-8",
+    )
+
+    assert service.approval("CHG-policy-order")["valid"] is False
+
+
+def test_change_init_can_create_isolated_worktree_from_dirty_checkout(tmp_path):
+    root = _project(tmp_path)
+    (root / "scratch.txt").write_text("parallel user work\n", encoding="utf-8")
+    worktree = tmp_path / "order-change-worktree"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "--root",
+            str(root),
+            "change",
+            "init",
+            "CHG-worktree-order",
+            "--intent",
+            "Use an isolated worktree",
+            "--worktree",
+            str(worktree),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _git(root, "branch", "--show-current") == "main"
+    manifest = worktree / ".graphba" / "changes" / "CHG-worktree-order.yaml"
+    content = manifest.read_text(encoding="utf-8")
+    assert manifest.is_file()
+    assert f'base_ref: "{_git(root, "rev-parse", "main")}"' in content
+    assert 'target_ref: "main"' in content
+    assert _git(worktree, "branch", "--show-current") == "change/chg-worktree-order"
+
+
+def test_change_branch_starts_from_explicit_base_and_monitors_target(tmp_path):
+    root = _project(tmp_path)
+    _git(root, "switch", "-c", "accepted-base")
+    spec = root / "docs" / "spec.md"
+    spec.write_text(spec.read_text().replace("Original behavior.", "Accepted base behavior."))
+    _git(root, "add", "docs/spec.md")
+    _git(root, "commit", "-m", "Prepare accepted base")
+    accepted_commit = _git(root, "rev-parse", "HEAD")
+    _git(root, "switch", "main")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "--root",
+            str(root),
+            "change",
+            "init",
+            "CHG-explicit-base",
+            "--intent",
+            "Start from an explicit accepted base",
+            "--base-ref",
+            "accepted-base",
+            "--target-ref",
+            "main",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _git(root, "rev-parse", "HEAD") == accepted_commit
+    manifest = (root / ".graphba" / "changes" / "CHG-explicit-base.yaml").read_text()
+    assert f'base_ref: "{accepted_commit}"' in manifest
+    assert 'target_ref: "main"' in manifest
+
+
+def test_proposal_check_reports_semantic_rebase_conflict(tmp_path):
+    root = _project(tmp_path)
+    worktree = tmp_path / "conflict-worktree"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "--root",
+            str(root),
+            "change",
+            "init",
+            "CHG-conflict-order",
+            "--intent",
+            "Change order creation",
+            "--worktree",
+            str(worktree),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    worktree_spec = worktree / "docs" / "spec.md"
+    worktree_spec.write_text(
+        worktree_spec.read_text().replace("Original behavior.", "Proposed behavior.")
+    )
+
+    root_spec = root / "docs" / "spec.md"
+    root_spec.write_text(root_spec.read_text().replace("Original behavior.", "Upstream behavior."))
+    _git(root, "add", "docs/spec.md")
+    _git(root, "commit", "-m", "Change accepted order behavior")
+
+    check = ChangeWorkflowService(worktree).proposal_check("CHG-conflict-order")
+
+    assert check["pass"] is False
+    assert check["rebase"]["status"] == "conflict"
+    assert check["rebase"]["conflicts"] == [{"kind": "artifact", "id": "AC-ORD-001"}]
+
+
+def test_proposal_requires_one_canonical_owner_for_migrated_id(tmp_path):
+    root = _project(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "--root",
+            str(root),
+            "change",
+            "init",
+            "CHG-migrate-order",
+            "--intent",
+            "Migrate one canonical owner",
+            "--base-ref",
+            "main",
+            "--no-branch",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    migrated = root / ".graphba" / "migrated.md"
+    migrated.write_text(
+        ':::artifact type="AC" id="AC-ORD-001" title="Migrated order"\n:::\n',
+        encoding="utf-8",
+    )
+    service = ChangeWorkflowService(root)
+
+    blocked = service.proposal_check("CHG-migrate-order")
+    assert blocked["pass"] is False
+    assert blocked["findings"][0]["code"] == "duplicate_canonical_owner"
+
+    migrated.write_text(
+        '<!-- graph-ba: canonical-owner -->\n'
+        ':::artifact type="AC" id="AC-ORD-001" title="Migrated order"\n:::\n',
+        encoding="utf-8",
+    )
+    assert service.proposal_check("CHG-migrate-order")["pass"] is True
+
+
+def test_proposal_rejects_duplicate_canonical_id_inside_one_file(tmp_path):
+    root = _project(tmp_path)
+    init_result = CliRunner().invoke(
+        cli,
+        [
+            "--root",
+            str(root),
+            "change",
+            "init",
+            "CHG-duplicate-order",
+            "--intent",
+            "Detect duplicate definitions",
+            "--base-ref",
+            "main",
+            "--no-branch",
+        ],
+    )
+    assert init_result.exit_code == 0, init_result.output
+    (root / ".graphba" / "duplicate.md").write_text(
+        ':::artifact type="AC" id="AC-ORD-004" title="First"\n:::\n\n'
+        ':::artifact type="AC" id="AC-ORD-004" title="Second"\n:::\n',
+        encoding="utf-8",
+    )
+
+    result = ChangeWorkflowService(root).proposal_check("CHG-duplicate-order")
+
+    assert result["pass"] is False
+    assert any(
+        finding["code"] == "duplicate_canonical_owner"
+        for finding in result["findings"]
+    )
 
 
 def test_discover_returns_source_location(tmp_path):

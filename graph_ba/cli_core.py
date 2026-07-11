@@ -16,9 +16,11 @@ from graph_ba.change_workflow import (
     ChangeWorkflowService,
     approval_status,
     create_change_branch,
+    create_change_worktree,
     init_change,
     proposal_check,
 )
+from graph_ba.change_authoring import ChangeAuthoringError, add_artifact, add_link
 from graph_ba.db import _fts_query, _load_nx, do_import, get_db, graph_is_stale
 
 from .gate_analysis import _change_payload, _pack_payload
@@ -569,6 +571,9 @@ def change_create(ctx, change_id, title, state, mode, scope_items):
     "--base-ref", default=None, help="Git ref used as the accepted contract base"
 )
 @click.option(
+    "--target-ref", default=None, help="Integration ref monitored for semantic conflicts"
+)
+@click.option(
     "--scope", "scope_items", multiple=True, help="Scoped artifact ID; can be repeated"
 )
 @click.option(
@@ -577,18 +582,55 @@ def change_create(ctx, change_id, title, state, mode, scope_items):
     default=True,
     help="Create change/<change-id> from the current clean branch",
 )
+@click.option(
+    "--worktree",
+    "worktree_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Create an isolated Git worktree at PATH (recommended)",
+)
 @click.pass_context
 def change_init(
-    ctx, change_id, title, intent, source_items, base_ref, scope_items, create_branch
+    ctx,
+    change_id,
+    title,
+    intent,
+    source_items,
+    base_ref,
+    target_ref,
+    scope_items,
+    create_branch,
+    worktree_path,
 ):
     """Create one Git-native change manifest."""
     root = Path(ctx.obj.get("root", ".")).resolve()
-    if create_branch:
+    worktree = None
+    if worktree_path is not None:
         try:
-            binding = create_change_branch(root, change_id, base_ref=base_ref)
+            worktree = create_change_worktree(
+                root,
+                change_id,
+                worktree_path,
+                base_ref=base_ref,
+                target_ref=target_ref,
+            )
+        except ChangeWorkflowError as exc:
+            raise click.ClickException(str(exc)) from exc
+        root = Path(worktree["root"])
+        base_ref = worktree["base_ref"]
+        target_ref = worktree["target_ref"]
+    elif create_branch:
+        try:
+            binding = create_change_branch(
+                root,
+                change_id,
+                base_ref=base_ref,
+                target_ref=target_ref,
+            )
         except ChangeWorkflowError as exc:
             raise click.ClickException(str(exc)) from exc
         base_ref = binding["base_ref"]
+        target_ref = target_ref or binding["target_ref"]
     path = _create_change_manifest(
         root,
         change_id,
@@ -596,9 +638,72 @@ def change_init(
         intent,
         source_items,
         base_ref,
+        target_ref,
         scope_items,
     )
     print(f"Initialized graph-ba change: {path}")
+    if worktree:
+        print(f"Worktree: {worktree['root']}")
+        print(f"Branch: {worktree['branch']}")
+
+
+@change_group.command("add-artifact")
+@click.argument("change_id")
+@click.argument("artifact_type")
+@click.argument("artifact_id")
+@click.option("--title", required=True)
+@click.option("--body", default="")
+@click.option("--file", "target_file", default=None)
+@click.option("--state", default="active")
+@click.option("--link", "links", multiple=True, help="Typed link as RELATION=TARGET")
+@click.option("--migrate", is_flag=True, help="Select the new file as canonical owner")
+@click.pass_context
+def change_add_artifact(
+    ctx,
+    change_id,
+    artifact_type,
+    artifact_id,
+    title,
+    body,
+    target_file,
+    state,
+    links,
+    migrate,
+):
+    """Append one validated graph-native artifact to an owning contract file."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    try:
+        payload = add_artifact(
+            root,
+            change_id,
+            artifact_type,
+            artifact_id,
+            title=title,
+            body=body,
+            target_file=target_file,
+            state=state,
+            links=links,
+            migrate=migrate,
+        )
+    except ChangeAuthoringError as exc:
+        raise click.ClickException(str(exc)) from exc
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@change_group.command("add-link")
+@click.argument("change_id")
+@click.argument("source_id")
+@click.argument("relation")
+@click.argument("target_id")
+@click.pass_context
+def change_add_link(ctx, change_id, source_id, relation, target_id):
+    """Add one validated typed link to a graph-native artifact owner."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    try:
+        payload = add_link(root, change_id, source_id, relation, target_id)
+    except ChangeAuthoringError as exc:
+        raise click.ClickException(str(exc)) from exc
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 @change_group.command("compile")
@@ -880,6 +985,7 @@ def _create_change_manifest(
     intent: str,
     source_items: tuple[str, ...],
     base_ref: str | None,
+    target_ref: str | None,
     scope_items: tuple[str, ...],
 ) -> Path:
     try:
@@ -891,6 +997,7 @@ def _create_change_manifest(
             sources=source_items,
             scope=scope_items,
             base_ref=base_ref,
+            target_ref=target_ref,
         )
     except ChangeWorkflowError as exc:
         raise click.ClickException(str(exc)) from exc

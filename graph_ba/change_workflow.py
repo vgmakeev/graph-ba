@@ -24,6 +24,7 @@ from graph_ba.graph_snapshots import (
     impact_paths,
 )
 from graph_ba.models import Artifact
+from graph_ba.scanning import canonical_ownership_findings
 from graph_ba.traceability import scan_definitions
 
 
@@ -43,6 +44,13 @@ CONTEXT_RELATIONS = {
     "UI_TRACE",
     "VERIFIES",
 }
+
+PROPOSAL_POLICY_FILES = (
+    "graph-ba.toml",
+    ".graphba/project.yaml",
+    ".graphba/artifact-class-matrix.json",
+    ".graphba/evidence-policy.json",
+)
 
 
 class ChangeWorkflowService:
@@ -112,19 +120,87 @@ class ChangeWorkflowService:
         return self.compile(change_id)["impact"]
 
     def proposal_check(self, change_id: str) -> dict[str, Any]:
-        return proposal_check(self.diff(change_id), self.manifest(change_id))
+        change = self.diff(change_id)
+        manifest = self.manifest(change_id)
+        result = proposal_check(change, manifest)
+        ownership = canonical_ownership_findings(
+            self.root,
+            load_config(self.root),
+            {item["id"] for item in change.get("contract", [])},
+        )
+        for finding in ownership:
+            if finding["severity"] != "ERR":
+                continue
+            result["findings"].append({
+                "code": "duplicate_canonical_owner",
+                "message": finding["message"],
+                "artifact": finding["artifact_id"],
+            })
+        rebase = semantic_rebase_status(self.root, manifest, change)
+        result["rebase"] = rebase
+        if rebase["status"] == "conflict":
+            result["findings"].append({
+                "code": "semantic_rebase_conflict",
+                "message": "target ref changed overlapping contract IDs or proposal policy",
+                "conflicts": rebase["conflicts"],
+            })
+            result["pass"] = False
+            result["verdict"] = "FAIL"
+            result["summary"]["findings"] = len(result["findings"])
+        if result["findings"] and any(
+            finding.get("code") == "duplicate_canonical_owner"
+            for finding in result["findings"]
+        ):
+            result["pass"] = False
+            result["verdict"] = "FAIL"
+            result["summary"]["findings"] = len(result["findings"])
+        return result
 
     def approval(self, change_id: str) -> dict[str, Any]:
         return approval_status(self.root, change_id, self.diff(change_id))
 
-    def approve(self, change_id: str, reviewer: str) -> dict[str, Any]:
+    def approve(
+        self,
+        change_id: str,
+        reviewer: str,
+        evidence: str,
+    ) -> dict[str, Any]:
         if not reviewer.strip():
             raise ChangeWorkflowError("reviewer is required")
+        if not evidence.strip():
+            raise ChangeWorkflowError("review evidence is required (for example a protected PR URL)")
         change = self.diff(change_id)
+        proposal_paths = [
+            item.get("path") or item.get("old_path")
+            for group in ("contract_files", "supporting_files")
+            for item in change.get(group, [])
+        ]
+        dirty_paths = [
+            path
+            for path in proposal_paths
+            if path
+            and _git(
+                self.root,
+                "status",
+                "--porcelain",
+                "--",
+                path,
+                allow_empty=True,
+            )
+        ]
+        if dirty_paths:
+            raise ChangeWorkflowError(
+                "commit proposal contract/supporting files before approval: "
+                + ", ".join(sorted(dirty_paths))
+            )
+        review_commit = _git(self.root, "rev-parse", "HEAD")
         record = {
             "schema": "graph-ba.approval.v1",
             "change": change_id,
             "reviewer": reviewer.strip(),
+            "review_evidence": evidence.strip(),
+            "review_commit": review_commit,
+            "trust": "asserted_external_review",
             "approved_at": datetime.now(timezone.utc).isoformat(),
             "base_commit": change["git"]["base_commit"],
             "proposal_fingerprint": change["proposal_fingerprint"],
@@ -141,6 +217,7 @@ class ChangeWorkflowService:
         manifest_path = self.manifest_path(change_id)
         change = self.diff(change_id)
         approval = approval_status(self.root, change_id, change)
+        rebase = semantic_rebase_status(self.root, self.manifest(change_id), change)
         tracked = bool(
             _git(
                 self.root,
@@ -167,7 +244,12 @@ class ChangeWorkflowService:
             "proposal_fingerprint": change["proposal_fingerprint"],
             "contract_changes": len(change["contract"]),
             "approval": approval,
+            "rebase": rebase,
         }
+
+    def rebase_status(self, change_id: str) -> dict[str, Any]:
+        change = self.diff(change_id)
+        return semantic_rebase_status(self.root, self.manifest(change_id), change)
 
 
 def find_change_manifest(root: Path, change_id: str) -> Path | None:
@@ -185,6 +267,7 @@ def create_change_branch(
     change_id: str,
     *,
     base_ref: str | None = None,
+    target_ref: str | None = None,
 ) -> dict[str, str]:
     """Create a clean Git branch for a change and return its binding."""
     root = root.resolve()
@@ -193,14 +276,53 @@ def create_change_branch(
             "working tree must be clean before change init; use --no-branch to keep the current branch"
         )
     current = _git(root, "branch", "--show-current", allow_empty=True)
-    selected_base = base_ref or current or _default_base_ref(root)
+    selected_target = target_ref or base_ref or current or _default_base_ref(root)
+    selected_base = base_ref or selected_target
+    base_commit = _git(root, "rev-parse", selected_base)
     branch = f"change/{change_id.lower()}"
     if current == branch:
-        return {"branch": branch, "base_ref": selected_base}
+        return {"branch": branch, "base_ref": base_commit, "target_ref": selected_target}
     if _git(root, "show-ref", "--verify", f"refs/heads/{branch}", check=False, allow_empty=True):
         raise ChangeWorkflowError(f"branch already exists: {branch}")
-    _git(root, "switch", "-c", branch, allow_empty=True)
-    return {"branch": branch, "base_ref": selected_base}
+    _git(root, "switch", "-c", branch, base_commit, allow_empty=True)
+    return {"branch": branch, "base_ref": base_commit, "target_ref": selected_target}
+
+
+def create_change_worktree(
+    root: Path,
+    change_id: str,
+    worktree_path: Path,
+    *,
+    base_ref: str | None = None,
+    target_ref: str | None = None,
+) -> dict[str, str]:
+    """Create an isolated change branch/worktree without touching current edits."""
+    root = root.resolve()
+    selected_target = target_ref or base_ref or _git(
+        root, "branch", "--show-current", allow_empty=True
+    ) or _default_base_ref(root)
+    selected_base = base_ref or selected_target
+    base_commit = _git(root, "rev-parse", selected_base)
+    branch = f"change/{change_id.lower()}"
+    destination = worktree_path.expanduser().resolve()
+    if destination.exists():
+        raise ChangeWorkflowError(f"worktree path already exists: {destination}")
+    if _git(root, "show-ref", "--verify", f"refs/heads/{branch}", check=False, allow_empty=True):
+        raise ChangeWorkflowError(f"branch already exists: {branch}")
+    result = subprocess.run(
+        ["git", "worktree", "add", "-b", branch, str(destination), base_commit],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ChangeWorkflowError(result.stderr.strip() or "git worktree add failed")
+    return {
+        "root": str(destination),
+        "branch": branch,
+        "base_ref": base_commit,
+        "target_ref": selected_target,
+    }
 
 
 def init_change(
@@ -212,6 +334,7 @@ def init_change(
     sources: Iterable[str] = (),
     scope: Iterable[str] = (),
     base_ref: str | None = None,
+    target_ref: str | None = None,
     create_branch: bool = False,
 ) -> Path:
     """Create the single Git-native manifest used by both CLI and MCP."""
@@ -223,8 +346,16 @@ def init_change(
     if path.exists() or legacy.exists():
         raise ChangeWorkflowError(f"Change already exists: {change_id}")
     if create_branch:
-        binding = create_change_branch(root, change_id, base_ref=base_ref)
+        binding = create_change_branch(
+            root,
+            change_id,
+            base_ref=base_ref,
+            target_ref=target_ref,
+        )
         base_ref = binding["base_ref"]
+        target_ref = binding["target_ref"]
+    elif base_ref:
+        base_ref = _git(root, "rev-parse", base_ref)
     lines = [
         f"id: {change_id}",
         f"title: {json.dumps(title or change_id, ensure_ascii=False)}",
@@ -232,6 +363,8 @@ def init_change(
     ]
     if base_ref:
         lines.append(f"base_ref: {json.dumps(base_ref, ensure_ascii=False)}")
+    if target_ref:
+        lines.append(f"target_ref: {json.dumps(target_ref, ensure_ascii=False)}")
     lines.append("sources:")
     lines.extend(f"  - {item}" for item in sources)
     lines.append("scope:")
@@ -280,6 +413,7 @@ def semantic_diff(root: Path, *, base_ref: str | None = None) -> dict[str, Any]:
     artifact_changes = _compare_artifacts(base_artifacts, head_artifacts)
     contract_changes = [item for item in artifact_changes if item["origin"] == "canonical"]
     file_groups = _classify_changed_files(changes, artifact_changes)
+    policy = _proposal_policy_state(root, git["base_commit"])
     fingerprint_input = [
         {
             "operation": item["operation"],
@@ -291,12 +425,17 @@ def semantic_diff(root: Path, *, base_ref: str | None = None) -> dict[str, Any]:
         for item in contract_changes
     ]
     proposal_fingerprint = _sha256_json(
-        {"base_commit": git["base_commit"], "contract": fingerprint_input}
+        {
+            "base_commit": git["base_commit"],
+            "contract": fingerprint_input,
+            "policy": policy["after"],
+        }
     )
     return {
         "schema": "graph-ba.semantic-change.v1",
         "git": git,
         "proposal_fingerprint": proposal_fingerprint,
+        "policy": policy,
         "summary": {
             "files": len(changes),
             "contract_files": len(file_groups["contract_files"]),
@@ -307,11 +446,153 @@ def semantic_diff(root: Path, *, base_ref: str | None = None) -> dict[str, Any]:
             "added": sum(item["operation"] == "add" for item in artifact_changes),
             "modified": sum(item["operation"] == "modify" for item in artifact_changes),
             "removed": sum(item["operation"] == "remove" for item in artifact_changes),
+            "policy_changed": len(policy["changed"]),
         },
         "files": changes,
         **file_groups,
         "artifacts": artifact_changes,
         "contract": contract_changes,
+    }
+
+
+def _proposal_policy_state(root: Path, base_commit: str) -> dict[str, Any]:
+    before = _policy_hashes_at_ref(root, base_commit)
+    after: dict[str, str] = {}
+    for relative in PROPOSAL_POLICY_FILES:
+        path = root / relative
+        if path.is_file():
+            after[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    changed = sorted(
+        relative
+        for relative in set(before) | set(after)
+        if before.get(relative) != after.get(relative)
+    )
+    return {"before": before, "after": after, "changed": changed}
+
+
+def _policy_hashes_at_ref(root: Path, ref: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for relative in PROPOSAL_POLICY_FILES:
+        content = _git_text(root, ref, relative)
+        if content is not None:
+            result[relative] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return result
+
+
+def semantic_rebase_status(
+    root: Path,
+    manifest: dict[str, Any],
+    change: dict[str, Any],
+) -> dict[str, Any]:
+    """Detect target-branch movement that overlaps the proposed semantic delta."""
+    target_ref = str(manifest.get("target_ref") or "").strip()
+    base_commit = change["git"]["base_commit"]
+    if not target_ref:
+        return {
+            "status": "not_configured",
+            "target_ref": "",
+            "base_commit": base_commit,
+            "target_commit": "",
+            "behind_commits": 0,
+            "conflicts": [],
+        }
+    target_commit = _git(
+        root, "rev-parse", "--verify", target_ref, check=False, allow_empty=True
+    )
+    if not target_commit:
+        return {
+            "status": "unavailable",
+            "target_ref": target_ref,
+            "base_commit": base_commit,
+            "target_commit": "",
+            "behind_commits": 0,
+            "conflicts": [{"kind": "missing_target_ref", "value": target_ref}],
+        }
+    if target_commit == base_commit:
+        return {
+            "status": "current",
+            "target_ref": target_ref,
+            "base_commit": base_commit,
+            "target_commit": target_commit,
+            "behind_commits": 0,
+            "conflicts": [],
+        }
+
+    upstream = _semantic_diff_between_refs(root, base_commit, target_commit)
+    proposed_ids = {item["id"] for item in change.get("contract", [])}
+    upstream_ids = {item["id"] for item in upstream["contract"]}
+    conflicts = [
+        {"kind": "artifact", "id": artifact_id}
+        for artifact_id in sorted(proposed_ids & upstream_ids)
+    ]
+    if upstream["policy"]["changed"]:
+        conflicts.append({
+            "kind": "proposal_policy",
+            "files": upstream["policy"]["changed"],
+        })
+    behind = int(
+        _git(
+            root,
+            "rev-list",
+            "--count",
+            f"{base_commit}..{target_commit}",
+            allow_empty=True,
+        )
+        or 0
+    )
+    return {
+        "status": "conflict" if conflicts else "behind",
+        "target_ref": target_ref,
+        "base_commit": base_commit,
+        "target_commit": target_commit,
+        "behind_commits": behind,
+        "upstream_contract_changes": len(upstream["contract"]),
+        "conflicts": conflicts,
+    }
+
+
+def _semantic_diff_between_refs(
+    root: Path,
+    before_ref: str,
+    after_ref: str,
+) -> dict[str, Any]:
+    config = load_config(root)
+    changes = _changed_paths_between(root, before_ref, after_ref)
+    with tempfile.TemporaryDirectory(prefix="graph-ba-before-") as before_tmp, tempfile.TemporaryDirectory(
+        prefix="graph-ba-after-"
+    ) as after_tmp:
+        before_root = Path(before_tmp)
+        after_root = Path(after_tmp)
+        for change in changes:
+            old_path = change.get("old_path")
+            new_path = change.get("path")
+            if old_path:
+                content = _git_text(root, before_ref, old_path)
+                if content is not None:
+                    _write_snapshot_file(before_root, old_path, content)
+            if new_path:
+                content = _git_text(root, after_ref, new_path)
+                if content is not None:
+                    _write_snapshot_file(after_root, new_path, content)
+        before = _artifact_snapshot(before_root, config)
+        after = _artifact_snapshot(after_root, config)
+    artifacts = _compare_artifacts(before, after)
+    contract = [item for item in artifacts if item["origin"] == "canonical"]
+    before_policy = _policy_hashes_at_ref(root, before_ref)
+    after_policy = _policy_hashes_at_ref(root, after_ref)
+    policy_changed = sorted(
+        relative
+        for relative in set(before_policy) | set(after_policy)
+        if before_policy.get(relative) != after_policy.get(relative)
+    )
+    return {
+        "artifacts": artifacts,
+        "contract": contract,
+        "policy": {
+            "before": before_policy,
+            "after": after_policy,
+            "changed": policy_changed,
+        },
     }
 
 
@@ -487,17 +768,62 @@ def approval_status(
             "reason": f"invalid_approval: {exc}",
         }
     expected = change["proposal_fingerprint"]
-    valid = (
+    review_commit = str(record.get("review_commit") or "")
+    commit_is_ancestor = bool(
+        review_commit
+        and subprocess.run(
+            ["git", "merge-base", "--is-ancestor", review_commit, "HEAD"],
+            cwd=root,
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+    relative_path = str(path.relative_to(root))
+    tracked = bool(
+        _git(
+            root,
+            "ls-files",
+            "--error-unmatch",
+            relative_path,
+            check=False,
+            allow_empty=True,
+        )
+    )
+    clean = not bool(
+        _git(
+            root,
+            "status",
+            "--porcelain",
+            "--",
+            relative_path,
+            allow_empty=True,
+        )
+    )
+    matched = (
         record.get("change") == change_id
         and record.get("base_commit") == change["git"]["base_commit"]
         and record.get("proposal_fingerprint") == expected
         and bool(record.get("reviewer"))
+        and bool(record.get("review_evidence"))
+        and commit_is_ancestor
     )
+    valid = matched and tracked and clean
+    if valid:
+        reason = "matched"
+    elif matched and (not tracked or not clean):
+        reason = "approval_not_committed"
+    elif review_commit and not commit_is_ancestor:
+        reason = "review_commit_not_ancestor"
+    else:
+        reason = "fingerprint_base_or_evidence_mismatch"
     return {
         "present": True,
         "valid": valid,
+        "tracked": tracked,
+        "clean": clean,
+        "review_commit_is_ancestor": commit_is_ancestor,
         "path": str(path),
-        "reason": "matched" if valid else "fingerprint_or_base_mismatch",
+        "reason": reason,
         "record": record,
     }
 
@@ -604,6 +930,38 @@ def _default_base_ref(root: Path) -> str:
 
 def _changed_paths(root: Path, base_commit: str) -> list[dict[str, str]]:
     raw = _git_bytes(root, "diff", "--name-status", "-z", "--find-renames", base_commit, "--")
+    result = _parse_changed_paths(raw)
+
+    known = {item["path"] for item in result if item.get("path")}
+    untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z", allow_empty=True)
+    for path in untracked.split("\0"):
+        if path and path not in known:
+            result.append({"status": "A", "old_path": "", "path": path})
+    return sorted(result, key=lambda item: (item.get("path") or item.get("old_path") or ""))
+
+
+def _changed_paths_between(
+    root: Path,
+    before_ref: str,
+    after_ref: str,
+) -> list[dict[str, str]]:
+    raw = _git_bytes(
+        root,
+        "diff",
+        "--name-status",
+        "-z",
+        "--find-renames",
+        before_ref,
+        after_ref,
+        "--",
+    )
+    return sorted(
+        _parse_changed_paths(raw),
+        key=lambda item: (item.get("path") or item.get("old_path") or ""),
+    )
+
+
+def _parse_changed_paths(raw: bytes) -> list[dict[str, str]]:
     parts = raw.decode("utf-8", errors="surrogateescape").split("\0")
     result: list[dict[str, str]] = []
     index = 0
@@ -622,13 +980,7 @@ def _changed_paths(root: Path, base_commit: str) -> list[dict[str, str]]:
                 "old_path": path if status[0] != "A" else "",
                 "path": "" if status[0] == "D" else path,
             })
-
-    known = {item["path"] for item in result if item.get("path")}
-    untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z", allow_empty=True)
-    for path in untracked.split("\0"):
-        if path and path not in known:
-            result.append({"status": "A", "old_path": "", "path": path})
-    return sorted(result, key=lambda item: (item.get("path") or item.get("old_path") or ""))
+    return result
 
 
 def _artifact_snapshot(root: Path, config: ProjectConfig) -> dict[str, dict[str, Any]]:
