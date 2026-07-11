@@ -33,6 +33,7 @@ from .rendering import (
     _render_change_state_yaml,
     _render_evidence_plan_markdown,
     _render_gaps_markdown,
+    _render_graph_summary,
     _render_pack_markdown,
     _render_projection_markdown,
     _render_worklist_markdown,
@@ -414,7 +415,7 @@ def path(ctx, from_id, to_id):
     "--relation",
     "relation_filter",
     default=None,
-    help="Comma-separated relation types, e.g. TEST_EVIDENCE,IMPLEMENTS",
+    help="Comma-separated relation types, e.g. VERIFIES,IMPLEMENTS",
 )
 @click.option(
     "--out",
@@ -645,6 +646,13 @@ def change_init(
     if worktree:
         print(f"Worktree: {worktree['root']}")
         print(f"Branch: {worktree['branch']}")
+        if worktree.get("bootstrapped"):
+            print(
+                "Bootstrapped local graph inputs: "
+                + ", ".join(worktree["bootstrapped"])
+            )
+        for warning in worktree.get("bootstrap_warnings", []):
+            print(f"warning: {warning}")
 
 
 @change_group.command("add-artifact")
@@ -877,6 +885,7 @@ def change_compile(ctx, change_id, mode, snapshot_path):
         _render_pack_markdown(pack_payload).rstrip() + "\n", encoding="utf-8"
     )
     print(f"Compiled graph-ba change: {compiled_dir}")
+    print(_render_graph_summary(graph_payload), end="")
 
 
 def _change_path(root: Path, change_id: str) -> Path:

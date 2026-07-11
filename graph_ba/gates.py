@@ -20,6 +20,7 @@ from .gate_analysis import (
     _scope_ids,
     _scope_rows,
     _semantic_scope_relations,
+    _weak_behavior_candidates,
 )
 from .artifact_state import (
     _artifact_content,
@@ -28,9 +29,15 @@ from .artifact_state import (
     _graph_native_lifecycle_map,
     _load_fingerprint_snapshot,
 )
+from .config import ProjectConfig, load_config
+from .class_matrix import (
+    class_direction_conflicts,
+    class_matrix_summary,
+    load_class_matrix_policy,
+    undeclared_class_edges,
+)
+from .graph_views import GRAPH_VIEWS, relation_view_policy
 from .rendering import _required_evidence_suggested_fix
-
-CONTRACT_ARTIFACT_TYPES = {"AC", "RULE", "DER", "STATE", "EVT", "ENT", "MTH"}
 
 DEFAULT_AC_EVIDENCE_MATRIX = {
     "algorithm": ["unit"],
@@ -187,7 +194,15 @@ def _gate_payload(
     change_states = _graph_native_change_state_map(root)
     selected_mode = mode or change_states.get(target_id, {}).get("mode") or "dev"
     snapshot = _load_fingerprint_snapshot(snapshot_path)
-    rows = _scope_rows(db, target_id)
+    config = load_config(root)
+    class_policy = load_class_matrix_policy(root)
+    rows = _scope_rows(
+        db,
+        target_id,
+        config,
+        view="delivery",
+        class_policy=class_policy,
+    )
     states = [
         _artifact_state_item(
             db,
@@ -199,25 +214,91 @@ def _gate_payload(
         )
         for row in rows
     ]
-    evidence_plan = _evidence_plan_for_states(db, root, states)
+    target_row = db.execute(
+        "SELECT type FROM artifacts WHERE id = ?", (target_id,)
+    ).fetchone()
+    target_type = target_row["type"] if target_row else ""
+    evidence_plan = _evidence_plan_for_states(db, root, states, config=config)
     findings = _gate_findings(
         states,
         selected_mode,
         bool(snapshot),
+        config=config,
         require_snapshot=require_snapshot,
     )
     findings.extend(_evidence_plan_findings(evidence_plan, selected_mode))
+    matrix_severity = "fail" if selected_mode in {"review", "release"} else "warn"
+    for conflict in class_direction_conflicts(class_policy):
+        left, right = conflict["classes"]
+        findings.append(
+            {
+                "artifact": target_id,
+                "type": target_type,
+                "code": "ambiguous_class_direction",
+                "gap_type": "GAP-ARCH",
+                "severity": matrix_severity,
+                "blocking": matrix_severity == "fail",
+                "message": (
+                    f"class matrix declares both {left} -> {right} and "
+                    f"{right} -> {left}; choose one canonical direction"
+                ),
+                "conflict": conflict,
+            }
+        )
+    for edge in undeclared_class_edges(
+        db, {item["id"] for item in states}, class_policy
+    ):
+        findings.append(
+            {
+                "artifact": edge["source_id"],
+                "type": edge["source_type"],
+                "code": "undeclared_class_edge",
+                "gap_type": "GAP-ARCH",
+                "severity": matrix_severity,
+                "blocking": matrix_severity == "fail",
+                "message": (
+                    f"class matrix does not allow {edge['source_type']} "
+                    f"--{edge['relation_type']}--> {edge['target_type']} "
+                    f"({edge['source_id']} -> {edge['target_id']})"
+                ),
+                "edge": edge,
+            }
+        )
     evidence_profile = _evidence_profile(db, states)
-    quality_axes = _quality_axes(states, findings, evidence_profile, bool(snapshot))
+    quality_axes = _quality_axes(
+        states,
+        findings,
+        evidence_profile,
+        bool(snapshot),
+        target_type=target_type,
+        config=config,
+    )
+    weak_behavior_candidates = _weak_behavior_candidates(
+        db, states, quality_axes["behavior_model"].get("missing", []), config
+    )
+    if weak_behavior_candidates:
+        quality_axes = _quality_axes(
+            states,
+            findings,
+            evidence_profile,
+            bool(snapshot),
+            target_type=target_type,
+            config=config,
+            weak_behavior_candidates=weak_behavior_candidates,
+        )
     evidence_plan_summary = evidence_plan.get("summary", {})
     fail_count = sum(1 for item in findings if item["severity"] == "fail")
     warn_count = sum(1 for item in findings if item["severity"] == "warn")
+    passed = fail_count == 0
+    overall_confidence = _overall_confidence(quality_axes)
+    readiness, verdict = _readiness_verdict(passed, overall_confidence)
     return {
         "schema": "graph-ba.gate.v1",
         "target": target_id,
         "mode": selected_mode,
-        "pass": fail_count == 0,
-        "verdict": "PASS" if fail_count == 0 else "FAIL",
+        "pass": passed,
+        "verdict": verdict,
+        "readiness": readiness,
         "summary": {
             "fail": fail_count,
             "warn": warn_count,
@@ -229,7 +310,7 @@ def _gate_payload(
             },
         },
         "quality_axes": quality_axes,
-        "overall_confidence": _overall_confidence(quality_axes),
+        "overall_confidence": overall_confidence,
         "evidence_profile": evidence_profile,
         "evidence_plan": evidence_plan,
         "findings": findings,
@@ -251,6 +332,7 @@ def _gate_findings(
     mode: str,
     snapshot_loaded: bool,
     *,
+    config: ProjectConfig,
     require_snapshot: bool = True,
 ) -> list[dict[str, Any]]:
     if mode == "explore":
@@ -260,11 +342,19 @@ def _gate_findings(
     release = mode == "release"
     for item in states:
         computed = item["computed"]
-        if item["type"] in CONTRACT_ARTIFACT_TYPES and not computed["implemented"]:
+        if computed.get("undefined"):
+            findings.append(_gate_finding(item, "undefined_artifact", "fail"))
+            continue
+        required_proofs = set(
+            config.types.get(item["type"]).required_proofs
+            if item["type"] in config.types
+            else []
+        )
+        if "implementation" in required_proofs and not computed["implemented"]:
             findings.append(
                 _gate_finding(item, "unimplemented", "fail" if strict else "warn")
             )
-        if item["type"] == "AC" and not computed["verified"]:
+        if "verification" in required_proofs and not computed["verified"]:
             findings.append(
                 _gate_finding(item, "unverified", "fail" if strict else "warn")
             )
@@ -287,6 +377,8 @@ def _evidence_plan_for_states(
     db: sqlite3.Connection,
     root: Path,
     states: list[dict[str, Any]],
+    *,
+    config: ProjectConfig | None = None,
 ) -> dict[str, Any]:
     """Classify AC artifacts and compute required vs observed evidence kinds."""
     ac_ids = [item["id"] for item in states if item["type"] == "AC"]
@@ -306,7 +398,7 @@ def _evidence_plan_for_states(
         }
         for row in rows
     }
-    edges = _graph_slice_edges(db, ids, include_mentions=False)
+    edges = _graph_slice_edges(db, ids, config or load_config(root), "delivery")
     evidence_by_ac = _observed_evidence_by_ac(db, ac_ids, policy)
     items: list[dict[str, Any]] = []
     for ac_id in sorted(ac_ids):
@@ -510,7 +602,7 @@ def _observed_evidence_by_ac(
         "s.origin AS source_origin, s.title AS source_title, s.source_file AS source_file "
         "FROM edges e JOIN artifacts s ON e.source_id = s.id "
         f"WHERE e.target_id IN ({placeholders}) "
-        "AND e.relation_type IN ('TEST_EVIDENCE', 'VERIFIES') "
+        "AND e.relation_type = 'VERIFIES' "
         "ORDER BY e.target_id, s.id",
         tuple(ac_ids),
     ).fetchall()
@@ -635,6 +727,16 @@ def _overall_confidence(axes: dict[str, Any]) -> str:
     return "PASS"
 
 
+def _readiness_verdict(passed: bool, confidence: str) -> tuple[str, str]:
+    if not passed or confidence == "FAIL":
+        return "BLOCKED", "FAIL"
+    if confidence == "PASS":
+        return "READY", "PASS"
+    if confidence == "PARTIAL":
+        return "PARTIAL", "PASS_WITH_GAPS"
+    return "UNKNOWN", "PASS_WITH_UNKNOWN"
+
+
 def _graph_slice_payload(
     db: sqlite3.Connection,
     root: Path,
@@ -645,16 +747,26 @@ def _graph_slice_payload(
     content_limit: int,
     include_mentions: bool,
     *,
+    view: str = "delivery",
     gate_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     row = db.execute("SELECT * FROM artifacts WHERE id = ?", (target_id,)).fetchone()
     if not row:
         raise click.ClickException(f"Artifact not found: {target_id}")
-    ids = _scope_ids(db, target_id)
-    ids.add(target_id)
+    selected_view = "navigation" if include_mentions and view == "delivery" else view
+    if selected_view not in GRAPH_VIEWS:
+        raise click.ClickException(f"Unknown graph view: {selected_view}")
+    config = load_config(root)
+    class_policy = load_class_matrix_policy(root)
+    ids = _scope_ids(
+        db,
+        target_id,
+        config,
+        view=selected_view,
+        class_policy=class_policy,
+    )
     gate_data = gate_data or _gate_payload(db, root, target_id, mode, snapshot_path)
     computed_by_id = {item["id"]: item for item in gate_data["scope"]}
-    ids.update(_proof_artifact_ids(gate_data))
     rows = _rows_for_ids(db, ids)
     nodes = [
         _graph_slice_node(
@@ -663,10 +775,11 @@ def _graph_slice_payload(
             computed_by_id.get(item["id"]),
             content_mode,
             max(0, content_limit),
+            config,
         )
         for item in rows
     ]
-    edges = _graph_slice_edges(db, ids, include_mentions)
+    edges = _graph_slice_edges(db, ids, config, selected_view)
     worklist = _agent_worklist(gate_data, nodes, edges)
     return {
         "schema": "graph-ba.graph-slice.v1",
@@ -674,11 +787,14 @@ def _graph_slice_payload(
         "mode": gate_data["mode"],
         "pass": gate_data["pass"],
         "verdict": gate_data["verdict"],
+        "readiness": gate_data["readiness"],
         "summary": {
             **gate_data["summary"],
             "nodes": len(nodes),
             "edges": len(edges),
             "mentions_included": include_mentions,
+            "view": selected_view,
+            "proofs": "embedded",
             "content": content_mode,
             "content_limit": max(0, content_limit),
         },
@@ -686,8 +802,9 @@ def _graph_slice_payload(
         "overall_confidence": gate_data["overall_confidence"],
         "evidence_profile": gate_data["evidence_profile"],
         "evidence_plan": gate_data["evidence_plan"],
-        "relation_catalog": _relation_catalog(include_mentions),
+        "relation_catalog": _relation_catalog(config, selected_view),
         "class_matrices": _graph_class_matrices(root),
+        "class_matrix_policy": class_matrix_summary(class_policy),
         "findings": gate_data["findings"],
         "agent_worklist": worklist,
         "nodes": nodes,
@@ -752,12 +869,14 @@ def _graph_slice_node(
     computed: dict[str, Any] | None,
     content_mode: str,
     content_limit: int,
+    config: ProjectConfig,
 ) -> dict[str, Any]:
     content = "" if content_mode == "none" else _artifact_content(db, row)
     truncated = False
     if content_mode == "excerpt" and len(content) > content_limit:
         content = content[:content_limit].rstrip()
         truncated = True
+    type_definition = config.types.get(row["type"])
     node = {
         "id": row["id"],
         "type": row["type"],
@@ -770,6 +889,8 @@ def _graph_slice_node(
         },
         "computed": computed.get("computed", {}) if computed else {},
         "lifecycle": computed.get("lifecycle", "") if computed else "",
+        "capabilities": list(type_definition.capabilities) if type_definition else [],
+        "required_proofs": list(type_definition.required_proofs) if type_definition else [],
     }
     if computed and computed.get("implementation_proofs"):
         node["implementation_proofs"] = computed["implementation_proofs"]
@@ -782,24 +903,35 @@ def _graph_slice_node(
     return node
 
 
-def _relation_catalog(include_mentions: bool = False) -> list[dict[str, str]]:
+def _relation_catalog(
+    config: ProjectConfig,
+    view: str = "delivery",
+) -> list[dict[str, str]]:
     meanings = {
-        "CODE_TRACE": "source/code observation connects implementation to graph artifact",
+        "CANDIDATE_TRACE": "proposed link only; excluded from acceptance proof until explicitly promoted",
         "CONTAINS": "source artifact scopes or structurally contains target artifact",
         "DEPENDS_ON": "source artifact has a runtime, data, permission or semantic dependency on target",
         "IMPLEMENTS": "implementation artifact realizes target contract/entity/method",
         "MENTIONS": "weak text occurrence only; not proof and excluded from agent graph slices by default",
         "NORMALIZES": "canonical artifact normalizes raw/source artifact",
         "RENDERS": "UI/component artifact renders target screen or UI zone",
-        "TEST_EVIDENCE": "automated test mentions and provides deterministic evidence for target",
         "TRACES_TO": "author-declared semantic trace from source to target",
-        "UI_TRACE": "UI observation or metadata trace connects source to target",
         "VERIFIES": "source evidence verifies target artifact",
     }
     relations = sorted(
-        _semantic_scope_relations() | ({"MENTIONS"} if include_mentions else set())
+        relation
+        for relation in config.relation_types
+        if view == "full"
+        or relation_view_policy(config, relation)["traversal"]
+        in ({"expand", "context", "hidden"} if view == "navigation" else {"expand", "context"})
     )
     return [
-        {"relation": relation, "meaning": meanings.get(relation, "")}
+        {
+            "relation": relation,
+            "meaning": meanings.get(
+                relation, config.relation_types[relation].description
+            ),
+            **relation_view_policy(config, relation),
+        }
         for relation in relations
     ]

@@ -95,7 +95,7 @@ class TestImport:
             "SELECT relation_type FROM edges "
             "WHERE source_id LIKE 'TEST:%' AND target_id = 'REQ-01'"
         ).fetchone()
-        assert row["relation_type"] == "TEST_EVIDENCE"
+        assert row["relation_type"] == "VERIFIES"
 
     def test_origin_enum_dictionary_persisted(self, db_conn):
         row = db_conn.execute(

@@ -8,6 +8,9 @@ from typing import Any
 
 import click
 
+from .class_matrix import ClassMatrixPolicy, EMPTY_CLASS_MATRIX, load_class_matrix_policy
+from .config import DEFAULT_RELATIONS, ProjectConfig, load_config
+from .graph_views import scoped_artifact_ids, semantic_relation_ids
 from .artifact_state import (
     _artifact_content,
     _artifact_state_item,
@@ -23,7 +26,12 @@ def _change_payload(
     row = db.execute("SELECT * FROM artifacts WHERE id = ?", (change_id,)).fetchone()
     if not row:
         raise click.ClickException(f"Change not found in graph: {change_id}")
-    scope_rows = _scope_rows(db, change_id)
+    scope_rows = _scope_rows(
+        db,
+        change_id,
+        load_config(root),
+        class_policy=load_class_matrix_policy(root),
+    )
     state_items = [
         _artifact_state_item(
             db,
@@ -47,8 +55,17 @@ def _change_payload(
     }
 
 
-def _scope_rows(db: sqlite3.Connection, change_id: str) -> list[sqlite3.Row]:
-    ids = _scope_ids(db, change_id)
+def _scope_rows(
+    db: sqlite3.Connection,
+    change_id: str,
+    config: ProjectConfig,
+    *,
+    view: str = "delivery",
+    class_policy: ClassMatrixPolicy = EMPTY_CLASS_MATRIX,
+) -> list[sqlite3.Row]:
+    ids = _scope_ids(
+        db, change_id, config, view=view, class_policy=class_policy
+    )
     if ids:
         placeholders = ",".join("?" for _ in ids)
         return db.execute(
@@ -59,103 +76,30 @@ def _scope_rows(db: sqlite3.Connection, change_id: str) -> list[sqlite3.Row]:
     return [row] if row else []
 
 
-def _scope_ids(db: sqlite3.Connection, root_id: str) -> set[str]:
-    root = db.execute("SELECT type FROM artifacts WHERE id = ?", (root_id,)).fetchone()
-    if root and root["type"] in {"CONTRACT", "FLOW", "JNY"}:
-        return _assembly_scope_ids(db, root_id)
-
-    scope_relations = _semantic_scope_relations()
-    incoming_scope_relations = _incoming_scope_relations()
-    result: set[str] = set()
-    seen = {root_id}
-    queue = [root_id]
-    while queue:
-        current = queue.pop(0)
-        outgoing_rows = db.execute(
-            "SELECT target_id FROM edges WHERE source_id = ? "
-            f"AND relation_type IN ({','.join('?' for _ in scope_relations)}) "
-            "ORDER BY target_id",
-            (current, *sorted(scope_relations)),
-        ).fetchall()
-        incoming_rows = db.execute(
-            "SELECT source_id AS target_id FROM edges WHERE target_id = ? "
-            f"AND relation_type IN ({','.join('?' for _ in incoming_scope_relations)}) "
-            "ORDER BY source_id",
-            (current, *sorted(incoming_scope_relations)),
-        ).fetchall()
-        for row in outgoing_rows:
-            target_id = row["target_id"]
-            if target_id in seen:
-                continue
-            seen.add(target_id)
-            result.add(target_id)
-            queue.append(target_id)
-        for row in incoming_rows:
-            target_id = row["target_id"]
-            if target_id in seen:
-                continue
-            seen.add(target_id)
-            result.add(target_id)
-    return result
-
-
-def _assembly_scope_ids(db: sqlite3.Connection, root_id: str) -> set[str]:
-    """Keep feature-flow scope bounded while retaining declared provenance."""
-    result: set[str] = set()
-    seen = {root_id}
-    queue = [root_id]
-    context_relations = {"DEPENDS_ON", "NORMALIZES", "TRACES_TO"}
-    while queue:
-        current = queue.pop(0)
-        children = db.execute(
-            "SELECT target_id FROM edges WHERE source_id = ? "
-            "AND relation_type = 'CONTAINS' ORDER BY target_id",
-            (current,),
-        ).fetchall()
-        for row in children:
-            target_id = row["target_id"]
-            result.add(target_id)
-            if target_id not in seen:
-                seen.add(target_id)
-                queue.append(target_id)
-
-        placeholders = ",".join("?" for _ in context_relations)
-        context = db.execute(
-            "SELECT target_id FROM edges WHERE source_id = ? "
-            f"AND relation_type IN ({placeholders}) ORDER BY target_id",
-            (current, *sorted(context_relations)),
-        ).fetchall()
-        result.update(row["target_id"] for row in context)
-    return result
+def _scope_ids(
+    db: sqlite3.Connection,
+    root_id: str,
+    config: ProjectConfig,
+    *,
+    view: str = "delivery",
+    class_policy: ClassMatrixPolicy = EMPTY_CLASS_MATRIX,
+) -> set[str]:
+    return scoped_artifact_ids(
+        db, root_id, config, view=view, class_policy=class_policy
+    )
 
 
 def _semantic_scope_relations() -> set[str]:
+    """Core contract relations retained for callers without project config."""
     return {
-        "CONTAINS",
-        "DEPENDS_ON",
-        "TRACES_TO",
-        "NORMALIZES",
-        "IMPLEMENTS",
-        "VERIFIES",
-        "RENDERS",
-        "TEST_EVIDENCE",
-        "CODE_TRACE",
-        "UI_TRACE",
+        relation
+        for relation, definition in DEFAULT_RELATIONS.items()
+        if definition.get("traversal") in {"expand", "context"}
     }
 
 
 def _incoming_scope_relations() -> set[str]:
-    return {
-        "CODE_TRACE",
-        "CONTAINS",
-        "DEPENDS_ON",
-        "IMPLEMENTS",
-        "RENDERS",
-        "TEST_EVIDENCE",
-        "TRACES_TO",
-        "UI_TRACE",
-        "VERIFIES",
-    }
+    return _semantic_scope_relations()
 
 
 def _evidence_profile(
@@ -172,7 +116,7 @@ def _evidence_profile(
             "s.origin AS source_origin, s.title AS source_title, s.source_file AS source_file "
             "FROM edges e JOIN artifacts s ON e.source_id = s.id "
             f"WHERE e.target_id IN ({placeholders}) "
-            "AND e.relation_type IN ('TEST_EVIDENCE', 'VERIFIES') "
+            "AND e.relation_type = 'VERIFIES' "
             "ORDER BY e.target_id, s.id",
             tuple(ac_ids),
         ).fetchall()
@@ -360,18 +304,30 @@ def _quality_axes(
     findings: list[dict[str, Any]],
     evidence_profile: dict[str, Any],
     snapshot_loaded: bool,
+    *,
+    target_type: str = "",
+    config: ProjectConfig,
+    weak_behavior_candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     finding_codes = {item.get("code") for item in findings}
     fail_codes = {
         item.get("code") for item in findings if item.get("severity") == "fail"
     }
-    types = {item["type"] for item in states}
     dynamic = _is_dynamic_scope(states)
-    behavior_missing = _behavior_model_missing(types, dynamic)
+    behavior_missing = _behavior_model_missing(states, dynamic, target_type, config)
+    weak_behavior_candidates = weak_behavior_candidates or []
     axes = {
         "traceability": _axis(
-            "FAIL" if "missing_trace" in fail_codes else "PASS",
-            "typed graph scope is connected; weak MENTIONS are not counted as proof",
+            "FAIL"
+            if {
+                "missing_trace",
+                "undefined_artifact",
+                "undeclared_class_edge",
+                "ambiguous_class_direction",
+            }
+            & fail_codes
+            else "PASS",
+            "typed graph scope is connected and every scoped artifact is defined; weak MENTIONS are not proof",
         ),
         "implementation_proof": _axis(
             "FAIL"
@@ -387,10 +343,11 @@ def _quality_axes(
         ),
         "behavior_model": _axis(
             "PARTIAL" if behavior_missing else "PASS",
-            "dynamic behavior scopes should expose RULE/DER plus STATE/EVT artifacts"
+            "dynamic behavior scopes are checked by configured semantic capabilities, not artifact type names"
             if behavior_missing
             else "required behavior artifact classes are present or scope is static",
             missing=behavior_missing,
+            weak_candidates=weak_behavior_candidates,
         ),
         "runtime_acceptance": _axis(
             _runtime_acceptance_status(evidence_profile),
@@ -474,17 +431,75 @@ def _is_dynamic_scope(states: list[dict[str, Any]]) -> bool:
     )
 
 
-def _behavior_model_missing(types: set[str], dynamic: bool) -> list[str]:
+def _behavior_model_missing(
+    states: list[dict[str, Any]],
+    dynamic: bool,
+    target_type: str,
+    config: ProjectConfig,
+) -> list[str]:
     if not dynamic:
         return []
-    missing = []
-    if not ({"RULE", "DER"} & types):
-        missing.append("RULE_OR_DER")
-    if "STATE" not in types:
-        missing.append("STATE")
-    if "EVT" not in types:
-        missing.append("EVT")
-    return missing
+    target = config.types.get(target_type)
+    if not target or not (
+        set(target.capabilities) & set(config.behavior_model.target_capabilities)
+    ):
+        return []
+    present = {
+        capability
+        for item in states
+        for capability in (
+            config.types.get(item["type"]).capabilities
+            if item["type"] in config.types
+            else []
+        )
+    }
+    return [
+        capability
+        for capability in config.behavior_model.required_capabilities
+        if capability not in present
+    ]
+
+
+def _weak_behavior_candidates(
+    db: sqlite3.Connection,
+    states: list[dict[str, Any]],
+    missing: list[str],
+    config: ProjectConfig,
+) -> list[dict[str, Any]]:
+    """Find behavior artifacts reachable only through weak MENTIONS edges."""
+    missing_capabilities = set(missing)
+    candidate_types = {
+        type_id
+        for type_id, definition in config.types.items()
+        if missing_capabilities & set(definition.capabilities)
+    }
+    scope_ids = sorted(item["id"] for item in states)
+    if not candidate_types or not scope_ids:
+        return []
+    id_placeholders = ",".join("?" for _ in scope_ids)
+    type_placeholders = ",".join("?" for _ in candidate_types)
+    params = (*sorted(candidate_types), *scope_ids, *scope_ids)
+    rows = db.execute(
+        "SELECT DISTINCT a.id, a.type, a.title FROM artifacts a "
+        "JOIN edges e ON (e.source_id = a.id OR e.target_id = a.id) "
+        f"WHERE a.type IN ({type_placeholders}) AND e.relation_type = 'MENTIONS' "
+        f"AND ((e.source_id = a.id AND e.target_id IN ({id_placeholders})) "
+        f"OR (e.target_id = a.id AND e.source_id IN ({id_placeholders}))) "
+        "ORDER BY a.type, a.id",
+        params,
+    ).fetchall()
+    scoped = set(scope_ids)
+    return [
+        {
+            **dict(row),
+            "capabilities": sorted(
+                missing_capabilities
+                & set(config.types[row["type"]].capabilities)
+            ),
+        }
+        for row in rows
+        if row["id"] not in scoped
+    ]
 
 
 def _gate_finding(item: dict[str, Any], code: str, severity: str) -> dict[str, Any]:
@@ -564,28 +579,17 @@ def _pack_payload(db: sqlite3.Connection, root: Path, target_id: str) -> dict[st
     row = db.execute("SELECT * FROM artifacts WHERE id = ?", (target_id,)).fetchone()
     if not row:
         raise click.ClickException(f"Artifact not found: {target_id}")
+    config = load_config(root)
+    class_policy = load_class_matrix_policy(root)
+    related_ids = _scope_ids(
+        db, target_id, config, view="delivery", class_policy=class_policy
+    )
     if row["type"] == "CHG":
-        rows = [row, *_scope_rows(db, target_id)]
+        rows = [
+            row,
+            *_scope_rows(db, target_id, config, class_policy=class_policy),
+        ]
     else:
-        related_ids = _scope_ids(db, target_id)
-        related_ids.add(target_id)
-        if related_ids:
-            semantic_relations = _semantic_scope_relations()
-            placeholders = ",".join("?" for _ in related_ids)
-            relation_placeholders = ",".join("?" for _ in semantic_relations)
-            adjacent = db.execute(
-                "SELECT source_id, target_id FROM edges "
-                f"WHERE relation_type IN ({relation_placeholders}) "
-                f"AND (source_id IN ({placeholders}) OR target_id IN ({placeholders}))",
-                (
-                    *sorted(semantic_relations),
-                    *tuple(sorted(related_ids)),
-                    *tuple(sorted(related_ids)),
-                ),
-            ).fetchall()
-            for edge in adjacent:
-                related_ids.add(edge["source_id"])
-                related_ids.add(edge["target_id"])
         placeholders = ",".join("?" for _ in related_ids)
         rows = db.execute(
             f"SELECT * FROM artifacts WHERE id IN ({placeholders}) ORDER BY type, id",
@@ -605,7 +609,7 @@ def _pack_payload(db: sqlite3.Connection, root: Path, target_id: str) -> dict[st
     ids = [item["id"] for item in rows]
     if ids:
         placeholders = ",".join("?" for _ in ids)
-        semantic_relations = _semantic_scope_relations()
+        semantic_relations = semantic_relation_ids(config, view="delivery")
         relation_placeholders = ",".join("?" for _ in semantic_relations)
         edge_rows = db.execute(
             "SELECT source_id, target_id, relation_type, context, source_file, line_number "
@@ -632,7 +636,11 @@ def _worklist_priority(kind: str, source: dict[str, Any] | None) -> str:
         "add_evidence": "P1",
         "add_required_evidence": "P1",
         "add_trace": "P1",
-        "add_behavior_rule": "P1",
+        "add_behavior_capability": "P0",
+        "upgrade_relation": "P0",
+        "resolve_artifact": "P0",
+        "add_matrix_rule": "P1",
+        "fix_matrix_direction": "P0",
         "synthesize_ac": "P2",
         "refresh_acceptance": "P0",
     }.get(kind, "P2")
@@ -658,10 +666,30 @@ def _worklist_suggested_actions(kind: str, artifact: str) -> list[str]:
             f"add the missing evidence kind for {artifact}",
             "choose unit/backend integration/frontend unit/e2e UI/contract/static source evidence according to AC classification",
         ]
-    if kind == "add_behavior_rule":
+    if kind == "add_behavior_capability":
         return [
-            f"add graph-native RULE/DER/STATE/EVT artifacts for {artifact}",
-            "describe dynamic behavior before relying on implementation/test traces",
+            f"connect artifacts that provide the missing behavior capabilities for {artifact}",
+            "reuse project-native artifact classes first; introduce a new type only when no existing class owns that meaning",
+        ]
+    if kind == "upgrade_relation":
+        return [
+            f"replace weak-only MENTIONS wiring for {artifact} with a typed relation",
+            "use CONTAINS for flow assembly or TRACES_TO/NORMALIZES/DEPENDS_ON for explicit semantics",
+        ]
+    if kind == "resolve_artifact":
+        return [
+            f"restore or define {artifact}",
+            "if it is adapter-owned, regenerate/copy the observed provider projection before running gates",
+        ]
+    if kind == "add_matrix_rule":
+        return [
+            f"review the undeclared class edge involving {artifact}",
+            "add one canonical source_class/relation/target_class rule or replace the edge; do not add a reverse duplicate",
+        ]
+    if kind == "fix_matrix_direction":
+        return [
+            "choose one canonical orientation for the class pair",
+            "remove reverse matrix entries and use incoming-edge queries for the reverse view; symmetric/self relations are exempt",
         ]
     if kind == "refresh_acceptance":
         return [
@@ -759,22 +787,24 @@ def _is_interactive_or_visible_uic(node: dict[str, Any]) -> bool:
     return node.get("type") == "UIC"
 
 
-def _has_outgoing_to_type(
+def _has_outgoing_to_capability(
     artifact: str,
     relation: str,
-    target_type: str,
+    target_capability: str,
     outgoing: dict[str, list[dict[str, Any]]],
     by_id: dict[str, dict[str, Any]],
 ) -> bool:
     return any(
         edge["relation"] == relation
-        and by_id.get(edge["to"], {}).get("type") == target_type
+        and target_capability
+        in by_id.get(edge["to"], {}).get("capabilities", [])
         for edge in outgoing.get(artifact, [])
     )
 
 
-def _screen_has_acceptance_trace(
+def _has_reachable_capability(
     artifact: str,
+    target_capability: str,
     outgoing: dict[str, list[dict[str, Any]]],
     by_id: dict[str, dict[str, Any]],
 ) -> bool:
@@ -787,7 +817,7 @@ def _screen_has_acceptance_trace(
             if edge["relation"] not in allowed:
                 continue
             target = edge["to"]
-            if by_id.get(target, {}).get("type") == "AC":
+            if target_capability in by_id.get(target, {}).get("capabilities", []):
                 return True
             if target not in seen:
                 seen.add(target)

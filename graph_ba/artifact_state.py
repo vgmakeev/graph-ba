@@ -30,16 +30,15 @@ IMPLEMENTATION_ARTIFACT_TYPES = {
 }
 
 PROOF_INCOMING_RELATIONS = {
-    "CODE_TRACE",
     "CONTAINS",
     "DEPENDS_ON",
     "IMPLEMENTS",
     "RENDERS",
     "TRACES_TO",
-    "UI_TRACE",
 }
 
 PROOF_OUTGOING_RELATIONS = {
+    "CONTAINS",
     "DEPENDS_ON",
     "TRACES_TO",
 }
@@ -102,6 +101,7 @@ def _artifact_state_item(
         "type": row["type"],
         "origin": row["origin"],
         "title": row["title"],
+        "defined": bool(row["defined"]),
         "source_file": row["source_file"],
         "line_number": row["line_number"],
         "lifecycle": lifecycle,
@@ -110,6 +110,7 @@ def _artifact_state_item(
             "verified": verified,
             "changing": bool(active_changes),
             "stale": bool(stale_reasons),
+            "undefined": not bool(row["defined"]),
             "unimplemented": lifecycle in {"accepted", "planned"} and not implemented,
             "unverified": lifecycle in {"accepted", "planned"} and not verified,
         },
@@ -146,7 +147,7 @@ def _artifact_fingerprints(db: sqlite3.Connection, row: sqlite3.Row) -> dict[str
     )
     evidence = _edge_tuples(
         db,
-        "WHERE (source_id = ? OR target_id = ?) AND relation_type IN ('TEST_EVIDENCE', 'VERIFIES')",
+        "WHERE (source_id = ? OR target_id = ?) AND relation_type = 'VERIFIES'",
         (artifact_id, artifact_id),
     )
     return {
@@ -316,7 +317,7 @@ def _artifact_has_evidence(db: sqlite3.Connection, artifact_id: str) -> bool:
     found = db.execute(
         "SELECT 1 FROM edges e JOIN artifacts s ON e.source_id = s.id "
         "WHERE e.target_id = ? "
-        "AND e.relation_type IN ('TEST_EVIDENCE', 'VERIFIES') "
+        "AND e.relation_type = 'VERIFIES' "
         "AND (s.origin = 'evidence' OR s.type IN ('TEST', 'EVD', 'UI')) LIMIT 1",
         (artifact_id,),
     ).fetchone()

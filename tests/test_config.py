@@ -27,6 +27,11 @@ class TestLoadConfig:
         assert project_config.types["REQ"].origin == "canonical"
         assert project_config.types["FEAT"].origin == "reviewed_derived"
 
+    def test_type_capabilities_and_required_proofs(self, project_config):
+        assert project_config.types["BP"].capabilities == ["flow"]
+        assert project_config.types["BR"].capabilities == ["decision"]
+        assert project_config.types["FEAT"].required_proofs == ["implementation"]
+
     def test_default_origin_enums_loaded(self, project_config):
         assert project_config.origins["canonical"].label == "Canonical contract"
         assert project_config.origins["derived"].label == "Derived analysis artifact"
@@ -37,13 +42,19 @@ class TestLoadConfig:
 
     def test_default_relation_enums_loaded(self, project_config):
         assert project_config.relation_types["MENTIONS"].direction == "source_mentions_target"
+        assert project_config.relation_types["MENTIONS"].role == "navigation"
+        assert project_config.relation_types["MENTIONS"].traversal == "hidden"
         assert project_config.relation_types["VERIFIES"].direction == "evidence_to_contract"
+        assert project_config.relation_types["VERIFIES"].traversal == "terminal"
+        assert project_config.relation_types["CONTAINS"].traversal == "expand"
 
     def test_project_relation_enums_can_override_and_extend(self, project_config):
         normalizes = project_config.relation_types["NORMALIZES"]
         assert normalizes.label == "Normalizes raw input"
         assert normalizes.direction == "canonical_to_raw"
+        assert normalizes.role == "provenance"
         assert project_config.relation_types["REVIEWS"].label == "Reviews"
+        assert project_config.relation_types["REVIEWS"].traversal == "context"
 
     def test_type_ref_pattern_compiles(self, project_config):
         pat = project_config.types["REQ"].ref_pattern

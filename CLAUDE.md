@@ -6,12 +6,34 @@ Graph BA — standalone CLI для графовой индексации и тр
 
 ## Основной рабочий цикл
 
-Два ключевых действия — суть проекта:
+Для изменения продукта основной цикл: `change init` → правка owning artifacts
+→ `change compile` → human approval fingerprint → implementation/evidence →
+release check. `compile` одним запуском строит semantic delta, impact, bounded
+graph, evidence plan, gate и worklist. `import`, `graph`, `search`, `path`, `sql`,
+`review` и другие команды — диагностика, а не обязательный ритуал; `jq` в
+нормальном агентском цикле не нужен.
 
-1. **`graph-ba import`** — переиндексация: скан markdown-файлов, построение графа в SQLite
-2. **`graph-ba review <ID> --semantic`** — семантический ревью: собирает полный текст всех связанных артефактов и проверяет полноту, непротиворечивость, трассируемость
+## AI-native SDLC contract
 
-Всё остальное (search, anomalies, coverage, path, impact) — вспомогательные инструменты навигации по графу.
+- Полная SQLite-модель хранит source, contract, proof, change и navigation слои.
+- Gate/agent scope строится через `contract|delivery|navigation|full` projections,
+  а не одним рекурсивным BFS.
+- `MENTIONS` и `INDEX` никогда не являются acceptance proof.
+- Код использует `IMPLEMENTS`, тесты/evidence — `VERIFIES`, UI — `RENDERS`.
+  Происхождение ребра хранится в provider/file/line metadata, а не в отдельных
+  relation ids.
+- Enforced artifact-class matrix задаёт единственное направление между двумя
+  разными классами. Reverse view использует incoming query. Исключения:
+  same-class lifecycle и symmetric relations.
+- Brownfield-документы не переписываются массово: typed связь добавляется
+  стабильным `:::link`/`LNK-*` assertion в graph-native overlay.
+- Core не навязывает онтологию типов. Проектные классы объявляют
+  `capabilities` (`flow`, `decision`, `state`, `event`, `screen`, `acceptance`)
+  и `required_proofs`. Старые `BP/BD/BR/...` должны переиспользоваться; новый
+  тип вводится только для отсутствующей смысловой единицы с отдельным owner и
+  lifecycle.
+- `change compile` — основной one-shot compiler semantic delta, impact, graph,
+  evidence plan, gate и worklist. Не заставляй пользователя собирать это через jq.
 
 ## Установка и запуск
 
@@ -45,6 +67,8 @@ uv run --with ~/dev/graph-ba graph-ba import
 
 - **`[scan]`** — директории для сканирования .md файлов
 - **`[types.*]`** — типы артефактов с regex-паттернами для ID
+- **`capabilities` / `required_proofs`** — смысл класса и обязательные proof gates
+- **`[behavior_model]`** — capability profile динамических целей
 - **`[[definitions]]`** — правила поиска определений (heading/table, поддерживает glob)
 - **`[[index_tables]]`** — индексные таблицы для извлечения перекрёстных ссылок
 - **`[[coverage]]`** — ожидаемые межслойные связи для матрицы покрытия

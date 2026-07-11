@@ -7,12 +7,14 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from .config import ProjectConfig
+from .graph_views import semantic_relation_ids
 from .gate_analysis import (
-    _has_outgoing_to_type,
+    _has_outgoing_to_capability,
     _is_interactive_or_visible_uic,
     _priority_rank,
     _raw_to_canonical_synthesis_gap,
-    _screen_has_acceptance_trace,
+    _has_reachable_capability,
     _semantic_scope_relations,
     _worklist_blocking_modes,
     _worklist_priority,
@@ -100,6 +102,29 @@ def _agent_worklist(
                 "accepted fingerprint or evidence is stale or missing",
                 source=finding,
             )
+        elif code == "undefined_artifact":
+            add(
+                "resolve_artifact",
+                artifact,
+                "artifact is referenced but has no definition; restore its provider projection or add its canonical owner",
+                source=finding,
+            )
+        elif code == "undeclared_class_edge":
+            add(
+                "add_matrix_rule",
+                artifact,
+                finding.get("message")
+                or "typed edge is not declared by the project artifact-class matrix",
+                source=finding,
+            )
+        elif code == "ambiguous_class_direction":
+            add(
+                "fix_matrix_direction",
+                artifact,
+                finding.get("message")
+                or "artifact classes have opposing matrix directions",
+                source=finding,
+            )
         else:
             add(
                 "add_trace",
@@ -110,13 +135,33 @@ def _agent_worklist(
 
     behavior_axis = gate_data.get("quality_axes", {}).get("behavior_model", {})
     if behavior_axis.get("status") == "PARTIAL":
-        missing = behavior_axis.get("missing", [])
-        add(
-            "add_behavior_rule",
-            gate_data.get("target", ""),
-            f"dynamic behavior model is partial; missing {', '.join(missing) or 'behavior artifacts'}",
-            source={"code": "behavior_model_partial", "severity": "warn"},
-        )
+        missing = set(behavior_axis.get("missing", []))
+        candidates = behavior_axis.get("weak_candidates", [])
+        candidate_capabilities = {
+            capability
+            for item in candidates
+            for capability in item.get("capabilities", [])
+        }
+        for candidate in candidates:
+            add(
+                "upgrade_relation",
+                candidate["id"],
+                "behavior artifact is connected to this scope only by weak MENTIONS; add an explicit typed edge from its canonical owner",
+                source={
+                    "code": "weak_behavior_relation",
+                    "severity": "warn",
+                    "type": candidate.get("type", ""),
+                },
+            )
+        unresolved = missing - candidate_capabilities
+        if unresolved:
+            add(
+                "add_behavior_capability",
+                gate_data.get("target", ""),
+                "dynamic behavior model is partial; missing configured capabilities "
+                f"{', '.join(sorted(unresolved))}",
+                source={"code": "behavior_model_partial", "severity": "warn"},
+            )
     evidence_profile = gate_data.get("evidence_profile", {})
     for artifact in evidence_profile.get("trace_only_ac", [])[:20]:
         add(
@@ -127,22 +172,27 @@ def _agent_worklist(
         )
     for node in nodes:
         artifact = node["id"]
-        artifact_type = node["type"]
+        capabilities = set(node.get("capabilities", []))
+        required_proofs = set(node.get("required_proofs", []))
         computed = node.get("computed") or {}
-        if artifact_type == "SCR":
-            if not _has_outgoing_to_type(artifact, "CONTAINS", "UIC", outgoing, by_id):
+        if "screen" in capabilities:
+            if not _has_outgoing_to_capability(
+                artifact, "CONTAINS", "ui_zone", outgoing, by_id
+            ):
                 add(
                     "add_trace",
                     artifact,
                     "screen readiness lint: screen has no scoped UIC artifact",
                 )
-            if not _screen_has_acceptance_trace(artifact, outgoing, by_id):
+            if not _has_reachable_capability(
+                artifact, "acceptance", outgoing, by_id
+            ):
                 add(
                     "add_trace",
                     artifact,
                     "screen readiness lint: screen has no reachable AC trace",
                 )
-        if artifact_type == "AC" and computed:
+        if "verification" in required_proofs and computed:
             if computed.get("implemented") and not computed.get("verified"):
                 add("add_evidence", artifact, "AC is implemented but not verified")
             elif computed.get("verified") and not computed.get("implemented"):
@@ -152,9 +202,11 @@ def _agent_worklist(
                     "AC is verified but has no implementation proof",
                 )
         if (
-            artifact_type == "UIC"
+            "ui_zone" in capabilities
             and _is_interactive_or_visible_uic(node)
-            and not _has_outgoing_to_type(artifact, "TRACES_TO", "AC", outgoing, by_id)
+            and not _has_outgoing_to_capability(
+                artifact, "TRACES_TO", "acceptance", outgoing, by_id
+            )
         ):
             add("add_trace", artifact, "visible UI zone has no canonical AC trace")
         synthesis_gap = _raw_to_canonical_synthesis_gap(
@@ -177,13 +229,12 @@ def _agent_worklist(
 def _graph_slice_edges(
     db: sqlite3.Connection,
     ids: set[str],
-    include_mentions: bool,
+    config: ProjectConfig,
+    view: str,
 ) -> list[dict[str, Any]]:
     if not ids:
         return []
-    relations = set(_semantic_scope_relations())
-    if include_mentions:
-        relations.add("MENTIONS")
+    relations = semantic_relation_ids(config, view=view)
     placeholders = ",".join("?" for _ in ids)
     relation_placeholders = ",".join("?" for _ in relations)
     rows = db.execute(

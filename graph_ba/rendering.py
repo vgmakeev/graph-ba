@@ -5,6 +5,37 @@ from __future__ import annotations
 from typing import Any
 
 
+def _render_graph_summary(payload: dict[str, Any], *, worklist_limit: int = 12) -> str:
+    summary = payload["summary"]
+    lines = [
+        f"graph-ba {payload['target']}",
+        (
+            f"{payload['verdict']} readiness={payload.get('readiness', 'UNKNOWN')} "
+            f"confidence={payload['overall_confidence']} mode={payload['mode']}"
+        ),
+        (
+            f"scope={summary['scope']} nodes={summary['nodes']} edges={summary['edges']} "
+            f"evidence_gaps={summary['evidence_plan']['gap']} view={summary['view']}"
+        ),
+        "",
+        "Quality axes:",
+    ]
+    for name, axis in payload.get("quality_axes", {}).items():
+        lines.append(f"- {name}: {axis['status']} — {axis['reason']}")
+        missing = axis.get("missing") or []
+        if missing:
+            lines.append(f"  missing: {', '.join(missing)}")
+    worklist = payload.get("agent_worklist", [])
+    lines.extend(["", f"Worklist: {len(worklist)}"])
+    for item in worklist[:worklist_limit]:
+        lines.append(
+            f"- {item['priority']} {item['kind']} {item['artifact']}: {item['reason']}"
+        )
+    if len(worklist) > worklist_limit:
+        lines.append(f"- … {len(worklist) - worklist_limit} more; use --json or --out")
+    return "\n".join(lines) + "\n"
+
+
 def _render_pack_markdown(payload: dict[str, Any]) -> str:
     lines = [f"# graph-ba pack: {payload['target']}", ""]
     lines.append("## Artifacts")

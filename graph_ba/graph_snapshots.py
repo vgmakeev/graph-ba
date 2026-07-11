@@ -21,15 +21,12 @@ from graph_ba.db import SCHEMA_VERSION
 CONTRACT_EXCLUDED_ORIGINS = {"implementation", "evidence"}
 CONTRACT_EXCLUDED_PREFIXES = ("CODE:", "FILE:", "TEST:", "UI:")
 IMPACT_RELATIONS = {
-    "CODE_TRACE",
     "CONTAINS",
     "DEPENDS_ON",
     "IMPLEMENTS",
     "NORMALIZES",
     "RENDERS",
-    "TEST_EVIDENCE",
     "TRACES_TO",
-    "UI_TRACE",
     "VERIFIES",
 }
 
@@ -177,6 +174,13 @@ def impact_paths(
 ) -> dict[str, Any]:
     """Traverse a bounded union of base and delivery graphs with path evidence."""
     changed = {item["id"] for item in graph_change.get("nodes", [])}
+    for edge in graph_change.get("edges", []):
+        if edge.get("operation") != "add":
+            continue
+        if edge.get("source"):
+            changed.add(edge["source"])
+        if edge.get("target"):
+            changed.add(edge["target"])
     seeds = sorted(changed | set(scope_hints))
     base_nodes = _all_nodes(views.base)
     delivery_nodes = _all_nodes(views.delivery)

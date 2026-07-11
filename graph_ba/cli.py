@@ -28,7 +28,11 @@ from .cli_core import (
 )
 from .gate_analysis import _change_payload, _pack_payload
 from .gates import _gate_payload, _graph_slice_payload
-from .rendering import _render_evidence_plan_markdown, _render_pack_markdown
+from .rendering import (
+    _render_evidence_plan_markdown,
+    _render_graph_summary,
+    _render_pack_markdown,
+)
 
 
 # ── Schema ────────────────────────────────────────────────────────
@@ -92,7 +96,7 @@ range_pattern = '((?:REQ|FUNC)\\.\\d+\\.)(\\d+)\\s*[–\\-]\\s*(?:(?:REQ|FUNC)\\
 # description = "Agent or analyst output reviewed by a human analyst."
 
 # ── Edge relation enum ──
-# graph-ba emits MENTIONS, INDEX, CODE_TRACE, TEST_EVIDENCE and UI_TRACE.
+# graph-ba emits weak MENTIONS/INDEX plus semantic IMPLEMENTS/VERIFIES/RENDERS.
 # It also suggests semantic relation names for agent-first traceability:
 # DERIVES_FROM, NORMALIZES, IMPLEMENTS, VERIFIES, RENDERS, CONFLICTS_WITH,
 # SUPERSEDES, TRACE_GAP. Projects can add their own relation types.
@@ -617,7 +621,14 @@ def pack(ctx, target_id, out_path, output_format):
 @click.option(
     "--include-mentions",
     is_flag=True,
-    help="Include weak MENTIONS edges; omitted by default for agent/acceptance graph slices",
+    help="Alias for --view navigation; include bounded weak navigation context",
+)
+@click.option(
+    "--view",
+    type=click.Choice(["contract", "delivery", "navigation", "full"]),
+    default="delivery",
+    show_default=True,
+    help="Project the full knowledge graph for contract, delivery, navigation or full exploration",
 )
 @click.option(
     "--out",
@@ -625,6 +636,11 @@ def pack(ctx, target_id, out_path, output_format):
     type=click.Path(path_type=Path),
     default=None,
     help="Write graph slice JSON to this file",
+)
+@click.option(
+    "--summary",
+    is_flag=True,
+    help="Print a concise readiness/worklist summary instead of full JSON",
 )
 @click.pass_context
 def graph_slice(
@@ -635,7 +651,9 @@ def graph_slice(
     content_mode,
     content_limit,
     include_mentions,
+    view,
     out_path,
+    summary,
 ):
     """Export scoped nodes, typed edges, content excerpts and findings as JSON."""
     root = Path(ctx.obj.get("root", ".")).resolve()
@@ -650,6 +668,7 @@ def graph_slice(
         content_mode,
         content_limit,
         include_mentions,
+        view=view,
     )
     db.close()
     text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
@@ -659,7 +678,10 @@ def graph_slice(
         if not ctx.obj.get("json"):
             print(f"Wrote graph-ba graph slice: {out_path}")
             return
-    print(text)
+    if summary and not ctx.obj.get("json"):
+        print(_render_graph_summary(payload), end="")
+    else:
+        print(text)
 
 
 @cli.command("evidence-plan")

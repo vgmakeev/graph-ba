@@ -3,7 +3,13 @@ import subprocess
 
 from click.testing import CliRunner
 
-from graph_ba.change_workflow import ChangeWorkflowService, proposal_check, semantic_diff
+from graph_ba.change_workflow import (
+    ChangeWorkflowService,
+    init_change,
+    proposal_check,
+    semantic_diff,
+)
+from graph_ba.change_authoring import add_link
 from graph_ba.cli import cli
 from graph_ba.db import do_import, get_db
 
@@ -93,6 +99,31 @@ def test_semantic_diff_changes_only_edited_stable_id_section(tmp_path):
     assert [item["path"] for item in payload["contract_files"]] == ["docs/spec.md"]
     assert payload["supporting_files"] == []
     assert payload["delivery_files"] == []
+
+
+def test_semantic_diff_binds_brownfield_link_overlay_to_fingerprint(tmp_path):
+    root = _project(tmp_path)
+    init_change(
+        root,
+        "CHG-order-trace",
+        intent="Promote one brownfield mention to a declared trace",
+        base_ref="main",
+        scope=("AC-ORD-001",),
+    )
+    link = add_link(
+        root,
+        "CHG-order-trace",
+        "AC-ORD-001",
+        "TRACES_TO",
+        "AC-ORD-003",
+    )
+
+    payload = semantic_diff(root, base_ref="main")
+
+    assert [(item["operation"], item["id"], item["type"]) for item in payload["contract"]] == [
+        ("add", link["assertion"], "LINK")
+    ]
+    assert len(payload["proposal_fingerprint"]) == 64
 
 
 def test_semantic_diff_separates_unrelated_delivery_files(tmp_path):
@@ -355,6 +386,23 @@ def test_approval_is_invalidated_by_proposal_policy_edit(tmp_path):
 
 def test_change_init_can_create_isolated_worktree_from_dirty_checkout(tmp_path):
     root = _project(tmp_path)
+    config = (root / "graph-ba.toml").read_text(encoding="utf-8")
+    (root / "graph-ba.toml").write_text(
+        config
+        + '\n[providers.codegraph]\ndatabase = ".codegraph/codegraph.db"\n',
+        encoding="utf-8",
+    )
+    (root / ".gitignore").write_text(
+        ".codegraph/\nreports/graphba/observed/\n",
+        encoding="utf-8",
+    )
+    _git(root, "add", "graph-ba.toml", ".gitignore")
+    _git(root, "commit", "-m", "Configure local graph providers")
+    (root / ".codegraph").mkdir()
+    (root / ".codegraph" / "codegraph.db").write_bytes(b"codegraph")
+    observed = root / "reports" / "graphba" / "observed"
+    observed.mkdir(parents=True)
+    (observed / "mini.md").write_text("observed graph\n", encoding="utf-8")
     (root / "scratch.txt").write_text("parallel user work\n", encoding="utf-8")
     worktree = tmp_path / "order-change-worktree"
 
@@ -381,6 +429,9 @@ def test_change_init_can_create_isolated_worktree_from_dirty_checkout(tmp_path):
     assert f'base_ref: "{_git(root, "rev-parse", "main")}"' in content
     assert 'target_ref: "main"' in content
     assert _git(worktree, "branch", "--show-current") == "change/chg-worktree-order"
+    assert (worktree / ".codegraph" / "codegraph.db").read_bytes() == b"codegraph"
+    assert (worktree / "reports" / "graphba" / "observed" / "mini.md").is_file()
+    assert "Bootstrapped local graph inputs:" in result.output
 
 
 def test_change_branch_starts_from_explicit_base_and_monitors_target(tmp_path):

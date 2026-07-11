@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from pathlib import Path
 from typing import Iterable
@@ -107,7 +108,15 @@ def add_link(
         and _line_is_graph_native(item.source_file, item.line_number)
     ]
     if not graph_native:
-        raise ChangeAuthoringError(f"graph-native source artifact not found: {source_id}")
+        if not occurrences:
+            raise ChangeAuthoringError(f"source artifact not found: {source_id}")
+        return _add_link_overlay(
+            root,
+            change_id,
+            source_id,
+            GRAPH_NATIVE_LINK_ATTRS[attr_name],
+            target_id,
+        )
     selected = _select_owner(root, graph_native)
     lines = selected.source_file.read_text(encoding="utf-8").splitlines()
     index = selected.line_number - 1
@@ -127,6 +136,45 @@ def add_link(
         "relation": GRAPH_NATIVE_LINK_ATTRS[attr_name],
         "target": target_id,
         "file": str(selected.source_file.relative_to(root)),
+    }
+
+
+def _add_link_overlay(
+    root: Path,
+    change_id: str,
+    source_id: str,
+    relation: str,
+    target_id: str,
+) -> dict[str, str]:
+    """Declare a strong link without rewriting its brownfield source document."""
+    digest = hashlib.sha256(
+        f"{source_id}\0{relation}\0{target_id}".encode("utf-8")
+    ).hexdigest()[:16].upper()
+    link_id = f"LNK-{digest}"
+    path = root / ".graphba" / "contract" / f"{change_id}-links.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    block = (
+        f':::link id="{link_id}" source={json.dumps(source_id, ensure_ascii=False)} '
+        f'relation="{relation}" target={json.dumps(target_id, ensure_ascii=False)} '
+        f'change="{change_id}"\n:::\n'
+    )
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    if f'id="{link_id}"' not in existing:
+        prefix = existing.rstrip()
+        if not prefix:
+            prefix = (
+                "# Graph-native link assertions\n\n"
+                "<!-- graph-ba: canonical-owner -->"
+            )
+        path.write_text(prefix + "\n\n" + block, encoding="utf-8")
+    return {
+        "change": change_id,
+        "source": source_id,
+        "relation": relation,
+        "target": target_id,
+        "assertion": link_id,
+        "file": str(path.relative_to(root)),
+        "overlay": "true",
     }
 
 

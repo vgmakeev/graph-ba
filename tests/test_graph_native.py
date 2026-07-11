@@ -156,6 +156,7 @@ dirs = ["docs"]
 [types.AC]
 label = "Acceptance Criteria"
 origin = "canonical"
+required_proofs = ["implementation", "verification"]
 ref = '(AC-[A-Z]+-\\d{3})'
 classify = 'AC-[A-Z]+-\\d{3}'
 
@@ -196,18 +197,18 @@ coverage_types = ["AC"]
             "--target-type",
             "AC",
             "--relation",
-            "TEST_EVIDENCE",
+            "VERIFIES",
         ],
     )
 
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.output[result.output.index("{"):])
     assert payload["schema"] == "graph-ba.sparse-matrix.v1"
     assert payload["matrix"]["entries"] == [
         {
             "source": "TEST:tests/test_orders.py",
             "target": "AC-ORD-001",
-            "relation_type": "TEST_EVIDENCE",
+            "relation_type": "VERIFIES",
             "source_type": "TEST",
             "target_type": "AC",
             "count": 1,
@@ -448,7 +449,7 @@ scope_relation_type = "CONTAINS"
         ["--root", str(tmp_path), "--db", str(db_path), "gate", "CHG-order-flow", "--mode", "review"],
     )
     assert gate.exit_code == 0, gate.output
-    assert json.loads(gate.output)["verdict"] == "PASS"
+    assert json.loads(gate.output)["verdict"] == "PASS_WITH_UNKNOWN"
 
     snapshot_path = tmp_path / ".graphba" / "state" / "accepted-fingerprints.json"
     accept = runner.invoke(
@@ -472,7 +473,7 @@ scope_relation_type = "CONTAINS"
     assert "state: accepted" in (change_dir / "change.yaml").read_text(encoding="utf-8")
 
 
-def test_screen_scope_includes_incoming_evidence_edges(tmp_path):
+def test_screen_scope_keeps_evidence_as_terminal_profile_not_recursive_scope(tmp_path):
     (tmp_path / "graph-ba.toml").write_text(
         """
 [scan]
@@ -481,6 +482,7 @@ dirs = [".graphba", "tests"]
 [types.SCR]
 label = "Screens"
 origin = "canonical"
+capabilities = ["screen"]
 ref = '(SCR-[A-Z]+)'
 classify = 'SCR-[A-Z]+'
 
@@ -533,7 +535,8 @@ dirs = [".graphba"]
     payload = json.loads(result.output)
     scope_ids = {item["id"] for item in payload["scope"]}
     assert "AC-KIT-001" in scope_ids
-    assert "TEST:tests/test_kitchen.py" in scope_ids
+    assert "TEST:tests/test_kitchen.py" not in scope_ids
+    assert payload["evidence_profile"]["ac_verified"] == 1
     assert payload["summary"]["evidence_plan"]["ac_total"] == 1
     assert payload["summary"]["evidence_plan"]["gap"] == 1
 
@@ -640,22 +643,43 @@ dirs = [".graphba"]
     assert payload["target"] == "SCR-KITCHEN"
     assert payload["summary"]["mentions_included"] is False
     node_ids = {node["id"] for node in payload["nodes"]}
-    assert {"SCR-KITCHEN", "UIC-HEADER", "AC-KIT-001", "TEST:admin/e2e/tests/kitchen.spec.ts"} <= node_ids
+    assert {"SCR-KITCHEN", "UIC-HEADER", "AC-KIT-001"} <= node_ids
+    assert "TEST:admin/e2e/tests/kitchen.spec.ts" not in node_ids
+    assert "REACT_COMPONENT:KitchenHeader" not in node_ids
     assert all(edge["relation"] != "MENTIONS" for edge in payload["edges"])
     assert {
         ("SCR-KITCHEN", "CONTAINS", "UIC-HEADER"),
-        ("REACT_COMPONENT:KitchenHeader", "RENDERS", "UIC-HEADER"),
         ("UIC-HEADER", "TRACES_TO", "AC-KIT-001"),
-        ("TEST:admin/e2e/tests/kitchen.spec.ts", "TEST_EVIDENCE", "AC-KIT-001"),
     } <= {(edge["from"], edge["relation"], edge["to"]) for edge in payload["edges"]}
     ac_node = next(node for node in payload["nodes"] if node["id"] == "AC-KIT-001")
     assert ac_node["computed"]["implemented"] is True
     assert ac_node["implementation_proofs"][0]["source"] == "REACT_COMPONENT:KitchenHeader"
+    assert payload["evidence_profile"]["sample"]["AC-KIT-001"][0]["source"] == "TEST:admin/e2e/tests/kitchen.spec.ts"
     assert ac_node["content"]["mode"] == "excerpt"
     assert len(ac_node["content"]["text"]) <= 32
     assert any(item["relation"] == "TRACES_TO" for item in payload["relation_catalog"])
     assert payload["class_matrices"][0]["provider"] == "test"
     assert payload["agent_worklist"] == []
+
+    full = CliRunner().invoke(
+        cli,
+        [
+            "--root",
+            str(tmp_path),
+            "--db",
+            str(db_path),
+            "graph",
+            "SCR-KITCHEN",
+            "--view",
+            "full",
+            "--content",
+            "none",
+        ],
+    )
+    assert full.exit_code == 0, full.output
+    full_ids = {node["id"] for node in json.loads(full.output)["nodes"]}
+    assert "TEST:admin/e2e/tests/kitchen.spec.ts" in full_ids
+    assert "REACT_COMPONENT:KitchenHeader" in full_ids
 
 
 def test_flow_scope_stays_bounded_and_rule_uses_ac_implementation_proof(tmp_path):
@@ -730,6 +754,8 @@ dirs = [".graphba"]
     node_ids = {node["id"] for node in payload["nodes"]}
     assert "AC-MENU-001" in node_ids
     assert "AC-MENU-002" not in node_ids
+    flow = next(node for node in payload["nodes"] if node["id"] == "FLOW-MENU-LIVE")
+    assert flow["computed"]["implemented"] is True
     rule = next(node for node in payload["nodes"] if node["id"] == "RULE-MENU-LIVE")
     assert rule["computed"]["implemented"] is True
     assert rule["implementation_proofs"][0]["source"] == "UIC-MENU-SHARED"
@@ -744,18 +770,21 @@ dirs = [".graphba"]
 [types.SCR]
 label = "Screens"
 origin = "canonical"
+capabilities = ["screen"]
 ref = '(SCR-[A-Z]+)'
 classify = 'SCR-[A-Z]+'
 
 [types.UIC]
 label = "UI Components"
 origin = "human_designed"
+capabilities = ["ui_zone"]
 ref = '(UIC-[A-Z]+)'
 classify = 'UIC-[A-Z]+'
 
 [types.AC]
 label = "Acceptance Criteria"
 origin = "canonical"
+capabilities = ["acceptance"]
 ref = '(AC-[A-Z]+-\\d{3})'
 classify = 'AC-[A-Z]+-\\d{3}'
 
@@ -797,6 +826,7 @@ dirs = [".graphba", "tests"]
 [types.SCR]
 label = "Screens"
 origin = "canonical"
+capabilities = ["screen"]
 ref = '(SCR-[A-Z]+)'
 classify = 'SCR-[A-Z]+'
 
@@ -815,12 +845,14 @@ classify = 'AC-[A-Z]+-\\d{3}'
 [types.EVT]
 label = "Events"
 origin = "canonical"
+capabilities = ["event"]
 ref = '(EVT-[A-Z]+)'
 classify = 'EVT-[A-Z]+'
 
 [types.STATE]
 label = "States"
 origin = "canonical"
+capabilities = ["state"]
 ref = '(STATE-[A-Z]+)'
 classify = 'STATE-[A-Z]+'
 
@@ -865,11 +897,336 @@ dirs = [".graphba"]
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["overall_confidence"] == "PARTIAL"
+    assert payload["verdict"] == "PASS_WITH_GAPS"
+    assert payload["readiness"] == "PARTIAL"
     assert payload["quality_axes"]["test_evidence"]["status"] == "PARTIAL"
     assert payload["quality_axes"]["behavior_model"]["status"] == "PARTIAL"
-    assert payload["quality_axes"]["behavior_model"]["missing"] == ["RULE_OR_DER"]
+    assert payload["quality_axes"]["behavior_model"]["missing"] == ["flow", "decision"]
     assert payload["evidence_profile"]["ac_trace_only"] == 1
-    assert {item["kind"] for item in payload["agent_worklist"]} >= {"add_behavior_rule", "add_evidence"}
+    assert {item["kind"] for item in payload["agent_worklist"]} >= {
+        "add_behavior_capability",
+        "add_evidence",
+    }
+
+
+def test_screen_worklist_promotes_weak_behavior_links_without_rewriting_legacy_docs(tmp_path):
+    (tmp_path / "graph-ba.toml").write_text(
+        """
+[scan]
+dirs = [".graphba"]
+
+[types.SCR]
+label = "Screens"
+origin = "canonical"
+capabilities = ["screen"]
+ref = '(SCR-[A-Z]+)'
+classify = 'SCR-[A-Z]+'
+
+[types.AC]
+label = "Acceptance"
+origin = "canonical"
+ref = '(AC-[A-Z]+-\\d{3})'
+classify = 'AC-[A-Z]+-\\d{3}'
+
+[types.UIC]
+label = "UI zones"
+origin = "human_designed"
+ref = '(UIC-[A-Z]+)'
+classify = 'UIC-[A-Z]+'
+
+[types.RULE]
+label = "Rules"
+origin = "canonical"
+capabilities = ["decision"]
+ref = '(RULE-[A-Z]+)'
+classify = 'RULE-[A-Z]+'
+
+[types.STATE]
+label = "States"
+origin = "canonical"
+capabilities = ["state"]
+ref = '(STATE-[A-Z]+)'
+classify = 'STATE-[A-Z]+'
+
+[types.EVT]
+label = "Events"
+origin = "canonical"
+capabilities = ["event"]
+ref = '(EVT-[A-Z]+)'
+classify = 'EVT-[A-Z]+'
+
+[graph_native]
+dirs = [".graphba"]
+        """.strip(),
+        encoding="utf-8",
+    )
+    graphba = tmp_path / ".graphba"
+    graphba.mkdir()
+    (graphba / "contract.md").write_text(
+        ':::artifact type="SCR" id="SCR-KITCHEN" title="Kitchen" contains="UIC-SLOT,STATE-SLOT,EVT-SLOT"\n:::\n'
+        ':::artifact type="UIC" id="UIC-SLOT" title="Slot" traces_to="AC-KIT-001"\n:::\n'
+        ':::artifact type="AC" id="AC-KIT-001" title="Live slot capacity"\n:::\n'
+        ':::artifact type="STATE" id="STATE-SLOT" title="Slot state"\n:::\n'
+        ':::artifact type="EVT" id="EVT-SLOT" title="Slot event"\n:::\n'
+        ':::artifact type="RULE" id="RULE-LOAD" title="Load rule"\n'
+        'Legacy prose mentions AC-KIT-001 but has no declared trace.\n:::\n',
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "graph.db"
+    db = get_db(db_path)
+    do_import(tmp_path, db, quiet=True)
+    db.close()
+
+    result = CliRunner().invoke(
+        cli,
+        ["--root", str(tmp_path), "--db", str(db_path), "graph", "SCR-KITCHEN"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["quality_axes"]["behavior_model"]["missing"] == [
+        "flow",
+        "decision",
+    ]
+    assert payload["quality_axes"]["behavior_model"]["weak_candidates"] == [
+        {
+            "id": "RULE-LOAD",
+            "type": "RULE",
+            "title": "Load rule",
+            "capabilities": ["decision"],
+        }
+    ]
+    work = {(item["kind"], item["artifact"]) for item in payload["agent_worklist"]}
+    assert ("upgrade_relation", "RULE-LOAD") in work
+    assert ("add_behavior_capability", "SCR-KITCHEN") in work
+
+
+def test_old_project_types_can_satisfy_behavior_capabilities_without_new_vocabulary(tmp_path):
+    (tmp_path / "graph-ba.toml").write_text(
+        """
+[scan]
+dirs = [".graphba"]
+
+[types.SCR]
+label = "Screens"
+origin = "canonical"
+capabilities = ["screen"]
+ref = '(SCR-[A-Z]+)'
+classify = 'SCR-[A-Z]+'
+
+[types.AC]
+label = "Acceptance"
+origin = "canonical"
+capabilities = ["acceptance"]
+ref = '(AC-[A-Z]+-\\d{3})'
+classify = 'AC-[A-Z]+-\\d{3}'
+
+[types.BP]
+label = "Legacy business processes"
+origin = "derived"
+view_role = "contract"
+capabilities = ["flow"]
+ref = '(BP-\\d{2})'
+classify = 'BP-\\d{2}'
+
+[types.BD]
+label = "Legacy business decisions"
+origin = "derived"
+view_role = "contract"
+capabilities = ["decision"]
+ref = '(BD-\\d{2})'
+classify = 'BD-\\d{2}'
+
+[types.LIFECYCLE]
+label = "Existing lifecycle model"
+origin = "canonical"
+capabilities = ["state"]
+ref = '(LIFECYCLE-[A-Z]+)'
+classify = 'LIFECYCLE-[A-Z]+'
+
+[types.SIGNAL]
+label = "Existing domain signals"
+origin = "canonical"
+capabilities = ["event"]
+ref = '(SIGNAL-[A-Z]+)'
+classify = 'SIGNAL-[A-Z]+'
+
+[graph_native]
+dirs = [".graphba"]
+        """.strip(),
+        encoding="utf-8",
+    )
+    graphba = tmp_path / ".graphba"
+    graphba.mkdir()
+    (graphba / "contract.md").write_text(
+        ':::artifact type="SCR" id="SCR-KITCHEN" title="Kitchen" contains="AC-KIT-001"\n:::\n'
+        ':::artifact type="AC" id="AC-KIT-001" title="Live kitchen behavior" '
+        'traces_to="BP-02,BD-02,LIFECYCLE-SLOT,SIGNAL-ORDER"\n:::\n'
+        ':::artifact type="BP" id="BP-02" title="Kitchen operation"\n:::\n'
+        ':::artifact type="BD" id="BD-02" title="Capacity decision"\n:::\n'
+        ':::artifact type="LIFECYCLE" id="LIFECYCLE-SLOT" title="Slot lifecycle"\n:::\n'
+        ':::artifact type="SIGNAL" id="SIGNAL-ORDER" title="Order signal"\n:::\n',
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "graph.db"
+    db = get_db(db_path)
+    do_import(tmp_path, db, quiet=True)
+    db.close()
+
+    result = CliRunner().invoke(
+        cli,
+        ["--root", str(tmp_path), "--db", str(db_path), "graph", "SCR-KITCHEN"],
+    )
+
+    assert result.exit_code == 0, result.output
+    behavior = json.loads(result.output)["quality_axes"]["behavior_model"]
+    assert behavior["status"] == "PASS"
+    assert behavior["missing"] == []
+
+
+def test_gate_fails_when_scoped_provider_artifact_is_undefined(tmp_path):
+    (tmp_path / "graph-ba.toml").write_text(
+        """
+[scan]
+dirs = [".graphba"]
+
+[types.FLOW]
+label = "Flows"
+origin = "canonical"
+ref = '(FLOW-[A-Z-]+)'
+classify = 'FLOW-[A-Z-]+'
+
+[types.SCR]
+label = "Screens"
+origin = "canonical"
+ref = '(SCR-[A-Z-]+)'
+classify = 'SCR-[A-Z-]+'
+
+[graph_native]
+dirs = [".graphba"]
+        """.strip(),
+        encoding="utf-8",
+    )
+    graphba = tmp_path / ".graphba"
+    graphba.mkdir()
+    (graphba / "contract.md").write_text(
+        ':::artifact type="FLOW" id="FLOW-KITCHEN-LIVE" title="Kitchen live" traces_to="SCR-KITCHEN"\n:::\n',
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "graph.db"
+    db = get_db(db_path)
+    do_import(tmp_path, db, quiet=True)
+    db.close()
+
+    result = CliRunner().invoke(
+        cli,
+        ["--root", str(tmp_path), "--db", str(db_path), "gate", "FLOW-KITCHEN-LIVE"],
+    )
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output[result.output.index("{"):])
+    assert payload["verdict"] == "FAIL"
+    assert payload["readiness"] == "BLOCKED"
+    assert payload["quality_axes"]["traceability"]["status"] == "FAIL"
+    graph_result = CliRunner().invoke(
+        cli,
+        ["--root", str(tmp_path), "--db", str(db_path), "graph", "FLOW-KITCHEN-LIVE"],
+    )
+    graph_payload = json.loads(graph_result.output)
+    assert any(
+        item["kind"] == "resolve_artifact"
+        for item in graph_payload["agent_worklist"]
+    )
+
+
+def test_enforced_class_matrix_controls_direction_and_blocks_undeclared_edges(tmp_path):
+    (tmp_path / "graph-ba.toml").write_text(
+        """
+[scan]
+dirs = [".graphba"]
+
+[types.SCR]
+label = "Screens"
+origin = "canonical"
+ref = '(SCR-[A-Z]+)'
+classify = 'SCR-[A-Z]+'
+
+[types.UIC]
+label = "UI zones"
+origin = "canonical"
+ref = '(UIC-[A-Z]+)'
+classify = 'UIC-[A-Z]+'
+
+[types.AC]
+label = "Acceptance"
+origin = "canonical"
+ref = '(AC-[A-Z]+-\\d{3})'
+classify = 'AC-[A-Z]+-\\d{3}'
+
+[graph_native]
+dirs = [".graphba"]
+        """.strip(),
+        encoding="utf-8",
+    )
+    graphba = tmp_path / ".graphba"
+    graphba.mkdir()
+    (graphba / "artifact-class-matrix.json").write_text(
+        json.dumps(
+            {
+                "schema": "graph-ba.artifact-class-matrix.v2",
+                "policy": {"enforce": True},
+                "entries": [
+                    {
+                        "source_type": "SCR",
+                        "relation": "CONTAINS",
+                        "target_type": "UIC",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (graphba / "contract.md").write_text(
+        ':::artifact type="SCR" id="SCR-KITCHEN" title="Kitchen" contains="UIC-SLOT"\n:::\n'
+        ':::artifact type="UIC" id="UIC-SLOT" title="Slot" traces_to="AC-KIT-001"\n:::\n'
+        ':::artifact type="AC" id="AC-KIT-001" title="Slot visible"\n:::\n',
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "graph.db"
+    db = get_db(db_path)
+    do_import(tmp_path, db, quiet=True)
+    db.close()
+
+    dev = CliRunner().invoke(
+        cli,
+        ["--root", str(tmp_path), "--db", str(db_path), "graph", "SCR-KITCHEN"],
+    )
+    assert dev.exit_code == 0, dev.output
+    payload = json.loads(dev.output)
+    assert payload["class_matrix_policy"]["enforce"] is True
+    assert {node["id"] for node in payload["nodes"]} == {
+        "SCR-KITCHEN",
+        "UIC-SLOT",
+    }
+    assert any(item["code"] == "undeclared_class_edge" for item in payload["findings"])
+    assert any(item["kind"] == "add_matrix_rule" for item in payload["agent_worklist"])
+
+    review = CliRunner().invoke(
+        cli,
+        [
+            "--root",
+            str(tmp_path),
+            "--db",
+            str(db_path),
+            "gate",
+            "SCR-KITCHEN",
+            "--mode",
+            "review",
+        ],
+    )
+    assert review.exit_code == 1
+    review_payload = json.loads(review.output[review.output.index("{"):])
+    assert review_payload["verdict"] == "FAIL"
 
 
 def test_gate_blocks_unimplemented_review_scope(tmp_path):
@@ -887,6 +1244,7 @@ classify = 'CHG-[A-Za-z0-9-]+'
 [types.AC]
 label = "Acceptance Criteria"
 origin = "canonical"
+required_proofs = ["implementation", "verification"]
 ref = '(AC-[A-Z]+-\\d{3})'
 classify = 'AC-[A-Z]+-\\d{3}'
 
@@ -1054,8 +1412,8 @@ dirs = [".graphba"]
     assert "algorithm" in item["kinds"]
     assert "unit" in item["required_evidence"]
     assert item["observed_kinds"] == ["static_source"]
-    assert item["missing_required_evidence"] == ["unit"]
-    assert item["missing_evidence"] == ["unit"]
+    assert item["missing_required_evidence"] == ["e2e_ui", "unit"]
+    assert item["missing_evidence"] == ["e2e_ui", "unit"]
     assert payload["policy"]["evidence_kind_rules"]
 
 

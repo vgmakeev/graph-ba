@@ -6,6 +6,9 @@ from graph_ba.change_authoring import (
     add_link,
 )
 from graph_ba.change_workflow import init_change
+from graph_ba.config import load_config
+from graph_ba.scanning import scan_definitions, scan_graph_native_artifact_traces
+from graph_ba.graph_builder import build_graph
 
 
 CONFIG = r"""
@@ -140,3 +143,48 @@ def test_migration_marks_existing_target_and_refuses_same_file_duplicate(tmp_pat
             target_file=target,
             migrate=True,
         )
+
+
+def test_add_link_uses_overlay_for_brownfield_source(tmp_path):
+    root = _project(tmp_path)
+    add_artifact(
+        root,
+        "CHG-order-live",
+        "RULE",
+        "RULE-ORDER-LIVE",
+        title="Live order rule",
+    )
+
+    result = add_link(
+        root,
+        "CHG-order-live",
+        "AC-ORD-001",
+        "TRACES_TO",
+        "RULE-ORDER-LIVE",
+    )
+    duplicate = add_link(
+        root,
+        "CHG-order-live",
+        "AC-ORD-001",
+        "TRACES_TO",
+        "RULE-ORDER-LIVE",
+    )
+
+    assert result["overlay"] == "true"
+    assert result["assertion"].startswith("LNK-")
+    assert duplicate["assertion"] == result["assertion"]
+    overlay = root / result["file"]
+    assert overlay.read_text(encoding="utf-8").count(":::link ") == 1
+    assert "Legacy definition." in (root / "docs" / "spec.md").read_text(encoding="utf-8")
+
+    config = load_config(root)
+    registry = scan_definitions(root, config)
+    traces = scan_graph_native_artifact_traces(root, config)
+    graph = build_graph(
+        registry,
+        [],
+        config,
+        graph_native_artifact_traces=traces,
+    )
+    assert result["assertion"] in registry
+    assert graph["AC-ORD-001"]["RULE-ORDER-LIVE"]["relation_type"] == "TRACES_TO"

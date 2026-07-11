@@ -1,6 +1,9 @@
 # graph-ba
 
-Traceability graph for business analysis artifacts. Scans markdown files and source code, builds a cross-reference graph in SQLite, and provides CLI for search, validation, and linting.
+AI-native semantic compiler and traceability graph for spec-driven delivery.
+It scans human sources, graph-native contracts, code, tests and provider facts,
+then compiles bounded implementation context, evidence gates and Git-native
+change fingerprints.
 
 ## Why
 
@@ -8,21 +11,46 @@ BA projects have hundreds of interlinked markdown documents. Cross-references be
 
 graph-ba turns your documents into a queryable graph and lints them automatically. Artifact types and ID patterns are defined in a TOML config — the tool works with any naming convention.
 
-The graph keeps two kinds of metadata useful for agent workflows:
+The full knowledge graph keeps provenance and relation semantics useful for
+agents and humans:
 
 - artifact `origin` comes from `types.<TYPE>.origin` and can classify whole
   artifact classes as `human`, `derived`, `canonical`, `evidence`, etc.;
-- edge `relation_type` distinguishes raw text mentions from stronger links such
-  as `INDEX`, `CODE_TRACE`, `TEST_EVIDENCE` and `UI_TRACE`.
+- edge `relation_type` distinguishes raw `MENTIONS`/`INDEX` navigation from
+  declared semantics and proof.
 
 Origins are project-configurable. Relation types are intentionally small and
 generic: graph-ba ships the canonical vocabulary (`CONTAINS`, `TRACES_TO`,
-`DEPENDS_ON`, `IMPLEMENTS`, `VERIFIES`, `RENDERS`, plus a few system edges such
-as `MENTIONS`, `CODE_TRACE` and `TEST_EVIDENCE`). Projects should normally
+`DEPENDS_ON`, `IMPLEMENTS`, `VERIFIES`, `RENDERS`, plus navigation/diagnostic
+edges such as `MENTIONS`, `INDEX`, `TRACE_GAP` and `CANDIDATE_TRACE`). Code uses
+`IMPLEMENTS`; tests and evidence use `VERIFIES`; provider/file/line provenance
+records where the edge came from. Projects should normally
 configure a sparse matrix of allowed class-to-class edges instead of inventing
 new relation words. Runtime/framework-specific facts should be exported by
 adapter packages as graph-native artifact blocks; graph-ba core imports those
 blocks without knowing the framework.
+
+## AI-native SDLC
+
+graph-ba does not copy truth through separate spec, plan and task documents.
+The stable-ID graph is the contract; views, plans and worklists are compiled:
+
+```text
+human intent / source thesis
+  -> candidate semantic delta
+  -> human-approved proposal fingerprint
+  -> bounded implementation context
+  -> code + test + runtime proof
+  -> release verdict
+  -> accepted graph + drift detection
+```
+
+The database retains five logical layers, while commands project only the
+layer required by the current decision: source, contract, proof, change and
+navigation. Ordinary prose never becomes a strong trace automatically. An ID
+occurrence is `MENTIONS`. Only a declared attribute/link or an observed proof
+boundary creates a strong edge. AI may propose `CANDIDATE_TRACE`, but gates
+ignore it until a change promotes it to a declared relation.
 
 ## What it does
 
@@ -136,12 +164,12 @@ so audit stays useful on corpora with hundreds of legacy issues.
 graph-ba matrix \
   --source-type TEST \
   --target-type REQ \
-  --relation TEST_EVIDENCE \
+  --relation VERIFIES \
   --out reports/graphba/test-req-matrix.json
 ```
 
 The output is `graph-ba.sparse-matrix.v1`: typed nodes plus sparse entries
-like `TEST --TEST_EVIDENCE--> REQ` with file/line/context evidence. Use it as
+like `TEST --VERIFIES--> REQ` with file/line/context evidence. Use it as
 machine-readable input for agent packs, CI gates and project dashboards.
 
 ### artifact-state — fingerprints and computed status
@@ -196,36 +224,32 @@ scope:
   - AC-ORD-001
 ```
 
-Useful commands:
+The normal agent loop is deliberately short:
 
 ```bash
 graph-ba change init CHG-orders-live-update \
   --intent "Keep the order board current without an operator reload" \
   --source RAC-ORD-014 --base-ref main \
   --worktree ../project-chg-orders-live-update
-graph-ba change discover CHG-orders-live-update
-graph-ba change add-artifact CHG-orders-live-update FLOW FLOW-ORDERS-LIVE \
-  --title "Keep the order board live" --link TRACES_TO=AC-ORD-001
-graph-ba change add-link CHG-orders-live-update FLOW-ORDERS-LIVE CONTAINS AC-ORD-001
-graph-ba change diff CHG-orders-live-update
-graph-ba change rebase-check CHG-orders-live-update
-graph-ba change check CHG-orders-live-update --stage proposal
-graph-ba change context CHG-orders-live-update
 graph-ba change compile CHG-orders-live-update
-graph-ba change review CHG-orders-live-update --out reports/change-review.md
+# human review of the compiled proposal fingerprint
 graph-ba change approve CHG-orders-live-update \
   --reviewer "reviewer@example.com" \
   --evidence "https://github.com/org/repo/pull/123"
-graph-ba change status CHG-orders-live-update
-graph-ba change show CHG-orders-live-update --json
-graph-ba evidence-plan CHG-orders-live-update --format md
 graph-ba change check CHG-orders-live-update --stage release --mode release
 ```
+
+`compile` writes semantic delta, impact, graph projection, evidence plan, gate
+and the compact agent worklist in one pass. `discover`, `diff`, `context`,
+`graph`, `path` and `sql` remain drill-down diagnostics; a normal workflow does
+not pipe several commands through `jq`.
 
 `change init --worktree PATH` is the recommended default. It creates an
 isolated `change/<change-id>` branch without touching a dirty primary checkout,
 stores an immutable `base_ref` commit and remembers the integration
-`target_ref`. Plain `change init` switches the current clean checkout to a
+`target_ref`. Ignored graph-native provider projections and the configured
+CodeGraph database are copied into the worktree so it compiles the same local
+knowledge graph as the primary checkout. Plain `change init` switches the current clean checkout to a
 change branch. Use `--no-branch` only when the caller owns the Git lifecycle.
 
 `change discover` starts with manifest `sources` and `scope`; free-text search
@@ -257,7 +281,16 @@ the migration marker:
 
 `change add-artifact` and `change add-link` validate type/ID classification,
 relation vocabulary, owner ambiguity and target paths before editing. The same
-agent-safe operations are exposed through MCP.
+agent-safe operations are exposed through MCP. For a brownfield source,
+`change add-link` writes a stable `LNK-*` assertion under `.graphba/contract/`
+instead of rewriting the legacy document:
+
+```md
+:::link id="LNK-..." source="RULE-LOAD" relation="TRACES_TO" target="AC-LOAD-001" change="CHG-load"
+:::
+```
+
+The assertion participates in semantic diff and the approval fingerprint.
 
 The canonical artifact is the accepted set of stable-ID graph-native artifact
 blocks in normal project files, not the change manifest or a generated bundle.
@@ -277,8 +310,16 @@ Agents can use the same service through MCP tools `ba_change_init`,
 `ba_change_add_link` and `ba_change_status`. Approval is deliberately CLI-only
 so an agent-facing MCP connection cannot attest its own proposal.
 
-Use `graph` as the default agent-facing format. It returns
-`graph-ba.graph-slice.v1` JSON:
+Use `graph --summary` for a compact readiness/worklist view, or `--json`/`--out`
+for the complete agent payload. `--view` separates intent instead of using one
+unbounded traversal:
+
+- `contract`: declared semantic contract;
+- `delivery` (default): bounded contract plus embedded proof summaries;
+- `navigation`: bounded source context and weak mentions;
+- `full`: explicit opt-in connected knowledge graph exploration.
+
+The full payload is `graph-ba.graph-slice.v1` JSON:
 
 - `nodes`: scoped artifacts with type, origin, source location, computed flags
   and optional content excerpts;
@@ -289,14 +330,60 @@ Use `graph` as the default agent-facing format. It returns
   missing evidence gaps;
 - `findings`: the same gate findings for the requested mode.
 
-Weak `MENTIONS` edges are excluded by default; pass `--include-mentions` only
+Weak `MENTIONS` edges are excluded by default; use `--view navigation` only
 when doing broad investigation rather than acceptance or implementation work.
 Use `pack` when a human-readable markdown bundle is preferable.
 
-`explore` never blocks, `dev` reports warnings, `review` blocks scoped
-contract artifacts that lack observed implementation or AC test evidence, and
-`release` also requires an accepted fingerprint snapshot and rejects stale
-scope.
+`pass` remains the CI exit condition for the selected strictness. `verdict` and
+`readiness` are more explicit: `PASS`, `PASS_WITH_GAPS`, `PASS_WITH_UNKNOWN` or
+`FAIL`, and `READY`, `PARTIAL`, `UNKNOWN` or `BLOCKED`.
+
+### Executable artifact-class matrix
+
+`.graphba/artifact-class-matrix.json` can set `policy.enforce=true`. Each entry
+declares one allowed directed class edge. For every unordered pair of different
+classes the project chooses one orientation; reverse views query incoming edges
+instead of storing reverse duplicates. Same-class lifecycle and symmetric
+relations such as `CONFLICTS_WITH` are exempt.
+
+Adapter defaults can be overridden with `policy.class_directions`:
+
+```json
+{
+  "policy": {
+    "enforce": true,
+    "class_directions": [
+      {"source_type": "REACT_COMPONENT", "target_type": "SCR"}
+    ]
+  },
+  "entries": [
+    {"source_type": "JNY", "relation": "CONTAINS", "target_type": "FLOW"},
+    {"source_type": "FLOW", "relation": "CONTAINS", "target_type": "AC"},
+    {"source_type": "TEST", "relation": "VERIFIES", "target_type": "AC"}
+  ]
+}
+```
+
+Undeclared strong edges and opposing class directions become architecture
+findings. Navigation relations are outside acceptance enforcement.
+
+`explore` never blocks, `dev` reports warnings, and `review` enforces the
+`required_proofs` declared by each project artifact class. `release` also
+requires an accepted fingerprint snapshot and rejects stale scope.
+
+### Capabilities, not a mandatory ontology
+
+graph-ba does not require projects to migrate to `JNY`, `FLOW`, `RULE`,
+`STATE` or any other built-in-looking vocabulary. Artifact classes declare the
+semantic capabilities they already provide. A brownfield project can map its
+existing `BP` to `flow`, `BR_RULE` and `BD` to `decision`, and its own lifecycle
+or signal types to `state` and `event`. Readiness gates check those capabilities,
+not literal type ids.
+
+Proof obligations are also project policy. `required_proofs` can require
+`implementation`, `verification`, both, or neither for a class. New artifact
+types are justified only when no existing class owns the missing semantic unit,
+review lifecycle and stable identity.
 
 ## Configuration
 
@@ -322,8 +409,31 @@ description = "Agent output reviewed by a human analyst."
 [types.REQ]
 label = "Requirements"
 origin = "canonical"  # optional provenance class for all REQ nodes
+view_role = "contract"
+capabilities = ["acceptance"]
+required_proofs = ["implementation", "verification"]
 ref = '(?<![A-Za-z])(REQ-\d{2,4})(?!\d)'
 classify = 'REQ-\d{2,4}'
+
+[types.BP]
+label = "Existing business processes"
+origin = "derived"
+view_role = "contract"
+capabilities = ["flow"]
+ref = '(BP-\d{2})'
+classify = 'BP-\d{2}'
+
+[types.BD]
+label = "Existing business decisions"
+origin = "derived"
+view_role = "contract"
+capabilities = ["decision"]
+ref = '(BD-\d{2})'
+classify = 'BD-\d{2}'
+
+[behavior_model]
+target_capabilities = ["screen"]
+required_capabilities = ["flow", "decision", "state", "event"]
 
 [types.RAW]
 label = "Raw Criteria"

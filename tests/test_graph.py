@@ -68,9 +68,9 @@ class TestBuildGraph:
         code_node = next(n for n in G.nodes() if n.startswith("CODE:") and "order.ts" in n)
         test_node = next(n for n in G.nodes() if n.startswith("TEST:"))
         ui_node = next(n for n in G.nodes() if n.startswith("UI:"))
-        assert G.edges[code_node, "REQ-01"]["relation_type"] == "CODE_TRACE"
-        assert G.edges[test_node, "REQ-01"]["relation_type"] == "TEST_EVIDENCE"
-        assert G.edges[ui_node, "REQ-01"]["relation_type"] == "UI_TRACE"
+        assert G.edges[code_node, "REQ-01"]["relation_type"] == "IMPLEMENTS"
+        assert G.edges[test_node, "REQ-01"]["relation_type"] == "VERIFIES"
+        assert G.edges[ui_node, "REQ-01"]["relation_type"] == "VERIFIES"
 
 
 class TestFindOwner:

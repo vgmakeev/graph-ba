@@ -114,6 +114,21 @@ def scan_definition_occurrences(
     if config.graph_native:
         for filepath in _graph_native_artifact_files(root, config):
             for line_number, line in enumerate(_read_lines(filepath), 1):
+                link_marker = re.match(r"^\s*:::link\s+(.+?)\s*$", line)
+                if link_marker:
+                    attrs = _parse_graph_native_attrs(link_marker.group(1))
+                    if attrs.get("id") and attrs.get("source") and attrs.get("target"):
+                        add(
+                            Artifact(
+                                attrs["id"],
+                                "LINK",
+                                filepath,
+                                line_number,
+                                attrs.get("title", ""),
+                                "canonical",
+                            )
+                        )
+                    continue
                 marker = re.match(r"^\s*:::artifact\s+(.+?)\s*$", line)
                 if not marker:
                     continue
@@ -257,6 +272,28 @@ def _scan_graph_native_artifact_file(
     if not filepath.exists():
         return
     for line_number, line in enumerate(_read_lines(filepath), 1):
+        link_marker = re.match(r"^\s*:::link\s+(.+?)\s*$", line)
+        if link_marker:
+            attrs = _parse_graph_native_attrs(link_marker.group(1))
+            link_id = attrs.get("id")
+            source_id = attrs.get("source", "")
+            relation = attrs.get("relation", "")
+            target_id = attrs.get("target", "")
+            if link_id and source_id and relation and target_id:
+                _register(
+                    registry,
+                    Artifact(
+                        link_id,
+                        "LINK",
+                        filepath,
+                        line_number,
+                        attrs.get("title")
+                        or f"{source_id} {relation.upper()} {target_id}",
+                        "canonical",
+                    ),
+                    config,
+                )
+            continue
         marker = re.match(r"^\s*:::artifact\s+(.+?)\s*$", line)
         if not marker:
             continue
@@ -436,6 +473,31 @@ def scan_graph_native_artifact_traces(
         except ValueError:
             rel_path = str(filepath)
         for line_number, line in enumerate(_read_lines(filepath), 1):
+            link_marker = re.match(r"^\s*:::link\s+(.+?)\s*$", line)
+            if link_marker:
+                attrs = _parse_graph_native_attrs(link_marker.group(1))
+                source_id = attrs.get("source")
+                relation_type = attrs.get("relation", "").upper()
+                raw_targets = attrs.get("target", "")
+                if (
+                    source_id
+                    and raw_targets
+                    and relation_type in config.relation_types
+                    and relation_type not in {"MENTIONS", "CANDIDATE_TRACE"}
+                ):
+                    for raw_target in _split_graph_native_targets(raw_targets):
+                        traces.append(
+                            GraphNativeArtifactTrace(
+                                source_id=normalize_id(source_id, config),
+                                source_file=filepath,
+                                line_number=line_number,
+                                target_id=normalize_id(raw_target, config),
+                                relation_type=relation_type,
+                                context=f"graph_native:link:{attrs.get('id', '')}",
+                                rel_path=rel_path,
+                            )
+                        )
+                continue
             marker = re.match(r"^\s*:::artifact\s+(.+?)\s*$", line)
             if not marker:
                 continue

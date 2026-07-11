@@ -157,7 +157,7 @@ def build_graph(
         "CODE:",
         "CODE",
         config,
-        relation_type="CODE_TRACE",
+        relation_type="IMPLEMENTS",
         origin="implementation",
     )
     _add_source_ref_nodes(
@@ -166,11 +166,11 @@ def build_graph(
         "TEST:",
         "TEST",
         config,
-        relation_type="TEST_EVIDENCE",
+        relation_type="VERIFIES",
         origin="evidence",
     )
     _add_source_ref_nodes(
-        G, ui_refs, "UI:", "UI", config, relation_type="UI_TRACE", origin="evidence"
+        G, ui_refs, "UI:", "UI", config, relation_type="VERIFIES", origin="evidence"
     )
     _add_graph_native_change_nodes(G, graph_native_change_traces, config)
     _add_graph_native_artifact_nodes(G, graph_native_artifact_traces, config)

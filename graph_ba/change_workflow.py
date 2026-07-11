@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 from collections import defaultdict
@@ -33,15 +34,12 @@ class ChangeWorkflowError(RuntimeError):
 
 
 CONTEXT_RELATIONS = {
-    "CODE_TRACE",
     "CONTAINS",
     "DEPENDS_ON",
     "IMPLEMENTS",
     "NORMALIZES",
     "RENDERS",
-    "TEST_EVIDENCE",
     "TRACES_TO",
-    "UI_TRACE",
     "VERIFIES",
 }
 
@@ -317,12 +315,63 @@ def create_change_worktree(
     )
     if result.returncode != 0:
         raise ChangeWorkflowError(result.stderr.strip() or "git worktree add failed")
+    bootstrapped, bootstrap_warnings = _bootstrap_local_graph_inputs(root, destination)
     return {
         "root": str(destination),
         "branch": branch,
         "base_ref": base_commit,
         "target_ref": selected_target,
+        "bootstrapped": bootstrapped,
+        "bootstrap_warnings": bootstrap_warnings,
     }
+
+
+def _bootstrap_local_graph_inputs(
+    source_root: Path,
+    destination_root: Path,
+) -> tuple[list[str], list[str]]:
+    """Copy ignored provider inputs required to reproduce the source graph."""
+    try:
+        config = load_config(source_root)
+    except Exception as exc:
+        return [], [f"cannot load graph-ba config for worktree bootstrap: {exc}"]
+
+    candidates: list[Path] = []
+    if config.codegraph:
+        candidates.append(Path(config.codegraph.database))
+    candidates.extend(Path(item) for item in config.graph_native.dirs)
+
+    copied: list[str] = []
+    warnings: list[str] = []
+    for relative in candidates:
+        if relative.is_absolute() or ".." in relative.parts:
+            continue
+        source = source_root / relative
+        destination = destination_root / relative
+        if not source.exists() or destination.exists():
+            continue
+        if not _git_path_is_ignored(source_root, relative):
+            continue
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if source.is_dir():
+                shutil.copytree(source, destination)
+            else:
+                shutil.copy2(source, destination)
+            copied.append(relative.as_posix())
+        except OSError as exc:
+            warnings.append(f"cannot bootstrap {relative.as_posix()}: {exc}")
+    return copied, warnings
+
+
+def _git_path_is_ignored(root: Path, relative: Path) -> bool:
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", "--", relative.as_posix()],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
 
 
 def init_change(

@@ -53,6 +53,8 @@ classify = 'ST-\\d{2}'
 [types.FEAT]
 label = "Features"
 origin = "reviewed_derived"
+capabilities = ["flow"]
+required_proofs = ["implementation"]
 ref = '(?<![A-Za-z])(F-\\d{2})(?!\\d)'
 classify = 'F-\\d{2}'
 
@@ -65,12 +67,14 @@ classify = 'REQ-\\d{2,4}'
 [types.BP]
 label = "Business Processes"
 origin = "derived"
+capabilities = ["flow"]
 ref = '(?<![A-Za-z])(BP-\\d{2})(?!\\d)'
 classify = 'BP-\\d{2}'
 
 [types.BR]
 label = "Business Rules"
 origin = "derived"
+capabilities = ["decision"]
 ref = '(?<![A-Za-z])(BR\\.\\d+)(?!\\d)'
 classify = 'BR\\.\\d+'
 

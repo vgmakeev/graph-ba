@@ -58,81 +58,99 @@ DEFAULT_RELATIONS = {
         "label": "Mentions",
         "description": "Weak textual mention; useful for navigation, not acceptance.",
         "direction": "source_mentions_target",
+        "role": "navigation",
+        "traversal": "hidden",
     },
     "INDEX": {
         "label": "Index",
         "description": "Configured index-table link.",
         "direction": "source_index_row_to_target",
-    },
-    "CODE_TRACE": {
-        "label": "Code trace",
-        "description": "Code marker references an artifact.",
-        "direction": "code_to_artifact",
-    },
-    "TEST_EVIDENCE": {
-        "label": "Test evidence",
-        "description": "Test file references an artifact as evidence.",
-        "direction": "test_to_artifact",
-    },
-    "UI_TRACE": {
-        "label": "UI trace",
-        "description": "UI trace artifact references a rendered artifact.",
-        "direction": "ui_to_artifact",
+        "role": "navigation",
+        "traversal": "hidden",
     },
     "DERIVES_FROM": {
         "label": "Derives from",
         "description": "Source material used to derive this artifact.",
         "direction": "derived_to_source",
+        "role": "provenance",
+        "traversal": "context",
     },
     "NORMALIZES": {
         "label": "Normalizes",
         "description": "Canonical artifact refines raw/source material.",
         "direction": "canonical_to_source",
+        "role": "provenance",
+        "traversal": "context",
     },
     "IMPLEMENTS": {
         "label": "Implements",
         "description": "Implementation realizes a contract or semantic artifact.",
         "direction": "implementation_to_contract",
+        "role": "proof",
+        "traversal": "terminal",
     },
     "DEPENDS_ON": {
         "label": "Depends on",
         "description": "Artifact needs another artifact for behavior, data or context.",
         "direction": "source_to_dependency",
+        "role": "semantic",
+        "traversal": "context",
     },
     "CONTAINS": {
         "label": "Contains",
         "description": "Container scopes a child artifact.",
         "direction": "container_to_child",
+        "role": "structure",
+        "traversal": "expand",
     },
     "TRACES_TO": {
         "label": "Traces to",
         "description": "Explicit trace without stronger semantics.",
         "direction": "source_to_target",
+        "role": "semantic",
+        "traversal": "context",
     },
     "VERIFIES": {
         "label": "Verifies",
         "description": "Evidence proves the target artifact.",
         "direction": "evidence_to_contract",
+        "role": "proof",
+        "traversal": "terminal",
     },
     "RENDERS": {
         "label": "Renders",
         "description": "UI/source artifact renders a visible target.",
         "direction": "ui_to_contract",
+        "role": "proof",
+        "traversal": "terminal",
     },
     "CONFLICTS_WITH": {
         "label": "Conflicts with",
         "description": "Artifacts cannot both be true as written.",
         "direction": "symmetric",
+        "role": "semantic",
+        "traversal": "context",
     },
     "SUPERSEDES": {
         "label": "Supersedes",
         "description": "New artifact replaces an older artifact.",
         "direction": "new_to_old",
+        "role": "lifecycle",
+        "traversal": "context",
     },
     "TRACE_GAP": {
         "label": "Trace gap",
         "description": "Expected edge is deliberately missing.",
         "direction": "source_to_gap",
+        "role": "diagnostic",
+        "traversal": "terminal",
+    },
+    "CANDIDATE_TRACE": {
+        "label": "Candidate trace",
+        "description": "Proposed semantic link inferred from weak evidence; never acceptance proof until promoted to a declared relation.",
+        "direction": "candidate_source_to_target",
+        "role": "diagnostic",
+        "traversal": "terminal",
     },
 }
 
@@ -144,6 +162,8 @@ class EnumDef:
     label: str = ""
     description: str = ""
     direction: str = ""
+    role: str = ""
+    traversal: str = ""
 
 
 @dataclass
@@ -155,6 +175,19 @@ class TypeDef:
     classify_pattern: Optional[re.Pattern] = None  # for classifying an ID string
     restrict_to: Optional[List[str]] = None  # only match in these files/dirs
     origin: str = ""  # optional provenance class, e.g. human / derived / evidence
+    view_role: str = ""  # contract/source/context/proof/navigation/change
+    capabilities: List[str] = field(default_factory=list)
+    required_proofs: List[str] = field(default_factory=list)
+
+
+@dataclass
+class BehaviorModelConfig:
+    """Capability-based readiness policy, independent of artifact type names."""
+
+    target_capabilities: List[str] = field(default_factory=lambda: ["screen"])
+    required_capabilities: List[str] = field(
+        default_factory=lambda: ["flow", "decision", "state", "event"]
+    )
 
 
 @dataclass
@@ -282,6 +315,7 @@ class ProjectConfig:
     required_sections: Dict[str, List[str]]
     expected_bidir: Dict[str, List[str]]
     expected_cross_layer: Dict[str, List[Tuple[str, str]]]  # type -> [(target_type, label)]
+    behavior_model: BehaviorModelConfig = field(default_factory=BehaviorModelConfig)
     # Code traceability
     code: Optional[CodeConfig] = None
     # Optional symbol-level enrichment for code traces
@@ -323,6 +357,9 @@ def load_config(root: Path) -> ProjectConfig:
             classify_pattern=re.compile(tdata["classify"]) if "classify" in tdata else None,
             restrict_to=restrict,
             origin=tdata.get("origin", ""),
+            view_role=tdata.get("view_role", ""),
+            capabilities=tdata.get("capabilities", []),
+            required_proofs=tdata.get("required_proofs", []),
         )
         type_order.append(tid)
 
@@ -383,6 +420,17 @@ def load_config(root: Path) -> ProjectConfig:
     expected_cross_layer: Dict[str, List[Tuple[str, str]]] = {}
     for atype, pairs in expected_cross_layer_raw.items():
         expected_cross_layer[atype] = [(p["type"], p["label"]) for p in pairs]
+
+    behavior_data = data.get("behavior_model", {})
+    behavior_defaults = BehaviorModelConfig()
+    behavior_model = BehaviorModelConfig(
+        target_capabilities=behavior_data.get(
+            "target_capabilities", behavior_defaults.target_capabilities
+        ),
+        required_capabilities=behavior_data.get(
+            "required_capabilities", behavior_defaults.required_capabilities
+        ),
+    )
 
     # ── Code scan config ──
     code_data = data.get("code")
@@ -508,6 +556,7 @@ def load_config(root: Path) -> ProjectConfig:
         required_sections=required_sections,
         expected_bidir=expected_bidir,
         expected_cross_layer=expected_cross_layer,
+        behavior_model=behavior_model,
         code=code_config,
         codegraph=codegraph_config,
         tests=tests_config,
@@ -527,14 +576,26 @@ def _load_enum_defs(defaults: Dict[str, Dict[str, str]],
             label=raw.get("label", key),
             description=raw.get("description", ""),
             direction=raw.get("direction", ""),
+            role=raw.get("role", ""),
+            traversal=raw.get("traversal", ""),
         )
     for key, raw in overrides.items():
-        base = values.get(key, EnumDef(id=key, label=key))
+        base = values.get(
+            key,
+            EnumDef(
+                id=key,
+                label=key,
+                role="semantic",
+                traversal="context",
+            ),
+        )
         values[key] = EnumDef(
             id=key,
             label=raw.get("label", base.label or key),
             description=raw.get("description", base.description),
             direction=raw.get("direction", base.direction),
+            role=raw.get("role", base.role),
+            traversal=raw.get("traversal", base.traversal),
         )
     return values
 
