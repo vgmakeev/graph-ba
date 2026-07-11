@@ -405,6 +405,17 @@ def init_change(
         target_ref = binding["target_ref"]
     elif base_ref:
         base_ref = _git(root, "rev-parse", base_ref)
+    else:
+        # In no-branch mode the current commit is the immutable boundary.
+        # Falling back later to origin/main can turn an ordinary dirty feature
+        # checkout into a repository-wide semantic delta.
+        base_ref = _git(
+            root,
+            "rev-parse",
+            "HEAD",
+            check=False,
+            allow_empty=True,
+        ) or None
     lines = [
         f"id: {change_id}",
         f"title: {json.dumps(title or change_id, ensure_ascii=False)}",

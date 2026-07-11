@@ -74,6 +74,19 @@ def test_delivery_targets_prefer_explicit_acceptance_scope_over_changed_children
     assert targets == ["SCR-KITCHEN"]
 
 
+def test_no_branch_change_records_current_head_as_base(tmp_path):
+    root = _project(tmp_path)
+    head = _git(root, "rev-parse", "HEAD")
+
+    path = init_change(
+        root,
+        "CHG-current-head",
+        intent="Keep the dirty checkout delta scoped",
+    )
+
+    assert f'base_ref: "{head}"' in path.read_text(encoding="utf-8")
+
+
 def _git(root, *args):
     return subprocess.run(
         ["git", *args],
