@@ -918,12 +918,20 @@ def _delivery_target_ids(
     semantic_payload: dict[str, Any],
     manifest: dict[str, Any],
 ) -> list[str]:
+    """Return acceptance roots, preferring explicit manifest scope boundaries.
+
+    Changed contract artifacts remain present in semantic delta and impact. If
+    the author supplied a screen/feature scope, gating every changed child
+    independently repeats the same proof traversal and defeats compile's
+    one-shot UX. The scoped root is the delivery acceptance boundary.
+    """
     changed = {
         item["id"]
         for item in semantic_payload.get("contract", [])
         if item.get("operation") != "remove"
     }
-    candidates = changed | set(manifest.get("scope", []))
+    explicit_scope = set(manifest.get("scope", []))
+    candidates = explicit_scope or changed
     if not candidates:
         return []
     placeholders = ",".join("?" for _ in candidates)

@@ -11,6 +11,7 @@ from graph_ba.change_workflow import (
 )
 from graph_ba.change_authoring import add_link
 from graph_ba.cli import cli
+from graph_ba.cli_core import _delivery_target_ids
 from graph_ba.db import do_import, get_db
 
 
@@ -46,6 +47,31 @@ pattern = '^##\s+(AC-[A-Z]+-\d{3})\s+-\s+(.*)'
 dirs = [".graphba", "reports/graphba/observed"]
 change_files = [".graphba/changes/*/change.yaml"]
 """
+
+
+class _Rows:
+    def fetchall(self):
+        return []
+
+
+class _NoContainedEdgesDb:
+    def execute(self, *_args, **_kwargs):
+        return _Rows()
+
+
+def test_delivery_targets_prefer_explicit_acceptance_scope_over_changed_children():
+    targets = _delivery_target_ids(
+        _NoContainedEdgesDb(),
+        {
+            "contract": [
+                {"id": "AC-KIT-201", "operation": "modify"},
+                {"id": "STATE-KIT-SLOT", "operation": "modify"},
+            ]
+        },
+        {"scope": ["SCR-KITCHEN"]},
+    )
+
+    assert targets == ["SCR-KITCHEN"]
 
 
 def _git(root, *args):
