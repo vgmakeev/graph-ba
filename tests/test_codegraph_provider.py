@@ -116,7 +116,18 @@ def test_stale_index_falls_back_to_file_node(tmp_path, capsys):
     graph = build_graph({}, [], config, code_refs=refs)
 
     assert "CODE:src/service.py" in graph
-    assert "no current index for src/service.py" in capsys.readouterr().err
+    warning = capsys.readouterr().err
+    assert "no current index for 1 traced file(s): src/service.py" in warning
+
+
+def test_quiet_import_suppresses_provider_warning(tmp_path, capsys):
+    _project(tmp_path, with_index=False)
+    db = get_db(tmp_path / "reports" / "graph.db")
+
+    do_import(tmp_path, db, quiet=True)
+    db.close()
+
+    assert capsys.readouterr().err == ""
 
 
 def test_import_persists_symbol_source(tmp_path):

@@ -90,6 +90,31 @@ def test_semantic_diff_changes_only_edited_stable_id_section(tmp_path):
     ]
     assert payload["git"]["base_ref"] == "main"
     assert len(payload["proposal_fingerprint"]) == 64
+    assert [item["path"] for item in payload["contract_files"]] == ["docs/spec.md"]
+    assert payload["supporting_files"] == []
+    assert payload["delivery_files"] == []
+
+
+def test_semantic_diff_separates_unrelated_delivery_files(tmp_path):
+    root = _project(tmp_path)
+    (root / "docs" / "spec.md").write_text(
+        "## AC-ORD-001 - Create order\nChanged behavior.\n\n"
+        "## AC-ORD-002 - Cancel order\nCancellation behavior.\n",
+        encoding="utf-8",
+    )
+    (root / "scratch.txt").write_text("unrelated worktree edit\n", encoding="utf-8")
+    (root / ".graphba" / "evidence-policy.json").write_text("{}\n", encoding="utf-8")
+
+    payload = semantic_diff(root, base_ref="main")
+
+    assert [item["path"] for item in payload["contract_files"]] == ["docs/spec.md"]
+    assert [item["path"] for item in payload["supporting_files"]] == [
+        ".graphba/evidence-policy.json"
+    ]
+    assert [item["path"] for item in payload["delivery_files"]] == ["scratch.txt"]
+    assert payload["summary"]["contract_files"] == 1
+    assert payload["summary"]["supporting_files"] == 1
+    assert payload["summary"]["delivery_files"] == 1
 
 
 def test_change_init_is_one_manifest_and_proposal_check_uses_computed_delta(tmp_path):
@@ -279,6 +304,51 @@ def test_discover_returns_source_location(tmp_path):
     fallback_db.close()
     assert payload["strategy"] == "any_term"
     assert any(item["id"] == "AC-ORD-001" for item in payload["candidates"])
+
+    seeded_db = get_db(root / "reports" / "graph.db")
+    payload = ChangeWorkflowService(root, seeded_db).discover(
+        "unmatched words plus order",
+        seed_ids=["AC-ORD-002"],
+    )
+    seeded_db.close()
+    assert payload["strategy"] == "seeded"
+    assert payload["seed_ids"] == ["AC-ORD-002"]
+    assert [item["id"] for item in payload["candidates"]] == ["AC-ORD-002"]
+
+
+def test_compiled_change_reuses_cached_base_graph(tmp_path, monkeypatch):
+    root = _project(tmp_path)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    spec = root / "docs" / "spec.md"
+    spec.write_text(spec.read_text().replace("Original behavior.", "Changed behavior."))
+    db = get_db(root / "reports" / "graph.db")
+    do_import(root, db, quiet=True, force=True)
+    service = ChangeWorkflowService(root, db)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root",
+            str(root),
+            "change",
+            "init",
+            "CHG-cache-order",
+            "--intent",
+            "Cache the base graph",
+            "--base-ref",
+            "main",
+            "--no-branch",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    first = service.compile("CHG-cache-order")
+    cache_files = list((tmp_path / "cache" / "graph-ba" / "base-graphs").rglob("*.db"))
+    assert len(cache_files) == 1
+    second = service.compile("CHG-cache-order")
+    db.close()
+
+    assert second["graph_delta"] == first["graph_delta"]
 
 
 def test_observed_alias_and_dangling_reference_are_not_contract_delta(tmp_path):

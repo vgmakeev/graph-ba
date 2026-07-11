@@ -60,6 +60,10 @@ def _scope_rows(db: sqlite3.Connection, change_id: str) -> list[sqlite3.Row]:
 
 
 def _scope_ids(db: sqlite3.Connection, root_id: str) -> set[str]:
+    root = db.execute("SELECT type FROM artifacts WHERE id = ?", (root_id,)).fetchone()
+    if root and root["type"] in {"CONTRACT", "FLOW", "JNY"}:
+        return _assembly_scope_ids(db, root_id)
+
     scope_relations = _semantic_scope_relations()
     incoming_scope_relations = _incoming_scope_relations()
     result: set[str] = set()
@@ -92,6 +96,36 @@ def _scope_ids(db: sqlite3.Connection, root_id: str) -> set[str]:
                 continue
             seen.add(target_id)
             result.add(target_id)
+    return result
+
+
+def _assembly_scope_ids(db: sqlite3.Connection, root_id: str) -> set[str]:
+    """Keep feature-flow scope bounded while retaining declared provenance."""
+    result: set[str] = set()
+    seen = {root_id}
+    queue = [root_id]
+    context_relations = {"DEPENDS_ON", "NORMALIZES", "TRACES_TO"}
+    while queue:
+        current = queue.pop(0)
+        children = db.execute(
+            "SELECT target_id FROM edges WHERE source_id = ? "
+            "AND relation_type = 'CONTAINS' ORDER BY target_id",
+            (current,),
+        ).fetchall()
+        for row in children:
+            target_id = row["target_id"]
+            result.add(target_id)
+            if target_id not in seen:
+                seen.add(target_id)
+                queue.append(target_id)
+
+        placeholders = ",".join("?" for _ in context_relations)
+        context = db.execute(
+            "SELECT target_id FROM edges WHERE source_id = ? "
+            f"AND relation_type IN ({placeholders}) ORDER BY target_id",
+            (current, *sorted(context_relations)),
+        ).fetchall()
+        result.update(row["target_id"] for row in context)
     return result
 
 

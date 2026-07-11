@@ -33,6 +33,14 @@ class TestImportCmd:
         ])
         assert result.exit_code != 0
 
+    def test_default_db_is_relative_to_root(self, ba_project):
+        runner = CliRunner()
+
+        result = runner.invoke(cli, ["--root", str(ba_project), "import"])
+
+        assert result.exit_code == 0, result.output
+        assert (ba_project / "reports" / "graph.db").is_file()
+
 
 class TestInitCmd:
     def test_creates_config(self, tmp_path):

@@ -41,6 +41,7 @@ PROOF_INCOMING_RELATIONS = {
 
 PROOF_OUTGOING_RELATIONS = {
     "DEPENDS_ON",
+    "TRACES_TO",
 }
 
 
@@ -259,10 +260,11 @@ def _artifact_implementation_proofs(
                 )
                 if len(proofs) >= max_proofs:
                     break
-            key = (edge["source_id"], depth + 1)
-            if key not in seen:
-                seen.add(key)
-                queue.append((edge["source_id"], next_path, depth + 1))
+            else:
+                key = (edge["source_id"], depth + 1)
+                if key not in seen:
+                    seen.add(key)
+                    queue.append((edge["source_id"], next_path, depth + 1))
         if len(proofs) >= max_proofs:
             break
 
@@ -294,10 +296,11 @@ def _artifact_implementation_proofs(
                 )
                 if len(proofs) >= max_proofs:
                     break
-            key = (edge["target_id"], depth + 1)
-            if key not in seen:
-                seen.add(key)
-                queue.append((edge["target_id"], next_path, depth + 1))
+            else:
+                key = (edge["target_id"], depth + 1)
+                if key not in seen:
+                    seen.add(key)
+                    queue.append((edge["target_id"], next_path, depth + 1))
     return proofs
 
 

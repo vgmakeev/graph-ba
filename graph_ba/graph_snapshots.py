@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import io
+import hashlib
+import os
 import sqlite3
 import subprocess
 import tarfile
@@ -12,6 +14,8 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from graph_ba.db import do_import, get_db
+from graph_ba import __version__
+from graph_ba.db import SCHEMA_VERSION
 
 
 CONTRACT_EXCLUDED_ORIGINS = {"implementation", "evidence"}
@@ -53,12 +57,17 @@ def graph_views(
     with tempfile.TemporaryDirectory(prefix="graph-ba-view-") as temp_dir:
         base_root = Path(temp_dir) / "base"
         base_root.mkdir()
-        _materialize_git_tree(root, base_commit, base_root)
-        if not (base_root / "graph-ba.toml").is_file():
-            raise GraphSnapshotError(f"graph-ba.toml does not exist at {base_commit}")
         base_db = get_db(Path(temp_dir) / "base.db")
         try:
-            do_import(base_root, base_db, quiet=True, force=True)
+            cache_path = _base_graph_cache_path(root, base_commit)
+            if cache_path.is_file():
+                _restore_database(cache_path, base_db)
+            else:
+                _materialize_git_tree(root, base_commit, base_root)
+                if not (base_root / "graph-ba.toml").is_file():
+                    raise GraphSnapshotError(f"graph-ba.toml does not exist at {base_commit}")
+                do_import(base_root, base_db, quiet=True, force=True)
+                _cache_database(base_db, cache_path)
             yield GraphViews(
                 base=base_db,
                 proposed=proposed_db,
@@ -68,6 +77,37 @@ def graph_views(
             )
         finally:
             base_db.close()
+
+
+def _base_graph_cache_path(root: Path, base_commit: str) -> Path:
+    """Return a user-local cache path bound to repo, commit and graph schema."""
+    cache_home = Path(
+        os.environ.get("XDG_CACHE_HOME")
+        or (Path.home() / ".cache")
+    )
+    repo_key = hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()[:16]
+    version_key = f"graph-ba-{__version__}-db-{SCHEMA_VERSION}"
+    return cache_home / "graph-ba" / "base-graphs" / repo_key / version_key / f"{base_commit}.db"
+
+
+def _restore_database(source_path: Path, destination: sqlite3.Connection) -> None:
+    source = sqlite3.connect(f"file:{source_path}?mode=ro", uri=True)
+    try:
+        source.backup(destination)
+    finally:
+        source.close()
+
+
+def _cache_database(source: sqlite3.Connection, target_path: Path) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target_path.with_suffix(".tmp")
+    temporary.unlink(missing_ok=True)
+    target = sqlite3.connect(temporary)
+    try:
+        source.backup(target)
+    finally:
+        target.close()
+    temporary.replace(target_path)
 
 
 def graph_delta(

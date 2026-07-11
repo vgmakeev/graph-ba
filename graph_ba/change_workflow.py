@@ -68,10 +68,22 @@ class ChangeWorkflowService:
             base_ref=str(manifest.get("base_ref") or "") or None,
         )
 
-    def discover(self, query: str, *, limit: int = 20) -> dict[str, Any]:
+    def discover(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        seed_ids: Iterable[str] = (),
+    ) -> dict[str, Any]:
         if self.db is None:
             raise ChangeWorkflowError("discover requires an imported graph")
-        return discover_candidates(self.db, query, root=self.root, limit=limit)
+        return discover_candidates(
+            self.db,
+            query,
+            root=self.root,
+            limit=limit,
+            seed_ids=seed_ids,
+        )
 
     def compile(self, change_id: str) -> dict[str, Any]:
         if self.db is None:
@@ -267,6 +279,7 @@ def semantic_diff(root: Path, *, base_ref: str | None = None) -> dict[str, Any]:
 
     artifact_changes = _compare_artifacts(base_artifacts, head_artifacts)
     contract_changes = [item for item in artifact_changes if item["origin"] == "canonical"]
+    file_groups = _classify_changed_files(changes, artifact_changes)
     fingerprint_input = [
         {
             "operation": item["operation"],
@@ -286,6 +299,9 @@ def semantic_diff(root: Path, *, base_ref: str | None = None) -> dict[str, Any]:
         "proposal_fingerprint": proposal_fingerprint,
         "summary": {
             "files": len(changes),
+            "contract_files": len(file_groups["contract_files"]),
+            "supporting_files": len(file_groups["supporting_files"]),
+            "delivery_files": len(file_groups["delivery_files"]),
             "artifacts": len(artifact_changes),
             "contract": len(contract_changes),
             "added": sum(item["operation"] == "add" for item in artifact_changes),
@@ -293,6 +309,7 @@ def semantic_diff(root: Path, *, base_ref: str | None = None) -> dict[str, Any]:
             "removed": sum(item["operation"] == "remove" for item in artifact_changes),
         },
         "files": changes,
+        **file_groups,
         "artifacts": artifact_changes,
         "contract": contract_changes,
     }
@@ -333,9 +350,10 @@ def discover_candidates(
     *,
     root: Path | None = None,
     limit: int = 20,
+    seed_ids: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Find likely contract/source artifacts for a change intent."""
-    fq = _fts_query(query)
+    ordered_seeds = list(dict.fromkeys(item for item in seed_ids if item))
     sql = (
         "SELECT a.id, a.type, a.origin, a.title, a.source_file, a.line_number, "
         "fp.full_path AS full_source_file "
@@ -346,14 +364,35 @@ def discover_candidates(
         "WHEN 'canonical' THEN 0 WHEN 'human' THEN 1 WHEN 'derived' THEN 2 ELSE 3 END, "
         "rank LIMIT ?"
     )
-    rows = db.execute(sql, (fq, limit)).fetchall()
-    strategy = "all_terms"
-    if not rows:
+    rows = []
+    if ordered_seeds:
+        placeholders = ",".join("?" for _ in ordered_seeds)
+        exact = db.execute(
+            "SELECT a.id, a.type, a.origin, a.title, a.source_file, a.line_number, "
+            "fp.full_path AS full_source_file FROM artifacts a "
+            "LEFT JOIN file_paths fp ON fp.filename = a.source_file "
+            f"WHERE a.id IN ({placeholders}) AND a.defined = 1",
+            tuple(ordered_seeds),
+        ).fetchall()
+        by_id = {row["id"]: row for row in exact}
+        rows.extend(by_id[item] for item in ordered_seeds if item in by_id)
+
+    strategy = "seeded" if rows else "all_terms"
+    remaining = max(0, limit - len(rows))
+    search_rows = []
+    if query.strip() and remaining:
+        fq = _fts_query(query)
+        search_rows = db.execute(sql, (fq, remaining)).fetchall()
+        if search_rows:
+            strategy = "seeded+all_terms" if rows else "all_terms"
+    if not search_rows and not rows and query.strip():
         tokens = list(dict.fromkeys(re.findall(r"[\w-]{3,}", query, re.UNICODE)))
         fallback = " OR ".join(f'"{token.replace(chr(34), "")}"*' for token in tokens)
         if fallback:
-            rows = db.execute(sql, (fallback, limit)).fetchall()
+            search_rows = db.execute(sql, (fallback, remaining or limit)).fetchall()
             strategy = "any_term"
+    seen_ids = {row["id"] for row in rows}
+    rows.extend(row for row in search_rows if row["id"] not in seen_ids)
     candidates = []
     for row in rows:
         neighbors = db.execute(
@@ -377,7 +416,47 @@ def discover_candidates(
         "schema": "graph-ba.change-discovery.v1",
         "query": query,
         "strategy": strategy,
+        "seed_ids": ordered_seeds,
         "candidates": candidates,
+    }
+
+
+def _classify_changed_files(
+    changes: list[dict[str, str]],
+    artifact_changes: list[dict[str, Any]],
+) -> dict[str, list[dict[str, str]]]:
+    """Separate semantic contract files from supporting and delivery edits."""
+    contract_paths: set[str] = set()
+    supporting_paths: set[str] = set()
+    for item in artifact_changes:
+        destinations = contract_paths if item.get("origin") == "canonical" else supporting_paths
+        for side in ("before", "after"):
+            source_file = str(item.get(side, {}).get("source_file") or "")
+            if source_file:
+                destinations.add(source_file)
+    supporting_paths -= contract_paths
+
+    for change in changes:
+        for path in (change.get("old_path"), change.get("path")):
+            if not path:
+                continue
+            if path.startswith(".graphba/contract/"):
+                contract_paths.add(path)
+            elif path.startswith(".graphba/"):
+                supporting_paths.add(path)
+    supporting_paths -= contract_paths
+
+    def paths(change: dict[str, str]) -> set[str]:
+        return {path for path in (change.get("old_path"), change.get("path")) if path}
+
+    contract_files = [item for item in changes if paths(item) & contract_paths]
+    supporting_files = [item for item in changes if paths(item) & supporting_paths]
+    classified = {id(item) for item in contract_files + supporting_files}
+    delivery_files = [item for item in changes if id(item) not in classified]
+    return {
+        "contract_files": contract_files,
+        "supporting_files": supporting_files,
+        "delivery_files": delivery_files,
     }
 
 

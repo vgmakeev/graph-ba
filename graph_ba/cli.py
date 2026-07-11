@@ -484,7 +484,11 @@ def change_discover(ctx, change_id, query, limit):
     service = ChangeWorkflowService(root, db)
     try:
         manifest = service.manifest(change_id)
-        payload = service.discover(query or str(manifest.get("intent") or ""), limit=limit)
+        payload = service.discover(
+            query or str(manifest.get("intent") or ""),
+            limit=limit,
+            seed_ids=[*manifest.get("sources", []), *manifest.get("scope", [])],
+        )
     except ChangeWorkflowError as exc:
         db.close()
         raise click.ClickException(str(exc)) from exc

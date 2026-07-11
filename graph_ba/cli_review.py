@@ -97,7 +97,7 @@ def change_check(ctx, change_id, stage, mode, snapshot_path):
         result = delivery_gate_payload(
             db,
             root,
-            _delivery_target_ids(semantic_payload, manifest),
+            _delivery_target_ids(db, semantic_payload, manifest),
             proposal_fingerprint=semantic_payload["proposal_fingerprint"],
             mode=mode,
             snapshot_path=snapshot_path,

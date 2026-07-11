@@ -121,11 +121,15 @@ def enrich_code_references(
     root: Path,
     refs: list[CodeReference],
     database: str,
+    *,
+    warn: bool = True,
 ) -> list[CodeReference]:
     """Attach CodeGraph symbol identity where available; preserve file fallback."""
     configured_path = Path(database).expanduser()
     db_path = configured_path if configured_path.is_absolute() else root / configured_path
     if not db_path.is_file():
+        if not warn:
+            return refs
         print(
             f"warning: CodeGraph index not found at {db_path}; using file-level code traces",
             file=sys.stderr,
@@ -135,6 +139,7 @@ def enrich_code_references(
     try:
         with CodeGraphProvider(db_path) as provider:
             current_files: dict[str, bool] = {}
+            stale_files: list[str] = []
             for ref in refs:
                 rel_path = Path(ref.rel_path).as_posix()
                 if rel_path not in current_files:
@@ -143,11 +148,7 @@ def enrich_code_references(
                         ref.code_file,
                     )
                     if not current_files[rel_path]:
-                        print(
-                            f"warning: CodeGraph has no current index for {rel_path}; "
-                            "using file-level code traces",
-                            file=sys.stderr,
-                        )
+                        stale_files.append(rel_path)
                 if not current_files[rel_path]:
                     continue
                 symbol = provider.symbol_at(rel_path, ref.line_number)
@@ -156,7 +157,17 @@ def enrich_code_references(
                 ref.provider_id = symbol.id
                 ref.provider_kind = symbol.kind
                 ref.provider_title = symbol.qualified_name
+            if stale_files and warn:
+                preview = ", ".join(stale_files[:3])
+                suffix = "" if len(stale_files) <= 3 else f", ... (+{len(stale_files) - 3})"
+                print(
+                    f"warning: CodeGraph has no current index for {len(stale_files)} traced "
+                    f"file(s): {preview}{suffix}; using file-level code traces",
+                    file=sys.stderr,
+                )
     except sqlite3.Error as exc:
+        if not warn:
+            return refs
         print(
             f"warning: cannot read CodeGraph index at {db_path}: {exc}; "
             "using file-level code traces",

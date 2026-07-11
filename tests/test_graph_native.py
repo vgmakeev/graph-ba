@@ -5,6 +5,7 @@ from click.testing import CliRunner
 from graph_ba.cli import cli
 from graph_ba.config import load_config
 from graph_ba.db import do_import, get_db
+from graph_ba.gates import _evidence_requirement_satisfied, _load_evidence_policy
 from graph_ba.traceability import (
     build_graph,
     scan_definitions,
@@ -657,6 +658,83 @@ dirs = [".graphba"]
     assert payload["agent_worklist"] == []
 
 
+def test_flow_scope_stays_bounded_and_rule_uses_ac_implementation_proof(tmp_path):
+    (tmp_path / "graph-ba.toml").write_text(
+        """
+[scan]
+dirs = [".graphba"]
+
+[types.FLOW]
+label = "Flows"
+origin = "canonical"
+ref = '(FLOW-[A-Z-]+)'
+classify = 'FLOW-[A-Z-]+'
+
+[types.RULE]
+label = "Rules"
+origin = "canonical"
+ref = '(RULE-[A-Z-]+)'
+classify = 'RULE-[A-Z-]+'
+
+[types.AC]
+label = "Acceptance Criteria"
+origin = "canonical"
+ref = '(AC-[A-Z]+-\\d{3})'
+classify = 'AC-[A-Z]+-\\d{3}'
+
+[types.UIC]
+label = "UI Components"
+origin = "implementation"
+ref = '(UIC-[A-Z-]+)'
+classify = 'UIC-[A-Z-]+'
+
+[types.REACT_COMPONENT]
+label = "React Components"
+origin = "implementation"
+ref = '(REACT_COMPONENT:[A-Za-z]+)'
+classify = 'REACT_COMPONENT:[A-Za-z]+'
+
+[graph_native]
+dirs = [".graphba"]
+        """.strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    contract = tmp_path / ".graphba" / "contract.md"
+    contract.parent.mkdir()
+    contract.write_text(
+        ':::artifact type="FLOW" id="FLOW-MENU-LIVE" title="Menu live" '
+        'contains="RULE-MENU-LIVE,AC-MENU-001"\n:::\n'
+        ':::artifact type="RULE" id="RULE-MENU-LIVE" title="Live rule" '
+        'traces_to="AC-MENU-001"\n:::\n'
+        ':::artifact type="AC" id="AC-MENU-001" title="Menu criterion"\n:::\n'
+        ':::artifact type="AC" id="AC-MENU-002" title="Sibling criterion"\n:::\n'
+        ':::artifact type="UIC" id="UIC-MENU-SHARED" origin="implementation" '
+        'title="Shared zone" traces_to="AC-MENU-001,AC-MENU-002"\n:::\n'
+        ':::artifact type="REACT_COMPONENT" id="REACT_COMPONENT:Menu" '
+        'origin="implementation" title="Menu" renders="UIC-MENU-SHARED"\n:::\n',
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "graph.db"
+    db = get_db(db_path)
+    do_import(tmp_path, db, quiet=True)
+    db.close()
+
+    result = CliRunner().invoke(
+        cli,
+        ["--root", str(tmp_path), "--db", str(db_path), "graph", "FLOW-MENU-LIVE"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    node_ids = {node["id"] for node in payload["nodes"]}
+    assert "AC-MENU-001" in node_ids
+    assert "AC-MENU-002" not in node_ids
+    rule = next(node for node in payload["nodes"] if node["id"] == "RULE-MENU-LIVE")
+    assert rule["computed"]["implemented"] is True
+    assert rule["implementation_proofs"][0]["source"] == "UIC-MENU-SHARED"
+
+
 def test_graph_slice_worklist_reports_screen_readiness_gaps(tmp_path):
     (tmp_path / "graph-ba.toml").write_text(
         """
@@ -979,6 +1057,20 @@ dirs = [".graphba"]
     assert item["missing_required_evidence"] == ["unit"]
     assert item["missing_evidence"] == ["unit"]
     assert payload["policy"]["evidence_kind_rules"]
+
+
+def test_evidence_policy_merges_unit_equivalents_from_providers(tmp_path):
+    policy_dir = tmp_path / ".graphba"
+    policy_dir.mkdir()
+    (policy_dir / "evidence-policy.json").write_text(
+        json.dumps({"satisfies": {"unit": ["backend_integration"]}}),
+        encoding="utf-8",
+    )
+
+    policy = _load_evidence_policy(tmp_path)
+
+    assert _evidence_requirement_satisfied("unit", ["frontend_unit"], policy)
+    assert _evidence_requirement_satisfied("unit", ["backend_integration"], policy)
 
 
 def test_evidence_plan_uses_project_evidence_kind_rules(tmp_path):

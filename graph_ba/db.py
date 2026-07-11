@@ -279,7 +279,7 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
     registry = t.scan_definitions(root, config)
     references = t.scan_references(root, registry, config)
     index_xrefs = t.scan_index_cross_refs(root, config)
-    code_refs = t.scan_code_references(root, config)
+    code_refs = t.scan_code_references(root, config, warn_provider=not quiet)
     test_refs = t.scan_test_references(root, config)
     ui_refs = t.scan_ui_references(root, config)
     graph_native_change_traces = t.scan_graph_native_change_traces(root, config)

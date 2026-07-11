@@ -509,6 +509,8 @@ def _scan_file_references(
 def scan_code_references(
     root: Path,
     config: ProjectConfig,
+    *,
+    warn_provider: bool = True,
 ) -> list[CodeReference]:
     """Scan source code files for @trace comments referencing BA artifacts."""
     if not config.code or not config.code.comment_pattern:
@@ -529,7 +531,12 @@ def scan_code_references(
     if config.codegraph:
         from .codegraph_provider import enrich_code_references
 
-        enrich_code_references(root, refs, config.codegraph.database)
+        enrich_code_references(
+            root,
+            refs,
+            config.codegraph.database,
+            warn=warn_provider,
+        )
     return refs
 
 

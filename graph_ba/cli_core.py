@@ -14,8 +14,10 @@ from graph_ba import __version__
 from graph_ba.change_workflow import (
     ChangeWorkflowError,
     ChangeWorkflowService,
+    approval_status,
     create_change_branch,
     init_change,
+    proposal_check,
 )
 from graph_ba.db import _fts_query, _load_nx, do_import, get_db, graph_is_stale
 
@@ -91,7 +93,11 @@ def cli(ctx, db, root, json_output, no_auto_import):
 
 
 def _conn(ctx) -> sqlite3.Connection:
-    return get_db(ctx.obj.get("db_path"))
+    db_path = ctx.obj.get("db_path")
+    if db_path is None:
+        root = Path(ctx.obj.get("root", ".")).resolve()
+        db_path = root / "reports" / "graph.db"
+    return get_db(db_path)
 
 
 def _auto_import(ctx, db: sqlite3.Connection, reason: str) -> bool:
@@ -631,20 +637,21 @@ def change_compile(ctx, change_id, mode, snapshot_path):
             db.close()
             raise click.ClickException(str(exc)) from exc
     semantic_payload = compiled_change["semantic"] if compiled_change else None
-    graph_payload = _graph_slice_payload(
-        db, root, change_id, mode, snapshot_path, "excerpt", 1200, False
-    )
-    gate_payload = _gate_payload(db, root, change_id, mode, snapshot_path)
-    state_payload = _change_payload(db, root, change_id)
-    pack_payload = _pack_payload(db, root, change_id)
     context_payload = compiled_change["impact"] if compiled_change else None
-    proposal_payload = service.proposal_check(change_id) if semantic_payload else None
-    approval_payload = service.approval(change_id) if semantic_payload else None
+    proposal_payload = (
+        proposal_check(semantic_payload, manifest) if semantic_payload else None
+    )
+    approval_payload = (
+        approval_status(root, change_id, semantic_payload) if semantic_payload else None
+    )
+    delivery_targets = (
+        _delivery_target_ids(db, semantic_payload, manifest) if semantic_payload else []
+    )
     delivery_payload = (
         delivery_gate_payload(
             db,
             root,
-            _delivery_target_ids(semantic_payload, manifest),
+            delivery_targets,
             proposal_fingerprint=semantic_payload["proposal_fingerprint"],
             mode=mode,
             snapshot_path=snapshot_path,
@@ -654,6 +661,34 @@ def change_compile(ctx, change_id, mode, snapshot_path):
         if semantic_payload
         else None
     )
+    graph_native = manifest_path.parent == root / ".graphba" / "changes"
+    if graph_native and delivery_targets:
+        primary_target = delivery_targets[0]
+        primary_gate = next(
+            check for check in delivery_payload["checks"]
+            if check["target"] == primary_target
+        )
+        graph_payload = _graph_slice_payload(
+            db,
+            root,
+            primary_target,
+            mode,
+            snapshot_path,
+            "excerpt",
+            1200,
+            False,
+            gate_data=primary_gate,
+        )
+        gate_payload = primary_gate
+        state_payload = _state_payload_from_graph(change_id, manifest, graph_payload)
+        pack_payload = _pack_payload_from_graph(graph_payload)
+    else:
+        graph_payload = _graph_slice_payload(
+            db, root, change_id, mode, snapshot_path, "excerpt", 1200, False
+        )
+        gate_payload = _gate_payload(db, root, change_id, mode, snapshot_path)
+        state_payload = _change_payload(db, root, change_id)
+        pack_payload = _pack_payload(db, root, change_id)
     db.close()
     if semantic_payload:
         (compiled_dir / "semantic-diff.json").write_text(
@@ -765,6 +800,7 @@ def _read_change_manifest(path: Path) -> dict[str, Any]:
 
 
 def _delivery_target_ids(
+    db: sqlite3.Connection,
     semantic_payload: dict[str, Any],
     manifest: dict[str, Any],
 ) -> list[str]:
@@ -773,7 +809,68 @@ def _delivery_target_ids(
         for item in semantic_payload.get("contract", [])
         if item.get("operation") != "remove"
     }
-    return sorted(changed | set(manifest.get("scope", [])))
+    candidates = changed | set(manifest.get("scope", []))
+    if not candidates:
+        return []
+    placeholders = ",".join("?" for _ in candidates)
+    contained = {
+        row["target_id"]
+        for row in db.execute(
+            "SELECT target_id FROM edges WHERE relation_type = 'CONTAINS' "
+            f"AND source_id IN ({placeholders}) AND target_id IN ({placeholders})",
+            (*sorted(candidates), *sorted(candidates)),
+        ).fetchall()
+    }
+    return sorted(candidates - contained)
+
+
+def _state_payload_from_graph(
+    change_id: str,
+    manifest: dict[str, Any],
+    graph_payload: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "change": {
+            "id": change_id,
+            "title": manifest.get("title") or change_id,
+            "state": manifest.get("state") or "draft",
+            "mode": manifest.get("mode") or "",
+        },
+        "scope": [
+            {
+                "id": node["id"],
+                "type": node["type"],
+                "lifecycle": node.get("lifecycle") or "draft",
+                "computed": node.get("computed", {}),
+            }
+            for node in graph_payload.get("nodes", [])
+        ],
+    }
+
+
+def _pack_payload_from_graph(graph_payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "target": graph_payload["target"],
+        "artifacts": [
+            {
+                "id": node["id"],
+                "type": node["type"],
+                "title": node.get("title", ""),
+                "source_file": node.get("source", {}).get("file", ""),
+                "line_number": node.get("source", {}).get("line", 0),
+                "content": node.get("content", {}).get("text", ""),
+            }
+            for node in graph_payload.get("nodes", [])
+        ],
+        "edges": [
+            {
+                "source_id": edge["from"],
+                "relation_type": edge["relation"],
+                "target_id": edge["to"],
+            }
+            for edge in graph_payload.get("edges", [])
+        ],
+    }
 
 
 def _create_change_manifest(

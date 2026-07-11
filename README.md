@@ -215,9 +215,20 @@ graph-ba change check CHG-orders-live-update --stage release --mode release
 
 `change init` creates `change/<change-id>` by default and refuses to mix a new
 change with a dirty worktree. Use `--no-branch` only when the caller owns the
-current Git lifecycle. `change compile` builds separate base, proposed-contract
-and delivery views, then writes the typed graph delta and transitive impact
-paths under `reports/graphba/changes/<change-id>/`.
+current Git lifecycle. A dedicated Git worktree is the recommended way to run
+parallel changes without mixing their filesystem state.
+
+`change discover` starts with manifest `sources` and `scope`; free-text search
+only supplements those seeds. `change diff` preserves the complete Git file
+list for delivery review and also separates `contract_files`,
+`supporting_files` and `delivery_files`, so unrelated dirty-worktree edits are
+visible without being confused with the semantic proposal.
+
+`change compile` builds separate base, proposed-contract and delivery views,
+then writes the typed graph delta and transitive impact paths under
+`reports/graphba/changes/<change-id>/`. Historical base graphs are cached per
+repository, commit and graph-ba schema in the user cache directory; repeated
+`compile`, `context` and release checks do not rescan the same Git tree.
 
 The canonical artifact is the accepted set of stable-ID graph-native artifact
 blocks in normal project files, not the change manifest or a generated bundle.

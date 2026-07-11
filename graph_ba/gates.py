@@ -382,7 +382,9 @@ def _load_evidence_policy(root: Path) -> dict[str, Any]:
         "kind_target_types": {
             key: set(value) for key, value in DEFAULT_AC_KIND_TARGET_TYPES.items()
         },
-        "satisfies": {},
+        "satisfies": {
+            "unit": {"frontend_unit"},
+        },
         "evidence_kind_rules": list(DEFAULT_EVIDENCE_KIND_RULES),
         "gate_blocking_modes": [],
         "synthesis_policy": {},
@@ -416,9 +418,9 @@ def _load_evidence_policy(root: Path) -> dict[str, Any]:
         if isinstance(satisfies, dict):
             for required, observed in satisfies.items():
                 if isinstance(observed, list):
-                    policy["satisfies"][str(required)] = {
+                    policy["satisfies"].setdefault(str(required), set()).update(
                         str(item) for item in observed
-                    }
+                    )
         evidence_kind_rules = data.get("evidence_kind_rules")
         if isinstance(evidence_kind_rules, list):
             normalized_rules = []
@@ -642,13 +644,15 @@ def _graph_slice_payload(
     content_mode: str,
     content_limit: int,
     include_mentions: bool,
+    *,
+    gate_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     row = db.execute("SELECT * FROM artifacts WHERE id = ?", (target_id,)).fetchone()
     if not row:
         raise click.ClickException(f"Artifact not found: {target_id}")
     ids = _scope_ids(db, target_id)
     ids.add(target_id)
-    gate_data = _gate_payload(db, root, target_id, mode, snapshot_path)
+    gate_data = gate_data or _gate_payload(db, root, target_id, mode, snapshot_path)
     computed_by_id = {item["id"]: item for item in gate_data["scope"]}
     ids.update(_proof_artifact_ids(gate_data))
     rows = _rows_for_ids(db, ids)
@@ -668,6 +672,8 @@ def _graph_slice_payload(
         "schema": "graph-ba.graph-slice.v1",
         "target": target_id,
         "mode": gate_data["mode"],
+        "pass": gate_data["pass"],
+        "verdict": gate_data["verdict"],
         "summary": {
             **gate_data["summary"],
             "nodes": len(nodes),
@@ -763,6 +769,7 @@ def _graph_slice_node(
             "line": row["line_number"],
         },
         "computed": computed.get("computed", {}) if computed else {},
+        "lifecycle": computed.get("lifecycle", "") if computed else "",
     }
     if computed and computed.get("implementation_proofs"):
         node["implementation_proofs"] = computed["implementation_proofs"]
