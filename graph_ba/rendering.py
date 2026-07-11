@@ -7,16 +7,21 @@ from typing import Any
 
 def _render_graph_summary(payload: dict[str, Any], *, worklist_limit: int = 12) -> str:
     summary = payload["summary"]
+    scope_parts = [f"scope={summary['scope']}"]
+    if "nodes" in summary:
+        scope_parts.append(f"nodes={summary['nodes']}")
+    if "edges" in summary:
+        scope_parts.append(f"edges={summary['edges']}")
+    scope_parts.append(f"evidence_gaps={summary['evidence_plan']['gap']}")
+    if "view" in summary:
+        scope_parts.append(f"view={summary['view']}")
     lines = [
         f"graph-ba {payload['target']}",
         (
             f"{payload['verdict']} readiness={payload.get('readiness', 'UNKNOWN')} "
             f"confidence={payload['overall_confidence']} mode={payload['mode']}"
         ),
-        (
-            f"scope={summary['scope']} nodes={summary['nodes']} edges={summary['edges']} "
-            f"evidence_gaps={summary['evidence_plan']['gap']} view={summary['view']}"
-        ),
+        " ".join(scope_parts),
         "",
         "Quality axes:",
     ]
@@ -32,7 +37,44 @@ def _render_graph_summary(payload: dict[str, Any], *, worklist_limit: int = 12) 
             f"- {item['priority']} {item['kind']} {item['artifact']}: {item['reason']}"
         )
     if len(worklist) > worklist_limit:
-        lines.append(f"- … {len(worklist) - worklist_limit} more; use --json or --out")
+        lines.append(
+            f"- … {len(worklist) - worklist_limit} more; use --worklist-only"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _render_change_ready_summary(payload: dict[str, Any]) -> str:
+    proposal = payload["proposal"]
+    approval = payload["approval"]
+    delivery = payload["delivery"]
+    provider = payload["provider_refresh"]
+    lines = [
+        f"graph-ba change ready {payload['change']}",
+        f"Provider refresh: {'PASS' if provider.get('pass', True) else 'FAIL'}"
+        + (" (refreshed)" if provider.get("refreshed") else ""),
+        f"Import: {payload['import']['status']} — {payload['import']['artifacts']} artifacts, {payload['import']['edges']} edges",
+        f"Proposal: {proposal['verdict']} — fingerprint {proposal.get('proposal_fingerprint', '')}",
+        (
+            "Approval: PASS"
+            if approval.get("valid")
+            else f"Approval: REQUIRED — {approval.get('reason', 'missing_approval')}"
+        ),
+        (
+            f"Delivery: {delivery['verdict']} — "
+            f"{payload['delivery_evidence_gaps']} evidence gaps, "
+            f"{delivery.get('summary', {}).get('findings', 0)} findings"
+        ),
+    ]
+    codegraph = payload.get("codegraph", {})
+    if codegraph.get("status") == "missing":
+        lines.append(
+            "CodeGraph: MISSING — using file-level code traces; "
+            + str(codegraph.get("suggested_action") or "restore the index")
+        )
+    next_action = payload.get("next_action", {})
+    if next_action:
+        lines.extend(["", f"Next: {next_action['reason']}", next_action["command"]])
+    lines.extend(["", f"Outputs: {payload['outputs']}"])
     return "\n".join(lines) + "\n"
 
 

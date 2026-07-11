@@ -292,7 +292,7 @@ def _gate_payload(
     passed = fail_count == 0
     overall_confidence = _overall_confidence(quality_axes)
     readiness, verdict = _readiness_verdict(passed, overall_confidence)
-    return {
+    payload = {
         "schema": "graph-ba.gate.v1",
         "target": target_id,
         "mode": selected_mode,
@@ -325,6 +325,16 @@ def _gate_payload(
             for item in states
         ],
     }
+    scope_ids = {item["id"] for item in states}
+    worklist_nodes = [
+        {"id": item["id"], "type": item["type"]}
+        for item in states
+    ]
+    worklist_edges = _graph_slice_edges(db, scope_ids, config, "delivery")
+    payload["agent_worklist"] = _agent_worklist(
+        payload, worklist_nodes, worklist_edges
+    )
+    return payload
 
 
 def _gate_findings(

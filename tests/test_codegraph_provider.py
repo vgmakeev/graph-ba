@@ -1,6 +1,8 @@
 """Optional CodeGraph symbol enrichment for @trace references."""
 
+import hashlib
 import sqlite3
+import subprocess
 
 from click.testing import CliRunner
 
@@ -57,12 +59,13 @@ def _project(tmp_path, *, with_index: bool = True):
                 ),
             )
             db.execute(
-                "CREATE TABLE files (path TEXT PRIMARY KEY, modified_at INTEGER)"
+                "CREATE TABLE files (path TEXT PRIMARY KEY, content_hash TEXT, modified_at INTEGER)"
             )
             db.execute(
-                "INSERT INTO files VALUES (?, ?)",
+                "INSERT INTO files VALUES (?, ?, ?)",
                 (
                     "src/service.py",
+                    hashlib.sha256((src / "service.py").read_bytes()).hexdigest(),
                     int((src / "service.py").stat().st_mtime * 1000),
                 ),
             )
@@ -110,7 +113,7 @@ def test_missing_index_falls_back_to_file_node(tmp_path, capsys):
 def test_stale_index_falls_back_to_file_node(tmp_path, capsys):
     config = _project(tmp_path)
     with sqlite3.connect(tmp_path / ".codegraph" / "codegraph.db") as db:
-        db.execute("UPDATE files SET modified_at = 0")
+        db.execute("UPDATE files SET content_hash = 'stale'")
 
     refs = scan_code_references(tmp_path, config)
     graph = build_graph({}, [], config, code_refs=refs)
@@ -118,6 +121,37 @@ def test_stale_index_falls_back_to_file_node(tmp_path, capsys):
     assert "CODE:src/service.py" in graph
     warning = capsys.readouterr().err
     assert "no current index for 1 traced file(s): src/service.py" in warning
+
+
+def test_linked_worktree_reuses_index_by_content_hash(tmp_path):
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    config = _project(primary)
+    (primary / ".gitignore").write_text(".codegraph/\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-b", "main"], cwd=primary, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "graph-ba@example.test"],
+        cwd=primary,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "graph-ba tests"],
+        cwd=primary,
+        check=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=primary, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=primary, check=True)
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "change/test", str(linked)],
+        cwd=primary,
+        check=True,
+    )
+
+    refs = scan_code_references(linked, load_config(linked))
+
+    assert config.codegraph is not None
+    assert {ref.provider_id for ref in refs} == {"function:process-order"}
 
 
 def test_quiet_import_suppresses_provider_warning(tmp_path, capsys):

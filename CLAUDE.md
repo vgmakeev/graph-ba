@@ -7,8 +7,9 @@ Graph BA — standalone CLI для графовой индексации и тр
 ## Основной рабочий цикл
 
 Для изменения продукта основной цикл: `change init` → правка owning artifacts
-→ `change compile` → human approval fingerprint → implementation/evidence →
-release check. `compile` одним запуском строит semantic delta, impact, bounded
+→ `change ready` → human approval fingerprint → implementation/evidence →
+повторный `change ready`. `ready` обновляет отсутствующие provider projections,
+импортирует граф и одним запуском строит semantic delta, impact, bounded
 graph, evidence plan, gate и worklist. `import`, `graph`, `search`, `path`, `sql`,
 `review` и другие команды — диагностика, а не обязательный ритуал; `jq` в
 нормальном агентском цикле не нужен.
@@ -32,8 +33,9 @@ graph, evidence plan, gate и worklist. `import`, `graph`, `search`, `path`, `sq
   и `required_proofs`. Старые `BP/BD/BR/...` должны переиспользоваться; новый
   тип вводится только для отсутствующей смысловой единицы с отдельным owner и
   lifecycle.
-- `change compile` — основной one-shot compiler semantic delta, impact, graph,
-  evidence plan, gate и worklist. Не заставляй пользователя собирать это через jq.
+- `change ready` — основной one-shot UX: provider refresh, import, compile и
+  единый итог Proposal/Approval/Delivery/Next. `change compile` — низкоуровневая
+  генерация файлов. Не заставляй пользователя собирать workflow через jq.
 
 ## Установка и запуск
 

@@ -54,6 +54,7 @@ def build_graph(
     ui_refs: list[CodeReference] | None = None,
     graph_native_change_traces: list[GraphNativeChangeTrace] | None = None,
     graph_native_artifact_traces: list[GraphNativeArtifactTrace] | None = None,
+    root: Path | None = None,
 ) -> nx.DiGraph:
     G = nx.DiGraph()
 
@@ -67,7 +68,7 @@ def build_graph(
             aid,
             type=art.artifact_type,
             title=art.title,
-            source_file=str(art.source_file.name),
+            source_file=_source_path(art.source_file, root),
             origin=origin,
         )
 
@@ -99,7 +100,7 @@ def build_graph(
                 owner,
                 target,
                 context=ref.context,
-                source_file=str(ref.source_file.name),
+                source_file=_source_path(ref.source_file, root),
                 line=ref.line_number,
                 relation_type="MENTIONS",
             )
@@ -110,7 +111,7 @@ def build_graph(
                     file_node,
                     type="FILE",
                     title=ref.source_file.name,
-                    source_file=str(ref.source_file.name),
+                    source_file=_source_path(ref.source_file, root),
                     defined=True,
                     origin="container",
                 )
@@ -144,7 +145,7 @@ def build_graph(
                     src,
                     tgt,
                     context="index_table",
-                    source_file=str(fpath.name),
+                    source_file=_source_path(fpath, root),
                     line=lnum,
                     relation_type="INDEX",
                 )
@@ -181,6 +182,15 @@ def build_graph(
     _resolve_dangling_variants(G, registry)
 
     return G
+
+
+def _source_path(path: Path, root: Path | None) -> str:
+    if root is not None:
+        try:
+            return path.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            pass
+    return path.name
 
 
 def _add_graph_native_change_nodes(

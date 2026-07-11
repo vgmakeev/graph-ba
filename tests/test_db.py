@@ -5,7 +5,47 @@ import pytest
 import sqlite3
 
 from graph_ba.cli import fmt_table
-from graph_ba.db import get_db, _fts_query, _load_nx, _scan_file_mtimes
+from graph_ba.db import do_import, get_db, _fts_query, _load_nx, _scan_file_mtimes
+
+
+def test_import_keeps_root_relative_source_paths_for_duplicate_basenames(tmp_path):
+    (tmp_path / "graph-ba.toml").write_text(
+        r"""
+[scan]
+dirs = ["docs"]
+
+[types.AC]
+label = "Acceptance"
+ref = '(AC-\d+)'
+classify = 'AC-\d+'
+
+[[definitions]]
+type = "AC"
+file = "docs/*/spec.md"
+mode = "heading"
+pattern = '^##\s+(AC-\d+)\s+-\s+(.*)'
+        """.strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    for folder, artifact in (("one", "AC-1"), ("two", "AC-2")):
+        path = tmp_path / "docs" / folder
+        path.mkdir(parents=True)
+        (path / "spec.md").write_text(
+            f"## {artifact} - Example\n", encoding="utf-8"
+        )
+    db = get_db(tmp_path / "reports" / "graph.db")
+
+    do_import(tmp_path, db, quiet=True)
+
+    rows = db.execute(
+        "SELECT id, source_file FROM artifacts WHERE id LIKE 'AC-%' ORDER BY id"
+    ).fetchall()
+    assert [(row["id"], row["source_file"]) for row in rows] == [
+        ("AC-1", "docs/one/spec.md"),
+        ("AC-2", "docs/two/spec.md"),
+    ]
+    db.close()
 
 
 class TestSchema:

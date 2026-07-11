@@ -676,6 +676,44 @@ def test_compiled_change_reuses_cached_base_graph(tmp_path, monkeypatch):
     assert second["graph_delta"] == first["graph_delta"]
 
 
+def test_change_ready_compiles_and_explains_human_approval(tmp_path):
+    root = _project(tmp_path)
+    init_change(
+        root,
+        "CHG-ready-order",
+        intent="Explain the next workflow step",
+        scope=["AC-ORD-001"],
+    )
+    spec = root / "docs" / "spec.md"
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace(
+            "Original behavior.", "Changed behavior."
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "--root",
+            str(root),
+            "change",
+            "ready",
+            "CHG-ready-order",
+            "--no-refresh-providers",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Proposal: PASS" in result.output
+    assert "Approval: REQUIRED" in result.output
+    assert "Delivery: FAIL" in result.output
+    assert "graph-ba change approve CHG-ready-order" in result.output
+    compiled = root / "reports" / "graphba" / "changes" / "CHG-ready-order"
+    assert (compiled / "proposal-check.json").is_file()
+    assert (compiled / "delivery-check.json").is_file()
+
+
 def test_observed_alias_and_dangling_reference_are_not_contract_delta(tmp_path):
     root = _project(tmp_path)
     runner = CliRunner()

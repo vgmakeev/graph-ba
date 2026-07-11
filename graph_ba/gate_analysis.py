@@ -650,7 +650,12 @@ def _priority_rank(priority: str) -> int:
     return {"P0": 0, "P1": 1, "P2": 2}.get(priority, 9)
 
 
-def _worklist_suggested_actions(kind: str, artifact: str) -> list[str]:
+def _worklist_suggested_actions(
+    kind: str,
+    artifact: str,
+    *,
+    source: dict[str, Any] | None = None,
+) -> list[str]:
     if kind == "add_implementation":
         return [
             f"add a typed implementation path to {artifact}",
@@ -679,9 +684,23 @@ def _worklist_suggested_actions(kind: str, artifact: str) -> list[str]:
     if kind == "resolve_artifact":
         return [
             f"restore or define {artifact}",
-            "if it is adapter-owned, regenerate/copy the observed provider projection before running gates",
+            "if it is adapter-owned, run `graph-ba change ready <CHG-ID> --refresh-providers` before editing the contract",
         ]
     if kind == "add_matrix_rule":
+        edge = (source or {}).get("edge") or {}
+        if edge:
+            return [
+                (
+                    "declare the canonical matrix edge "
+                    f"{edge.get('source_type', '?')} --{edge.get('relation_type', '?')}--> "
+                    f"{edge.get('target_type', '?')}"
+                ),
+                (
+                    "add one artifact-class matrix entry for that orientation, or replace "
+                    f"{edge.get('source_id', artifact)} -> {edge.get('target_id', '?')}; "
+                    "do not add a reverse duplicate"
+                ),
+            ]
         return [
             f"review the undeclared class edge involving {artifact}",
             "add one canonical source_class/relation/target_class rule or replace the edge; do not add a reverse duplicate",

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional, List, Tuple
 
 DB_PATH = Path.cwd() / "reports" / "graph.db"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -206,8 +206,9 @@ def _scan_file_mtimes(root: Path, config) -> dict[str, float]:
         for pattern in config.graph_native.change_files:
             _remember_files(files, root.glob(pattern))
     if getattr(config, "codegraph", None):
-        configured_path = Path(config.codegraph.database).expanduser()
-        db_path = configured_path if configured_path.is_absolute() else root / configured_path
+        from .codegraph_provider import resolve_codegraph_database
+
+        db_path = resolve_codegraph_database(root, config.codegraph.database)
         _remember_files(files, [db_path])
     return files
 
@@ -287,7 +288,8 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
     G = t.build_graph(registry, references, config, index_xrefs, code_refs, test_refs,
                       ui_refs,
                       graph_native_change_traces=graph_native_change_traces,
-                      graph_native_artifact_traces=graph_native_artifact_traces)
+                      graph_native_artifact_traces=graph_native_artifact_traces,
+                      root=root)
 
     # Clear existing data
     db.executescript("""
@@ -347,20 +349,29 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
 
     # Build filename → full_path mapping
     file_map: dict = {}
+
+    def remember_source(path: Path) -> None:
+        try:
+            relative = path.resolve().relative_to(root).as_posix()
+        except ValueError:
+            relative = path.name
+        file_map[relative] = str(path)
+        file_map.setdefault(path.name, str(path))
+
     for art in registry.values():
-        file_map[art.source_file.name] = str(art.source_file)
+        remember_source(art.source_file)
     for ref in references:
-        file_map[ref.source_file.name] = str(ref.source_file)
+        remember_source(ref.source_file)
     for cref in code_refs:
-        file_map[cref.code_file.name] = str(cref.code_file)
+        remember_source(cref.code_file)
     for tref in test_refs:
-        file_map[tref.code_file.name] = str(tref.code_file)
+        remember_source(tref.code_file)
     for uref in ui_refs:
-        file_map[uref.code_file.name] = str(uref.code_file)
+        remember_source(uref.code_file)
     for gref in graph_native_change_traces:
-        file_map[gref.source_file.name] = str(gref.source_file)
+        remember_source(gref.source_file)
     for gref in graph_native_artifact_traces:
-        file_map[gref.source_file.name] = str(gref.source_file)
+        remember_source(gref.source_file)
     for fname, fpath in file_map.items():
         db.execute("INSERT OR IGNORE INTO file_paths (filename, full_path) VALUES (?, ?)",
                    (fname, fpath))

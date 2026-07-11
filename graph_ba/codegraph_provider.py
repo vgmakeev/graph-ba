@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -108,13 +110,51 @@ class CodeGraphProvider:
         """Return whether CodeGraph indexed the current on-disk file version."""
         if self._db is None or not source_file.is_file():
             return False
+        columns = {
+            row["name"]
+            for row in self._db.execute("PRAGMA table_info(files)").fetchall()
+        }
+        selected = (
+            "content_hash, modified_at"
+            if "content_hash" in columns
+            else "modified_at"
+        )
         row = self._db.execute(
-            "SELECT modified_at FROM files WHERE path = ?",
+            f"SELECT {selected} FROM files WHERE path = ?",
             (file_path,),
         ).fetchone()
         if not row:
             return False
+        if "content_hash" in columns and row["content_hash"]:
+            digest = hashlib.sha256(source_file.read_bytes()).hexdigest()
+            return digest == row["content_hash"]
         return int(row["modified_at"]) == int(source_file.stat().st_mtime * 1000)
+
+
+def resolve_codegraph_database(root: Path, database: str) -> Path:
+    """Reuse a linked worktree's read-only index when the local one is absent."""
+    configured = Path(database).expanduser()
+    direct = configured if configured.is_absolute() else root / configured
+    if direct.is_file() or configured.is_absolute():
+        return direct
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return direct
+    for line in result.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        candidate_root = Path(line.removeprefix("worktree ")).resolve()
+        if candidate_root == root.resolve():
+            continue
+        candidate = candidate_root / configured
+        if candidate.is_file():
+            return candidate
+    return direct
 
 
 def enrich_code_references(
@@ -125,8 +165,7 @@ def enrich_code_references(
     warn: bool = True,
 ) -> list[CodeReference]:
     """Attach CodeGraph symbol identity where available; preserve file fallback."""
-    configured_path = Path(database).expanduser()
-    db_path = configured_path if configured_path.is_absolute() else root / configured_path
+    db_path = resolve_codegraph_database(root, database)
     if not db_path.is_file():
         if not warn:
             return refs

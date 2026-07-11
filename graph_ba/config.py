@@ -237,6 +237,17 @@ class CodeGraphConfig:
 
 
 @dataclass
+class ProviderRefreshConfig:
+    """Project-owned command that materializes observed graph inputs."""
+
+    name: str
+    command: List[str]
+    inputs: List[str] = field(default_factory=list)
+    outputs: List[str] = field(default_factory=list)
+    always: bool = False
+
+
+@dataclass
 class TestsConfig:
     """Configuration for scanning test files for artifact ID references."""
     dirs: List[str]
@@ -320,6 +331,8 @@ class ProjectConfig:
     code: Optional[CodeConfig] = None
     # Optional symbol-level enrichment for code traces
     codegraph: Optional[CodeGraphConfig] = None
+    # Optional commands that materialize ignored/generated provider projections
+    provider_refresh: List[ProviderRefreshConfig] = field(default_factory=list)
     # Test traceability
     tests: Optional[TestsConfig] = None
     # UI traceability
@@ -476,6 +489,27 @@ def load_config(root: Path) -> ProjectConfig:
             codegraph_config = CodeGraphConfig(
                 database=codegraph_data.get("database", ".codegraph/codegraph.db"),
             )
+    refresh_config: List[ProviderRefreshConfig] = []
+    refresh_data = providers_data.get("refresh", [])
+    if isinstance(refresh_data, dict):
+        refresh_data = [refresh_data]
+    for index, item in enumerate(refresh_data):
+        if not isinstance(item, dict):
+            continue
+        command = item.get("command", [])
+        if isinstance(command, str):
+            command = [command]
+        if not command:
+            continue
+        refresh_config.append(
+            ProviderRefreshConfig(
+                name=str(item.get("name") or f"provider-{index + 1}"),
+                command=[str(part) for part in command],
+                inputs=[str(path) for path in item.get("inputs", [])],
+                outputs=[str(path) for path in item.get("outputs", [])],
+                always=bool(item.get("always", False)),
+            )
+        )
 
     # ── Tests scan config ──
     tests_data = data.get("tests")
@@ -559,6 +593,7 @@ def load_config(root: Path) -> ProjectConfig:
         behavior_model=behavior_model,
         code=code_config,
         codegraph=codegraph_config,
+        provider_refresh=refresh_config,
         tests=tests_config,
         ui=ui_config,
         graph_native=graph_native_config,

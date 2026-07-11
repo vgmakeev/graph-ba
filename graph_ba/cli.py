@@ -20,6 +20,7 @@ from .cli_core import (
     _change_manifest_path,
     _conn,
     _json_out,
+    local_json_option,
     _read_change_manifest,
     _require_graph,
     change_group,
@@ -189,6 +190,14 @@ pattern = '^##\\s+(FEAT-\\d{2,4})\\s*[—–\\-]\\s*(.*)'
 # Falls back to the file-level CODE: node when the index or symbol is unavailable.
 # [providers.codegraph]
 # database = ".codegraph/codegraph.db"
+
+# Optional: materialize generated/ignored provider projections before
+# `graph-ba change ready` compiles the graph.
+# [[providers.refresh]]
+# name = "observed-adapter"
+# command = ["make", "graphba-observed"]
+# inputs = ["src", "tests"]
+# outputs = ["reports/graphba/observed"]
 
 # ── Test traceability ──
 # Test files become TEST: nodes; any artifact ID found in a test file
@@ -535,24 +544,72 @@ def change_status(ctx, change_id):
     default=None,
     help="Write gate JSON to this file",
 )
+@click.option("--summary", is_flag=True, help="Print a concise readiness summary")
+@click.option("--findings-only", is_flag=True, help="Print only gate findings as JSON")
+@click.option("--worklist-only", is_flag=True, help="Print only the agent worklist as JSON")
+@local_json_option
 @click.pass_context
-def gate(ctx, target_id, mode, snapshot_path, out_path):
+def gate(
+    ctx,
+    target_id,
+    mode,
+    snapshot_path,
+    out_path,
+    summary,
+    findings_only,
+    worklist_only,
+):
     """Evaluate change/release readiness from graph facts."""
     root = Path(ctx.obj.get("root", ".")).resolve()
     db = _conn(ctx)
     _require_graph(ctx, db)
     result = _gate_payload(db, root, target_id, mode, snapshot_path)
     db.close()
-    text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+    if sum(bool(value) for value in (summary, findings_only, worklist_only)) > 1:
+        raise click.ClickException(
+            "choose only one of --summary, --findings-only or --worklist-only"
+        )
+    full_text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
     if out_path:
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(text + "\n", encoding="utf-8")
-        if not ctx.obj.get("json"):
+        out_path.write_text(full_text + "\n", encoding="utf-8")
+        if not ctx.obj.get("json") and not (summary or findings_only or worklist_only):
             print(f"Wrote gate JSON: {out_path}")
             if not result["pass"]:
                 raise click.ClickException(f"Gate failed: {result['verdict']}")
             return
-    print(text)
+    if summary and not ctx.obj.get("json"):
+        print(_render_graph_summary(result), end="")
+    elif findings_only:
+        print(
+            json.dumps(
+                {
+                    "target": target_id,
+                    "mode": result["mode"],
+                    "verdict": result["verdict"],
+                    "findings": result["findings"],
+                },
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+    elif worklist_only:
+        print(
+            json.dumps(
+                {
+                    "target": target_id,
+                    "mode": result["mode"],
+                    "verdict": result["verdict"],
+                    "agent_worklist": result["agent_worklist"],
+                },
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+    else:
+        print(full_text)
     if not result["pass"]:
         raise click.ClickException(f"Gate failed: {result['verdict']}")
 
@@ -642,6 +699,9 @@ def pack(ctx, target_id, out_path, output_format):
     is_flag=True,
     help="Print a concise readiness/worklist summary instead of full JSON",
 )
+@click.option("--findings-only", is_flag=True, help="Print only graph findings as JSON")
+@click.option("--worklist-only", is_flag=True, help="Print only the agent worklist as JSON")
+@local_json_option
 @click.pass_context
 def graph_slice(
     ctx,
@@ -654,6 +714,8 @@ def graph_slice(
     view,
     out_path,
     summary,
+    findings_only,
+    worklist_only,
 ):
     """Export scoped nodes, typed edges, content excerpts and findings as JSON."""
     root = Path(ctx.obj.get("root", ".")).resolve()
@@ -671,15 +733,47 @@ def graph_slice(
         view=view,
     )
     db.close()
+    if sum(bool(value) for value in (summary, findings_only, worklist_only)) > 1:
+        raise click.ClickException(
+            "choose only one of --summary, --findings-only or --worklist-only"
+        )
     text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
     if out_path:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(text.rstrip() + "\n", encoding="utf-8")
-        if not ctx.obj.get("json"):
+        if not ctx.obj.get("json") and not (summary or findings_only or worklist_only):
             print(f"Wrote graph-ba graph slice: {out_path}")
             return
     if summary and not ctx.obj.get("json"):
         print(_render_graph_summary(payload), end="")
+    elif findings_only:
+        print(
+            json.dumps(
+                {
+                    "target": target_id,
+                    "mode": payload["mode"],
+                    "verdict": payload["verdict"],
+                    "findings": payload["findings"],
+                },
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+    elif worklist_only:
+        print(
+            json.dumps(
+                {
+                    "target": target_id,
+                    "mode": payload["mode"],
+                    "verdict": payload["verdict"],
+                    "agent_worklist": payload["agent_worklist"],
+                },
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
     else:
         print(text)
 

@@ -74,6 +74,24 @@ class TestSearchCmd:
         ])
         assert result.exit_code == 0
 
+    def test_accepts_json_after_subcommand(self, cli_env):
+        runner, root, db_path = cli_env
+        result = runner.invoke(
+            cli,
+            [
+                "--root",
+                str(root),
+                "--db",
+                str(db_path),
+                "search",
+                "Order",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "artifacts" in json.loads(result.output)
+
 
 class TestNodeCmd:
     def test_found(self, cli_env):

@@ -21,7 +21,9 @@ from graph_ba.change_workflow import (
     proposal_check,
 )
 from graph_ba.change_authoring import ChangeAuthoringError, add_artifact, add_link
+from graph_ba.config import load_config
 from graph_ba.db import _fts_query, _load_nx, do_import, get_db, graph_is_stale
+from graph_ba.provider_refresh import codegraph_health, refresh_provider_inputs
 
 from .gate_analysis import _change_payload, _pack_payload
 from .gates import (
@@ -34,6 +36,7 @@ from .rendering import (
     _render_evidence_plan_markdown,
     _render_gaps_markdown,
     _render_graph_summary,
+    _render_change_ready_summary,
     _render_pack_markdown,
     _render_projection_markdown,
     _render_worklist_markdown,
@@ -57,6 +60,24 @@ def _json_out(ctx, data):
         print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
         return True
     return False
+
+
+def local_json_option(command):
+    """Accept ``--json`` after a subcommand as well as before it."""
+
+    def enable(ctx, _param, value):
+        if value:
+            ctx.ensure_object(dict)
+            ctx.obj["json"] = True
+        return value
+
+    return click.option(
+        "--json",
+        is_flag=True,
+        expose_value=False,
+        callback=enable,
+        help="Output this command as JSON (alias for global --json)",
+    )(command)
 
 
 def _csv_filter(value: str | None) -> set[str]:
@@ -170,6 +191,7 @@ def _require_graph(ctx, db: sqlite3.Connection) -> None:
 @cli.command()
 @click.argument("query")
 @click.option("-n", "--limit", default=20, help="Max results")
+@local_json_option
 @click.pass_context
 def search(ctx, query, limit):
     """Full-text search across artifact titles and IDs."""
@@ -248,6 +270,7 @@ def search(ctx, query, limit):
 
 @cli.command()
 @click.argument("node_id")
+@local_json_option
 @click.pass_context
 def node(ctx, node_id):
     """Show node details and immediate neighbors."""
@@ -729,8 +752,13 @@ def change_add_link(ctx, change_id, source_id, relation, target_id):
     default=None,
     help="Accepted fingerprint snapshot for stale checks",
 )
+@click.option(
+    "--quiet",
+    is_flag=True,
+    help="Write compiled outputs without console summary",
+)
 @click.pass_context
-def change_compile(ctx, change_id, mode, snapshot_path):
+def change_compile(ctx, change_id, mode, snapshot_path, quiet):
     """Write generated pack/gaps/state/projection files for a change."""
     root = Path(ctx.obj.get("root", ".")).resolve()
     db = _conn(ctx)
@@ -884,8 +912,147 @@ def change_compile(ctx, change_id, mode, snapshot_path):
     (compiled_dir / "pack.md").write_text(
         _render_pack_markdown(pack_payload).rstrip() + "\n", encoding="utf-8"
     )
-    print(f"Compiled graph-ba change: {compiled_dir}")
-    print(_render_graph_summary(graph_payload), end="")
+    if not quiet:
+        print(f"Compilation: SUCCESS — wrote {compiled_dir}")
+        print("Delivery preview (compilation itself succeeded):")
+        print(_render_graph_summary(graph_payload), end="")
+
+
+@change_group.command("ready")
+@click.argument("change_id")
+@click.option(
+    "--mode",
+    default=None,
+    type=click.Choice(["explore", "dev", "review", "release"]),
+    help="Delivery strictness; defaults to release for Git-native changes",
+)
+@click.option(
+    "--snapshot",
+    "snapshot_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Accepted fingerprint snapshot for stale checks",
+)
+@click.option(
+    "--refresh-providers/--no-refresh-providers",
+    default=None,
+    help="Force or skip provider refresh; default refreshes missing projections",
+)
+@local_json_option
+@click.pass_context
+def change_ready(ctx, change_id, mode, snapshot_path, refresh_providers):
+    """Refresh inputs, compile once and show proposal/approval/delivery status."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    config = load_config(root)
+    if refresh_providers is False:
+        provider_payload = {
+            "configured": bool(config.provider_refresh),
+            "pass": True,
+            "refreshed": False,
+            "providers": [],
+            "skipped": True,
+        }
+    else:
+        provider_payload = refresh_provider_inputs(
+            root, config, force=refresh_providers is True
+        )
+    if not provider_payload["pass"]:
+        failed = next(
+            item
+            for item in provider_payload["providers"]
+            if item["status"] == "failed"
+        )
+        detail = failed.get("stderr_tail") or failed.get("stdout_tail") or ""
+        raise click.ClickException(
+            f"provider refresh failed: {failed['name']}\n{detail}".rstrip()
+        )
+
+    db = _conn(ctx)
+    do_import(root, db, force=provider_payload.get("refreshed", False), quiet=True)
+    import_payload = {
+        "status": "PASS",
+        "artifacts": db.execute("SELECT count(*) FROM artifacts").fetchone()[0],
+        "edges": db.execute("SELECT count(*) FROM edges").fetchone()[0],
+    }
+    db.close()
+
+    ctx.invoke(
+        change_compile,
+        change_id=change_id,
+        mode=mode,
+        snapshot_path=snapshot_path,
+        quiet=True,
+    )
+    manifest_path = _change_manifest_path(root, change_id)
+    if not manifest_path:
+        raise click.ClickException(f"Change not found: {change_id}")
+    compiled_dir = _change_output_path(root, change_id, manifest_path)
+    try:
+        proposal_payload = json.loads(
+            (compiled_dir / "proposal-check.json").read_text(encoding="utf-8")
+        )
+        delivery_payload = json.loads(
+            (compiled_dir / "delivery-check.json").read_text(encoding="utf-8")
+        )
+        semantic_payload = json.loads(
+            (compiled_dir / "semantic-diff.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise click.ClickException(f"cannot read compiled change status: {exc}") from exc
+
+    approval_payload = approval_status(root, change_id, semantic_payload)
+    evidence_gaps = sum(
+        int(check.get("summary", {}).get("evidence_plan", {}).get("gap", 0))
+        for check in delivery_payload.get("checks", [])
+    )
+    if not proposal_payload["pass"]:
+        next_action = {
+            "kind": "fix_proposal",
+            "reason": "fix proposal findings before human review",
+            "command": f"graph-ba change review {change_id}",
+        }
+    elif not approval_payload.get("valid"):
+        next_action = {
+            "kind": "request_approval",
+            "reason": "human approval must match the current fingerprint",
+            "command": (
+                f'graph-ba change approve {change_id} --reviewer "<identity>" '
+                '--evidence "<protected-review-url>"'
+            ),
+        }
+    elif not delivery_payload["pass"]:
+        next_action = {
+            "kind": "fix_delivery",
+            "reason": "close the release worklist and re-run ready",
+            "command": f"open {compiled_dir / 'worklist.md'}",
+        }
+    else:
+        next_action = {
+            "kind": "release_ready",
+            "reason": "proposal, approval and delivery gates pass",
+            "command": f"graph-ba change status {change_id}",
+        }
+    payload = {
+        "schema": "graph-ba.change-ready.v1",
+        "change": change_id,
+        "ready": bool(
+            proposal_payload["pass"]
+            and approval_payload.get("valid")
+            and delivery_payload["pass"]
+        ),
+        "provider_refresh": provider_payload,
+        "codegraph": codegraph_health(root, config),
+        "import": import_payload,
+        "proposal": proposal_payload,
+        "approval": approval_payload,
+        "delivery": delivery_payload,
+        "delivery_evidence_gaps": evidence_gaps,
+        "next_action": next_action,
+        "outputs": str(compiled_dir),
+    }
+    if _json_out(ctx, payload):
+        return
+    print(_render_change_ready_summary(payload), end="")
 
 
 def _change_path(root: Path, change_id: str) -> Path:

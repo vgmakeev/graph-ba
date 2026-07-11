@@ -169,6 +169,7 @@ def main(
         test_refs,
         graph_native_change_traces=graph_native_change_traces,
         graph_native_artifact_traces=graph_native_artifact_traces,
+        root=root,
     )
     report = verify(G, registry, references, config)
     print_report(report, registry, config, verbose)

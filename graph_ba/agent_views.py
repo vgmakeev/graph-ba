@@ -60,13 +60,17 @@ def _agent_worklist(
             "artifact": artifact,
             "artifact_type": node.get("type") or (source or {}).get("type", ""),
             "reason": reason,
-            "suggested_actions": _worklist_suggested_actions(kind, artifact),
+            "suggested_actions": _worklist_suggested_actions(
+                kind, artifact, source=source
+            ),
             "related_nodes": _worklist_related_nodes(artifact, incoming, outgoing),
             "blocking_in": _worklist_blocking_modes(kind),
         }
         if source:
             item["source"] = {
-                k: v for k, v in source.items() if k in {"code", "gap_type", "severity"}
+                k: v
+                for k, v in source.items()
+                if k in {"code", "gap_type", "severity", "edge", "conflict"}
             }
         sequence += 1
         items.append(item)

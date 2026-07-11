@@ -231,16 +231,19 @@ graph-ba change init CHG-orders-live-update \
   --intent "Keep the order board current without an operator reload" \
   --source RAC-ORD-014 --base-ref main \
   --worktree ../project-chg-orders-live-update
-graph-ba change compile CHG-orders-live-update
+graph-ba change ready CHG-orders-live-update
 # human review of the compiled proposal fingerprint
 graph-ba change approve CHG-orders-live-update \
   --reviewer "reviewer@example.com" \
   --evidence "https://github.com/org/repo/pull/123"
-graph-ba change check CHG-orders-live-update --stage release --mode release
+graph-ba change ready CHG-orders-live-update
 ```
 
-`compile` writes semantic delta, impact, graph projection, evidence plan, gate
-and the compact agent worklist in one pass. `discover`, `diff`, `context`,
+`ready` refreshes missing observed-provider projections, imports the graph,
+compiles semantic delta/impact/evidence/worklist once and prints one explicit
+`Proposal / Approval / Delivery / Next` summary. `change check` remains the
+strict CI gate. `compile` remains available when only generated files are
+needed. `discover`, `diff`, `context`,
 `graph`, `path` and `sql` remain drill-down diagnostics; a normal workflow does
 not pipe several commands through `jq`.
 
@@ -313,6 +316,10 @@ so an agent-facing MCP connection cannot attest its own proposal.
 Use `graph --summary` for a compact readiness/worklist view, or `--json`/`--out`
 for the complete agent payload. `--view` separates intent instead of using one
 unbounded traversal:
+
+`gate` and `graph` also accept `--findings-only` and `--worklist-only`.
+Frequently used commands accept `--json` after the subcommand as well as the
+global form before it, for example `graph-ba search "orders" --json`.
 
 - `contract`: declared semantic contract;
 - `delivery` (default): bounded contract plus embedded proof summaries;
@@ -468,6 +475,15 @@ coverage_types = ["FEAT", "REQ"]
 # Missing indexes or unmatched symbols gracefully keep the existing file node.
 [providers.codegraph]
 database = ".codegraph/codegraph.db"
+
+# Optional observed-provider refresh used by `graph-ba change ready`.
+# Commands execute directly without a shell. Missing outputs trigger refresh;
+# `--refresh-providers` forces it and `--no-refresh-providers` skips it.
+[[providers.refresh]]
+name = "mini-observed"
+command = ["make", "graphba-observed"]
+inputs = ["admin/src", "backend", "tests"]
+outputs = ["reports/graphba/observed"]
 
 # Test traceability — test files become TEST: nodes; any artifact ID
 # in a test file (comments, names, asserts) counts as test evidence.

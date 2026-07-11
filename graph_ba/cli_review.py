@@ -26,6 +26,7 @@ from .cli_core import (
     _conn,
     _delivery_target_ids,
     _json_out,
+    local_json_option,
     _read_change_manifest,
     _require_graph,
     change_group,
@@ -149,8 +150,21 @@ def change_review(ctx, change_id, mode, snapshot_path, out_path):
     default=None,
     help="Accepted fingerprint snapshot for stale checks",
 )
+@click.option("--summary", is_flag=True, help="Print only stage verdict and next blocker")
+@click.option("--findings-only", is_flag=True, help="Print only stage findings as JSON")
+@click.option("--worklist-only", is_flag=True, help="Print only release worklist as JSON")
+@local_json_option
 @click.pass_context
-def change_check(ctx, change_id, stage, mode, snapshot_path):
+def change_check(
+    ctx,
+    change_id,
+    stage,
+    mode,
+    snapshot_path,
+    summary,
+    findings_only,
+    worklist_only,
+):
     """Evaluate proposal readability or the existing delivery gate."""
     root = Path(ctx.obj.get("root", ".")).resolve()
     if stage == "proposal":
@@ -158,7 +172,9 @@ def change_check(ctx, change_id, stage, mode, snapshot_path):
             result = ChangeWorkflowService(root).proposal_check(change_id)
         except ChangeWorkflowError as exc:
             raise click.ClickException(str(exc)) from exc
-        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        _print_change_check_result(
+            ctx, result, summary, findings_only, worklist_only
+        )
         if not result["pass"]:
             raise click.ClickException(f"Proposal check failed: {result['verdict']}")
         return
@@ -184,7 +200,9 @@ def change_check(ctx, change_id, stage, mode, snapshot_path):
             require_approval=True,
         )
         db.close()
-        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        _print_change_check_result(
+            ctx, result, summary, findings_only, worklist_only
+        )
         if not result["pass"]:
             raise click.ClickException(f"Release check failed: {result['verdict']}")
         return
@@ -192,9 +210,59 @@ def change_check(ctx, change_id, stage, mode, snapshot_path):
     _require_graph(ctx, db)
     result = _gate_payload(db, root, change_id, mode, snapshot_path)
     db.close()
-    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    _print_change_check_result(ctx, result, summary, findings_only, worklist_only)
     if not result["pass"]:
         raise click.ClickException(f"Gate failed: {result['verdict']}")
+
+
+def _print_change_check_result(
+    ctx,
+    result: dict,
+    summary: bool,
+    findings_only: bool,
+    worklist_only: bool,
+) -> None:
+    if sum(bool(value) for value in (summary, findings_only, worklist_only)) > 1:
+        raise click.ClickException(
+            "choose only one of --summary, --findings-only or --worklist-only"
+        )
+    if summary and not ctx.obj.get("json"):
+        stage = result.get("stage") or "gate"
+        findings = result.get("findings", [])
+        print(
+            f"{stage.capitalize()}: {result['verdict']} — "
+            f"{len(findings)} findings"
+        )
+        fingerprint = result.get("proposal_fingerprint")
+        if fingerprint:
+            print(f"Fingerprint: {fingerprint}")
+        approval = result.get("approval")
+        if isinstance(approval, dict):
+            print(
+                "Approval: PASS"
+                if approval.get("valid")
+                else f"Approval: REQUIRED — {approval.get('reason', 'missing_approval')}"
+            )
+        return
+    if findings_only:
+        payload = {
+            "stage": result.get("stage"),
+            "verdict": result["verdict"],
+            "findings": result.get("findings", []),
+        }
+    elif worklist_only:
+        worklist = list(result.get("agent_worklist", []))
+        for check in result.get("checks", []):
+            worklist.extend(check.get("agent_worklist", []))
+        payload = {
+            "stage": result.get("stage"),
+            "verdict": result["verdict"],
+            "approval": result.get("approval"),
+            "agent_worklist": worklist,
+        }
+    else:
+        payload = result
+    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
 
 @change_group.command("approve")
