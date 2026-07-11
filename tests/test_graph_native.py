@@ -1021,6 +1021,13 @@ capabilities = ["acceptance"]
 ref = '(AC-[A-Z]+-\\d{3})'
 classify = 'AC-[A-Z]+-\\d{3}'
 
+[types.ZONE]
+label = "Existing UI zones"
+origin = "canonical"
+capabilities = ["ui_zone"]
+ref = '(ZONE-[A-Z]+)'
+classify = 'ZONE-[A-Z]+'
+
 [types.BP]
 label = "Legacy business processes"
 origin = "derived"
@@ -1059,7 +1066,9 @@ dirs = [".graphba"]
     graphba = tmp_path / ".graphba"
     graphba.mkdir()
     (graphba / "contract.md").write_text(
-        ':::artifact type="SCR" id="SCR-KITCHEN" title="Kitchen" contains="AC-KIT-001"\n:::\n'
+        ':::artifact type="SCR" id="SCR-KITCHEN" title="Kitchen" contains="ZONE-LOAD"\n:::\n'
+        ':::artifact type="ZONE" id="ZONE-LOAD" title="Load zone" '
+        'traces_to="AC-KIT-001"\n:::\n'
         ':::artifact type="AC" id="AC-KIT-001" title="Live kitchen behavior" '
         'traces_to="BP-02,BD-02"\n:::\n'
         ':::artifact type="BP" id="BP-02" title="Kitchen operation"\n:::\n'

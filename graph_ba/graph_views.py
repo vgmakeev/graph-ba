@@ -82,9 +82,9 @@ def scoped_artifact_ids(
 
     result = {root_id}
     seen = {root_id}
-    queue = [root_id]
+    queue: list[tuple[str, bool]] = [(root_id, True)]
     while queue:
-        current = queue.pop(0)
+        current, may_expand_context = queue.pop(0)
         for edge in _outgoing_edges(db, current):
             rule = class_policy.rule_for(
                 edge["source_type"], edge["relation_type"], edge["target_type"]
@@ -106,7 +106,17 @@ def scoped_artifact_ids(
             result.add(target_id)
             if traversal == "expand" and target_id not in seen:
                 seen.add(target_id)
-                queue.append(target_id)
+                queue.append((target_id, may_expand_context))
+            elif (
+                traversal == "context"
+                and may_expand_context
+                and target_id not in seen
+            ):
+                # Follow one semantic context hop so a screen's UIC -> AC
+                # bridge can expose the AC's own process/decision/state/event
+                # context. The queued node cannot cascade context again.
+                seen.add(target_id)
+                queue.append((target_id, False))
 
         # Canonical edges are stored in one project-selected direction. A
         # delivery view therefore also reads incoming semantic context at each
@@ -136,7 +146,7 @@ def scoped_artifact_ids(
                 and source_id not in seen
             ):
                 seen.add(source_id)
-                queue.append(source_id)
+                queue.append((source_id, may_expand_context))
 
     if view == "navigation":
         result.update(_navigation_neighbors(db, result, config, navigation_limit))

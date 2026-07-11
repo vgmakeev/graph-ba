@@ -345,7 +345,7 @@ def _quality_axes(
             "PARTIAL" if behavior_missing else "PASS",
             "dynamic behavior scopes are checked by configured semantic capabilities, not artifact type names"
             if behavior_missing
-            else "required behavior artifact classes are present or scope is static",
+            else "required behavior capabilities are present or scope is static",
             missing=behavior_missing,
             weak_candidates=weak_behavior_candidates,
         ),

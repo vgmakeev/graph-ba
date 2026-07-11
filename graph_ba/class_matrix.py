@@ -54,6 +54,10 @@ class ClassMatrixPolicy:
     def allows(self, source_type: str, relation: str, target_type: str) -> bool:
         return not self.enforce or self.rule_for(source_type, relation, target_type) is not None
 
+    def suppresses_reverse(self, source_type: str, target_type: str) -> bool:
+        """Whether project policy deliberately selected the opposite orientation."""
+        return (target_type, source_type) in self.preferred_directions
+
 
 EMPTY_CLASS_MATRIX = ClassMatrixPolicy(False, ())
 SYMMETRIC_RELATIONS = {"CONFLICTS_WITH"}
@@ -211,6 +215,11 @@ def undeclared_class_edges(
     ).fetchall()
     result = []
     for row in rows:
+        if policy.suppresses_reverse(row["source_type"], row["target_type"]):
+            # Adapters may still emit both navigational orientations. The
+            # project-selected direction is authoritative for delivery views
+            # and gates; the suppressed reverse remains available in `full`.
+            continue
         if policy.allows(
             row["source_type"], row["relation_type"], row["target_type"]
         ):
