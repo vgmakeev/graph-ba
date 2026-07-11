@@ -108,31 +108,35 @@ def scoped_artifact_ids(
                 seen.add(target_id)
                 queue.append(target_id)
 
-        # Contract owners may point at a target rather than be contained by it.
-        # Only attach semantic ancestors to the selected root;
-        # recursively following every incoming trace recreates the old graph
-        # explosion through shared AC and implementation facts.
-        if current == root_id:
-            for edge in _incoming_edges(db, current):
-                rule = class_policy.rule_for(
-                    edge["source_type"], edge["relation_type"], edge["target_type"]
-                )
-                if class_policy.enforce and rule is None:
-                    continue
-                policy = relation_view_policy(config, edge["relation_type"])
-                traversal = rule.traversal if rule and rule.traversal else policy["traversal"]
-                if traversal not in {"expand", "context"}:
-                    continue
-                source_role = artifact_view_role(
-                    config, edge["source_type"], edge["source_origin"]
-                )
-                if source_role not in {"contract", "change"}:
-                    continue
-                source_id = edge["source_id"]
-                result.add(source_id)
-                if source_id not in seen:
-                    seen.add(source_id)
-                    queue.append(source_id)
+        # Canonical edges are stored in one project-selected direction. A
+        # delivery view therefore also reads incoming semantic context at each
+        # visited node. Context sources are attached but never recursively
+        # expanded; this exposes STATE/EVT -> AC and similar canonical traces
+        # without recreating the old graph explosion through shared ACs.
+        for edge in _incoming_edges(db, current):
+            rule = class_policy.rule_for(
+                edge["source_type"], edge["relation_type"], edge["target_type"]
+            )
+            if class_policy.enforce and rule is None:
+                continue
+            policy = relation_view_policy(config, edge["relation_type"])
+            traversal = rule.traversal if rule and rule.traversal else policy["traversal"]
+            if traversal not in {"expand", "context"}:
+                continue
+            source_role = artifact_view_role(
+                config, edge["source_type"], edge["source_origin"]
+            )
+            if source_role not in {"contract", "change"}:
+                continue
+            source_id = edge["source_id"]
+            result.add(source_id)
+            if (
+                current == root_id
+                and traversal == "expand"
+                and source_id not in seen
+            ):
+                seen.add(source_id)
+                queue.append(source_id)
 
     if view == "navigation":
         result.update(_navigation_neighbors(db, result, config, navigation_limit))

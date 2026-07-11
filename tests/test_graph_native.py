@@ -1061,11 +1061,13 @@ dirs = [".graphba"]
     (graphba / "contract.md").write_text(
         ':::artifact type="SCR" id="SCR-KITCHEN" title="Kitchen" contains="AC-KIT-001"\n:::\n'
         ':::artifact type="AC" id="AC-KIT-001" title="Live kitchen behavior" '
-        'traces_to="BP-02,BD-02,LIFECYCLE-SLOT,SIGNAL-ORDER"\n:::\n'
+        'traces_to="BP-02,BD-02"\n:::\n'
         ':::artifact type="BP" id="BP-02" title="Kitchen operation"\n:::\n'
         ':::artifact type="BD" id="BD-02" title="Capacity decision"\n:::\n'
-        ':::artifact type="LIFECYCLE" id="LIFECYCLE-SLOT" title="Slot lifecycle"\n:::\n'
-        ':::artifact type="SIGNAL" id="SIGNAL-ORDER" title="Order signal"\n:::\n',
+        ':::artifact type="LIFECYCLE" id="LIFECYCLE-SLOT" title="Slot lifecycle" '
+        'traces_to="AC-KIT-001"\n:::\n'
+        ':::artifact type="SIGNAL" id="SIGNAL-ORDER" title="Order signal" '
+        'traces_to="AC-KIT-001"\n:::\n',
         encoding="utf-8",
     )
     db_path = tmp_path / "graph.db"
