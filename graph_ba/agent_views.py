@@ -174,6 +174,15 @@ def _agent_worklist(
             "AC has only trace evidence; add behavior/runtime evidence",
             source={"code": "trace_only_evidence", "severity": "warn"},
         )
+    runtime_tests = evidence_profile.get("ac_with_runtime_test_definitions", 0)
+    runtime_results = evidence_profile.get("ac_with_runtime_or_manual_evidence", 0)
+    if runtime_tests > runtime_results:
+        add(
+            "record_runtime_evidence",
+            gate_data.get("target", ""),
+            f"{runtime_tests} AC have runtime test definitions, but only {runtime_results} have linked runtime/manual EVD",
+            source={"code": "runtime_evidence_missing", "severity": "warn"},
+        )
     gate_scope_ids = {
         item["id"] for item in gate_data.get("gate_scope", []) if item.get("id")
     }

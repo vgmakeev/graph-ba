@@ -2,9 +2,11 @@ import json
 
 from click.testing import CliRunner
 
+from graph_ba.agent_views import _agent_worklist
 from graph_ba.cli import cli
 from graph_ba.config import load_config
 from graph_ba.db import do_import, get_db
+from graph_ba.gate_analysis import _evidence_kind
 from graph_ba.gates import _evidence_requirement_satisfied, _load_evidence_policy
 from graph_ba.traceability import (
     build_graph,
@@ -13,6 +15,55 @@ from graph_ba.traceability import (
     scan_graph_native_change_traces,
     scan_references,
 )
+
+
+def test_runtime_test_definition_is_not_observed_runtime_evidence():
+    row = {
+        "source_id": "TEST:admin/e2e/menu.spec.ts",
+        "source_type": "TEST",
+        "source_title": "menu Playwright tests",
+        "source_file": "admin/e2e/menu.spec.ts",
+    }
+
+    assert _evidence_kind(row) == "runtime_test"
+
+
+def test_runtime_evidence_requires_linked_evd():
+    row = {
+        "source_id": "EVD-MENU-PLAYWRIGHT-20260712",
+        "source_type": "EVD",
+        "source_title": "Menu Playwright runtime acceptance",
+        "source_file": ".graphba/evidence/menu-playwright-2026-07-12.md",
+    }
+
+    assert _evidence_kind(row) == "runtime"
+
+
+def test_worklist_requests_evd_when_only_runtime_test_definition_exists():
+    gate_data = {
+        "target": "SCR-MENU",
+        "findings": [],
+        "quality_axes": {"behavior_model": {"status": "PASS"}},
+        "evidence_profile": {
+            "trace_only_ac": [],
+            "ac_with_runtime_test_definitions": 2,
+            "ac_with_runtime_or_manual_evidence": 0,
+        },
+        "gate_scope": [{"id": "SCR-MENU"}],
+    }
+    nodes = [
+        {
+            "id": "SCR-MENU",
+            "type": "SCR",
+            "capabilities": [],
+            "required_proofs": [],
+            "computed": {},
+        }
+    ]
+
+    worklist = _agent_worklist(gate_data, nodes, [])
+
+    assert [item["kind"] for item in worklist] == ["record_runtime_evidence"]
 
 
 def test_graph_native_artifact_blocks_and_change_scope(tmp_path):
@@ -749,7 +800,9 @@ dirs = [".graphba"]
     assert len(ac_node["content"]["text"]) <= 32
     assert any(item["relation"] == "TRACES_TO" for item in payload["relation_catalog"])
     assert payload["class_matrices"][0]["provider"] == "test"
-    assert payload["agent_worklist"] == []
+    assert [item["kind"] for item in payload["agent_worklist"]] == [
+        "record_runtime_evidence"
+    ]
 
     full = CliRunner().invoke(
         cli,

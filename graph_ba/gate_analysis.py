@@ -151,6 +151,7 @@ def _evidence_profile(
     weak_only = []
     behavior_or_runtime = []
     runtime = []
+    runtime_tests = []
     verified = []
     for artifact_id, evidence in by_target.items():
         if evidence:
@@ -158,8 +159,10 @@ def _evidence_profile(
         kinds = {item["kind"] for item in evidence}
         if kinds and kinds <= {"trace"}:
             weak_only.append(artifact_id)
-        if kinds & {"behavior", "runtime", "manual"}:
+        if kinds & {"behavior", "runtime_test", "runtime", "manual"}:
             behavior_or_runtime.append(artifact_id)
+        if "runtime_test" in kinds:
+            runtime_tests.append(artifact_id)
         if kinds & {"runtime", "manual"}:
             runtime.append(artifact_id)
 
@@ -167,6 +170,7 @@ def _evidence_profile(
         "ac_total": len(ac_ids),
         "ac_verified": len(verified),
         "ac_with_behavior_or_runtime_evidence": len(behavior_or_runtime),
+        "ac_with_runtime_test_definitions": len(runtime_tests),
         "ac_with_runtime_or_manual_evidence": len(runtime),
         "ac_trace_only": len(weak_only),
         "trace_only_ac": weak_only[:50],
@@ -295,6 +299,8 @@ def _evidence_kind(row: sqlite3.Row) -> str:
     source_type = row["source_type"]
     source = f"{row['source_id']} {row['source_title']} {row['source_file']}".lower()
     if source_type == "EVD":
+        if any(marker in source for marker in ("e2e", "playwright", "runtime", "acceptance")):
+            return "runtime"
         return "manual"
     if any(
         marker in source
@@ -307,11 +313,12 @@ def _evidence_kind(row: sqlite3.Row) -> str:
         )
     ):
         return "trace"
-    if any(
-        marker in source for marker in ("e2e", "playwright", ".spec.", "acceptance")
-    ):
-        return "runtime"
     if source_type == "TEST":
+        if any(
+            marker in source
+            for marker in ("e2e", "playwright", ".spec.", "acceptance")
+        ):
+            return "runtime_test"
         return "behavior"
     return "manual" if row["source_origin"] == "evidence" else "trace"
 
@@ -368,7 +375,7 @@ def _quality_axes(
         ),
         "runtime_acceptance": _axis(
             _runtime_acceptance_status(evidence_profile),
-            "runtime/manual evidence is tracked separately from unit/API/trace evidence",
+            _runtime_acceptance_reason(evidence_profile),
         ),
         "drift": _axis(
             "UNKNOWN"
@@ -413,6 +420,14 @@ def _runtime_acceptance_status(profile: dict[str, Any]) -> str:
     if profile["ac_with_runtime_or_manual_evidence"] < profile["ac_total"]:
         return "PARTIAL"
     return "PASS"
+
+
+def _runtime_acceptance_reason(profile: dict[str, Any]) -> str:
+    return (
+        f"{profile.get('ac_with_runtime_or_manual_evidence', 0)}/"
+        f"{profile.get('ac_total', 0)} AC have linked runtime/manual EVD; "
+        f"{profile.get('ac_with_runtime_test_definitions', 0)} AC have runtime test definitions"
+    )
 
 
 def _is_dynamic_scope(states: list[dict[str, Any]]) -> bool:
@@ -652,6 +667,7 @@ def _worklist_priority(kind: str, source: dict[str, Any] | None) -> str:
         "add_implementation": "P0",
         "add_evidence": "P1",
         "add_required_evidence": "P1",
+        "record_runtime_evidence": "P1",
         "add_trace": "P1",
         "add_behavior_capability": "P0",
         "upgrade_relation": "P0",
@@ -687,6 +703,11 @@ def _worklist_suggested_actions(
         return [
             f"add the missing evidence kind for {artifact}",
             "choose unit/backend integration/frontend unit/e2e UI/contract/static source evidence according to AC classification",
+        ]
+    if kind == "record_runtime_evidence":
+        return [
+            f"run the scoped runtime/manual verification for {artifact}",
+            "record the observed result as a linked EVD artifact; a TEST file alone is only a verification definition",
         ]
     if kind == "add_behavior_capability":
         return [
