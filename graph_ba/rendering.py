@@ -5,6 +5,110 @@ from __future__ import annotations
 from typing import Any
 
 
+def _render_diff_review_summary(payload: dict[str, Any], *, item_limit: int = 20) -> str:
+    semantic = payload["semantic"]
+    git = semantic["git"]
+    summary = semantic["summary"]
+    graph_summary = payload["graph_delta"]["summary"]
+    contract = semantic.get("contract", [])
+    operation_counts = {
+        operation: sum(item["operation"] == operation for item in contract)
+        for operation in ("add", "modify", "remove")
+    }
+    lines = [
+        f"graph-ba diff {git['base_ref']}...worktree",
+        (
+            f"Git: {summary['files']} files — contract={summary['contract_files']} "
+            f"supporting={summary['supporting_files']} delivery={summary['delivery_files']}"
+        ),
+        (
+            f"Semantic: {summary['contract']} canonical — "
+            f"+{operation_counts['add']} ~{operation_counts['modify']} "
+            f"-{operation_counts['remove']}"
+        ),
+        (
+            f"Graph: nodes +{graph_summary['nodes_added']} ~{graph_summary['nodes_modified']} "
+            f"-{graph_summary['nodes_removed']}; edges +{graph_summary['edges_added']} "
+            f"-{graph_summary['edges_removed']}"
+        ),
+    ]
+
+    scope = payload.get("scope")
+    if scope:
+        before = _short_readiness(scope["base"])
+        after = _short_readiness(scope["proposed"])
+        scoped = scope["semantic"]
+        gaps = scope["gaps"]
+        lines.extend(
+            [
+                "",
+                f"Scope: {scope['target']} — {len(scoped['in_scope'])} changed in scope, "
+                f"{len(scoped['outside_scope'])} outside",
+                f"Readiness: {before} -> {after}",
+                (
+                    f"Gaps: +{len(gaps['introduced'])} introduced, "
+                    f"-{len(gaps['resolved'])} resolved, "
+                    f"={len(gaps['persistent'])} persistent"
+                ),
+            ]
+        )
+        for change in scope.get("quality_axis_changes", []):
+            lines.append(
+                f"- axis {change['axis']}: {change['before']} -> {change['after']}"
+            )
+
+    displayed = scope["semantic"]["in_scope"] if scope else contract
+    heading = "In-scope canonical artifacts" if scope else "Canonical artifacts"
+    lines.extend(["", f"{heading}: {len(displayed)}"])
+    symbols = {"add": "+", "modify": "~", "remove": "-"}
+    for item in displayed[:item_limit]:
+        current = item.get("after") or item.get("before") or {}
+        title = current.get("title") or ""
+        suffix = f" — {title}" if title else ""
+        lines.append(
+            f"- {symbols.get(item['operation'], '?')} {item['id']} [{item['type']}]{suffix}"
+        )
+    if len(displayed) > item_limit:
+        lines.append(f"- … {len(displayed) - item_limit} more; use --json")
+
+    if scope:
+        _append_gap_items(
+            lines, "Introduced gaps", scope["gaps"]["introduced"], item_limit
+        )
+        _append_gap_items(
+            lines, "Resolved gaps", scope["gaps"]["resolved"], item_limit
+        )
+        current_worklist = [
+            item
+            for item in scope["gaps"]["persistent"] + scope["gaps"]["introduced"]
+            if item["source"] == "worklist"
+        ]
+        _append_gap_items(lines, "Current worklist", current_worklist, item_limit)
+    return "\n".join(lines) + "\n"
+
+
+def _short_readiness(value: dict[str, Any]) -> str:
+    if not value.get("present"):
+        return "ABSENT"
+    return f"{value['verdict']}/{value['readiness']}"
+
+
+def _append_gap_items(
+    lines: list[str],
+    title: str,
+    items: list[dict[str, Any]],
+    limit: int,
+) -> None:
+    lines.extend(["", f"{title}: {len(items)}"])
+    for item in items[:limit]:
+        lines.append(
+            f"- {item.get('priority') or item.get('severity') or '-'} "
+            f"{item['kind']} {item['artifact']}: {item['reason']}"
+        )
+    if len(items) > limit:
+        lines.append(f"- … {len(items) - limit} more; use --json")
+
+
 def _render_graph_summary(payload: dict[str, Any], *, worklist_limit: int = 12) -> str:
     summary = payload["summary"]
     scope_parts = [f"scope={summary['scope']}"]

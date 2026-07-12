@@ -972,6 +972,15 @@ def _git_context(root: Path, base_ref: str | None) -> dict[str, Any]:
 
 
 def _default_base_ref(root: Path) -> str:
+    upstream = _git(
+        root,
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{upstream}",
+        check=False,
+        allow_empty=True,
+    )
     symbolic = _git(
         root,
         "symbolic-ref",
@@ -981,7 +990,7 @@ def _default_base_ref(root: Path) -> str:
         check=False,
         allow_empty=True,
     )
-    candidates = [symbolic, "origin/main", "main", "HEAD"]
+    candidates = [upstream, symbolic, "origin/main", "main", "HEAD"]
     for candidate in candidates:
         if candidate and _git(root, "rev-parse", "--verify", candidate, check=False, allow_empty=True):
             return candidate

@@ -49,6 +49,8 @@ def graph_views(
     root: Path,
     proposed_db: sqlite3.Connection,
     base_commit: str,
+    *,
+    materialize_base: bool = False,
 ) -> Iterator[GraphViews]:
     """Build an accepted base graph and overlay logical proposed/delivery views."""
     with tempfile.TemporaryDirectory(prefix="graph-ba-view-") as temp_dir:
@@ -57,10 +59,13 @@ def graph_views(
         base_db = get_db(Path(temp_dir) / "base.db")
         try:
             cache_path = _base_graph_cache_path(root, base_commit)
+            if materialize_base:
+                _materialize_git_tree(root, base_commit, base_root)
             if cache_path.is_file():
                 _restore_database(cache_path, base_db)
             else:
-                _materialize_git_tree(root, base_commit, base_root)
+                if not materialize_base:
+                    _materialize_git_tree(root, base_commit, base_root)
                 if not (base_root / "graph-ba.toml").is_file():
                     raise GraphSnapshotError(f"graph-ba.toml does not exist at {base_commit}")
                 do_import(base_root, base_db, quiet=True, force=True)

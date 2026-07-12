@@ -14,6 +14,7 @@ from graph_ba.change_workflow import (
 from graph_ba.change_authoring import ChangeAuthoringError, add_artifact, add_link
 from graph_ba.config import load_config
 from graph_ba.db import _fts_query, _load_nx, do_import, get_db, graph_is_stale
+from graph_ba.diff_review import diff_review
 from graph_ba.review import run_review
 
 try:
@@ -232,6 +233,30 @@ def ba_path(from_id: str, to_id: str, root: str = ".",
         except nx.NetworkXNoPath:
             continue
     return {"mode": None, "steps": None, "path": []}
+
+
+@mcp.tool()
+def ba_diff(
+    target_id: Optional[str] = None,
+    root: str = ".",
+    db_path: Optional[str] = None,
+    base_ref: Optional[str] = None,
+    mode: Optional[str] = None,
+) -> dict:
+    """Review semantic/graph Git delta and scoped gaps without a CHG manifest."""
+    project_root, _, db = _open(root, db_path)
+    try:
+        return diff_review(
+            project_root,
+            db,
+            base_ref=base_ref,
+            target_id=target_id,
+            mode=mode,
+        )
+    except ChangeWorkflowError as exc:
+        return {"error": str(exc), "target": target_id or ""}
+    finally:
+        db.close()
 
 
 @mcp.tool()

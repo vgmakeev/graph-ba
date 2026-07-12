@@ -3,7 +3,7 @@ import pytest
 
 pytest.importorskip("mcp")
 
-from graph_ba.mcp_server import ba_schema, ba_sql
+from graph_ba.mcp_server import ba_diff, ba_schema, ba_sql
 from graph_ba.db import SCHEMA_VERSION
 
 
@@ -45,3 +45,10 @@ def test_ba_schema_returns_agent_contract(ba_project, db_path):
     assert any(o["id"] == "reviewed_derived" for o in data["origins"])
     assert any(r["id"] == "NORMALIZES" and r["direction"] == "canonical_to_raw"
                for r in data["relation_types"])
+
+
+def test_ba_diff_returns_structured_error_outside_git(ba_project, db_path):
+    data = ba_diff(root=str(ba_project), db_path=str(db_path))
+
+    assert "error" in data
+    assert data["target"] == ""

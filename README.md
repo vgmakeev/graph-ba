@@ -99,6 +99,7 @@ graph-ba init          # create graph-ba.toml template
 graph-ba import        # scan docs → build graph
 graph-ba lint          # content quality: TODOs, empty sections, terminology, staleness
 graph-ba audit         # structure quality: dangling refs, cycles, coverage gaps
+graph-ba diff F-01     # semantic/graph Git delta + scoped gaps, no CHG required
 ```
 
 ## Commands
@@ -117,6 +118,7 @@ graph-ba audit         # structure quality: dangling refs, cycles, coverage gaps
 | `coverage` | Cross-layer coverage matrix |
 | `matrix` | Sparse JSON matrix of typed artifact relationships |
 | `artifact-state` | Fingerprints + computed implemented/verified/changing/stale state |
+| **`diff [ID] [--base-ref REF]`** | Manifest-free Git review: canonical/graph delta, impact and scoped gaps before/after |
 | `change init/discover/diff/context/compile/check/approve/status` | Git-native semantic change workflow |
 | `gate <ID>` | Explore/dev/review/release readiness gate |
 | `evidence-plan <ID>` | Classify scoped AC and explain required test/evidence kinds |
@@ -126,6 +128,26 @@ graph-ba audit         # structure quality: dangling refs, cycles, coverage gaps
 | `sql <query>` | Raw SQL |
 
 All commands: `--json` for machine output, `--root`/`--db` for paths.
+
+### diff — lightweight Markdown review without CHG
+
+Canonical requirements remain normal stable-ID Markdown. For a small or
+already-understood change, edit the owning file and review the result directly:
+
+```bash
+graph-ba diff CONTRACT-ORDERS
+graph-ba diff CONTRACT-ORDERS --base-ref origin/dev
+graph-ba diff CONTRACT-ORDERS --json > reports/graphba/orders-diff.json
+```
+
+The default base is the current branch upstream, then `origin/HEAD`,
+`origin/main`, `main` or `HEAD`. The complete Git file delta remains visible,
+while the human summary lists only canonical artifacts reachable from the
+selected target. It also compares gate findings and agent worklist before and
+after: `introduced`, `resolved` and `persistent`. Without an ID, `diff` still
+returns the repository-wide stable-ID and typed graph delta. Use a `CHG-*`
+manifest only when proposal fingerprint, human approval or rebase-conflict
+control is required.
 
 Read commands keep themselves honest: on an empty or stale database they
 rebuild the graph automatically before answering (import is cheap). Disable
@@ -307,7 +329,8 @@ protected PR/branch remains the external trust boundary. Merge and Git history
 accept and archive the change. `change accept` and `change archive` remain
 compatibility commands for the legacy directory layout.
 
-Agents can use the same service through MCP tools `ba_change_init`,
+Agents can use the same service through MCP tool `ba_diff` or the full change
+workflow tools `ba_change_init`,
 `ba_change_discover`, `ba_change_diff`, `ba_change_context`,
 `ba_change_check`, `ba_change_rebase_check`, `ba_change_add_artifact`,
 `ba_change_add_link` and `ba_change_status`. Approval is deliberately CLI-only

@@ -5,6 +5,7 @@ from click.testing import CliRunner
 
 from graph_ba.change_workflow import (
     ChangeWorkflowService,
+    _default_base_ref,
     init_change,
     proposal_check,
     semantic_diff,
@@ -13,6 +14,7 @@ from graph_ba.change_authoring import add_link
 from graph_ba.cli import cli
 from graph_ba.cli_core import _delivery_target_ids
 from graph_ba.db import do_import, get_db
+from graph_ba.diff_review import _gap_delta
 
 
 CONFIG = r"""
@@ -85,6 +87,15 @@ def test_no_branch_change_records_current_head_as_base(tmp_path):
     )
 
     assert f'base_ref: "{head}"' in path.read_text(encoding="utf-8")
+
+
+def test_default_base_prefers_current_branch_upstream(tmp_path):
+    root = _project(tmp_path)
+    _git(root, "branch", "integration")
+    _git(root, "checkout", "-b", "feature")
+    _git(root, "branch", "--set-upstream-to=integration", "feature")
+
+    assert _default_base_ref(root) == "integration"
 
 
 def _git(root, *args):
@@ -185,6 +196,104 @@ def test_semantic_diff_separates_unrelated_delivery_files(tmp_path):
     assert payload["summary"]["contract_files"] == 1
     assert payload["summary"]["supporting_files"] == 1
     assert payload["summary"]["delivery_files"] == 1
+
+
+def test_manifest_free_diff_reviews_semantic_graph_and_scope(tmp_path):
+    root = _project(tmp_path)
+    (root / "docs" / "spec.md").write_text(
+        "## AC-ORD-001 - Create order\nChanged behavior.\n\n"
+        "## AC-ORD-002 - Cancel order\nCancellation behavior.\n",
+        encoding="utf-8",
+    )
+    db = get_db(root / "reports" / "graph.db")
+    do_import(root, db, quiet=True)
+    db.close()
+    runner = CliRunner()
+
+    summary = runner.invoke(
+        cli,
+        [
+            "--root",
+            str(root),
+            "diff",
+            "AC-ORD-001",
+            "--base-ref",
+            "main",
+        ],
+    )
+
+    assert summary.exit_code == 0, summary.output
+    assert "Semantic: 1 canonical — +0 ~1 -0" in summary.output
+    assert "Scope: AC-ORD-001 — 1 changed in scope, 0 outside" in summary.output
+    assert "In-scope canonical artifacts: 1" in summary.output
+
+    machine = runner.invoke(
+        cli,
+        [
+            "--root",
+            str(root),
+            "diff",
+            "AC-ORD-001",
+            "--base-ref",
+            "main",
+            "--json",
+        ],
+    )
+
+    assert machine.exit_code == 0, machine.output
+    payload = json.loads(machine.output)
+    assert payload["schema"] == "graph-ba.diff-review.v1"
+    assert payload["graph_delta"]["summary"]["nodes_modified"] == 1
+    assert [item["id"] for item in payload["scope"]["semantic"]["in_scope"]] == [
+        "AC-ORD-001"
+    ]
+    assert payload["scope"]["base"]["present"] is True
+    assert payload["scope"]["proposed"]["present"] is True
+
+
+def test_gap_delta_distinguishes_introduced_resolved_and_persistent_work():
+    before = {
+        "findings": [
+            {"code": "unverified", "artifact": "AC-ORD-001", "message": "missing test"}
+        ],
+        "agent_worklist": [
+            {"kind": "add_evidence", "artifact": "AC-ORD-001", "reason": "add test"}
+        ],
+    }
+    after = {
+        "findings": [],
+        "agent_worklist": [
+            {"kind": "add_evidence", "artifact": "AC-ORD-001", "reason": "add test"},
+            {"kind": "record_runtime_evidence", "artifact": "AC-ORD-002", "reason": "run UI"},
+        ],
+    }
+
+    delta = _gap_delta(before, after)
+
+    assert [(item["kind"], item["artifact"]) for item in delta["introduced"]] == [
+        ("record_runtime_evidence", "AC-ORD-002")
+    ]
+    assert [(item["kind"], item["artifact"]) for item in delta["resolved"]] == [
+        ("unverified", "AC-ORD-001")
+    ]
+    assert [(item["kind"], item["artifact"]) for item in delta["persistent"]] == [
+        ("add_evidence", "AC-ORD-001")
+    ]
+
+
+def test_manifest_free_diff_rejects_unknown_scope(tmp_path):
+    root = _project(tmp_path)
+    db = get_db(root / "reports" / "graph.db")
+    do_import(root, db, quiet=True)
+    db.close()
+
+    result = CliRunner().invoke(
+        cli,
+        ["--root", str(root), "diff", "AC-ORD-999", "--base-ref", "main"],
+    )
+
+    assert result.exit_code != 0
+    assert "Artifact not found in base or worktree: AC-ORD-999" in result.output
 
 
 def test_change_init_is_one_manifest_and_proposal_check_uses_computed_delta(tmp_path):

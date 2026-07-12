@@ -6,13 +6,17 @@ Graph BA — standalone CLI для графовой индексации и тр
 
 ## Основной рабочий цикл
 
-Для изменения продукта основной цикл: `change init` → правка owning artifacts
-→ `change ready` → human approval fingerprint → implementation/evidence →
-повторный `change ready`. `ready` обновляет отсутствующие provider projections,
-импортирует граф и одним запуском строит semantic delta, impact, bounded
-graph, evidence plan, gate и worklist. `import`, `graph`, `search`, `path`, `sql`,
-`review` и другие команды — диагностика, а не обязательный ритуал; `jq` в
-нормальном агентском цикле не нужен.
+Для обычной локальной правки canonical Markdown основной цикл короткий:
+`правка owning artifacts` → `diff <TARGET>` → тесты/EVD. `diff` не требует
+`CHG-*`: он сравнивает Git base и worktree, показывает stable-ID semantic/graph
+delta, impact и scoped gaps до/после. Для новой capability, breaking change или
+неоднозначного scope используется полный цикл: `change init` → правка owning
+artifacts → `change ready` → human approval fingerprint →
+implementation/evidence → повторный `change ready`. `ready` обновляет
+отсутствующие provider projections, импортирует граф и одним запуском строит
+semantic delta, impact, bounded graph, evidence plan, gate и worklist. `search`,
+`path`, `sql`, `review` и другие команды — диагностика, а не обязательный
+ритуал; `jq` в нормальном агентском цикле не нужен.
 
 ## AI-native SDLC contract
 
@@ -36,6 +40,9 @@ graph, evidence plan, gate и worklist. `import`, `graph`, `search`, `path`, `sq
 - `change ready` — основной one-shot UX: provider refresh, import, compile и
   единый итог Proposal/Approval/Delivery/Next. `change compile` — низкоуровневая
   генерация файлов. Не заставляй пользователя собирать workflow через jq.
+- `diff <TARGET>` — основной review для правки без CHG: полный Git file delta,
+  canonical stable-ID delta, typed graph delta и introduced/resolved/persistent
+  gaps выбранного scope. Он объясняет Git diff, но не заменяет Git как историю.
 
 ## Установка и запуск
 
@@ -55,6 +62,7 @@ uv run --with ~/dev/graph-ba graph-ba import
 | Переиндексировать | `graph-ba import` |
 | Поиск по теме | `graph-ba search "тема"` |
 | Детали артефакта | `graph-ba node BP-03` |
+| **Diff без CHG** | **`graph-ba diff F-01 --base-ref origin/main`** |
 | **Семантический ревью** | **`graph-ba review F-01 --semantic --lines 20`** |
 | Аномалии графа | `graph-ba anomalies` |
 | Матрица покрытия | `graph-ba coverage` |
@@ -148,7 +156,7 @@ command = "uvx"
 args = ["--from", "~/dev/graph-ba", "--with", "mcp", "graph-ba-mcp"]
 ```
 
-Tools: `ba_search`, `ba_node`, `ba_review`, `ba_impact`, `ba_coverage`, `ba_anomalies`, `ba_audit`, `ba_path`, `ba_sql`.
+Tools: `ba_search`, `ba_node`, `ba_review`, `ba_impact`, `ba_diff`, `ba_coverage`, `ba_anomalies`, `ba_audit`, `ba_path`, `ba_sql`.
 
 ## Тесты
 

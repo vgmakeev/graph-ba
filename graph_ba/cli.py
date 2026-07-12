@@ -13,6 +13,7 @@ import click
 from graph_ba.audit import run_anomalies, run_coverage
 from graph_ba.change_workflow import ChangeWorkflowError, ChangeWorkflowService
 from graph_ba.db import _load_nx, do_import
+from graph_ba.diff_review import diff_review
 from graph_ba.review import run_validate
 
 from .artifact_state import _artifact_state_payload
@@ -30,6 +31,7 @@ from .cli_core import (
 from .gate_analysis import _change_payload, _pack_payload
 from .gates import _gate_payload, _graph_slice_payload
 from .rendering import (
+    _render_diff_review_summary,
     _render_evidence_plan_markdown,
     _render_graph_summary,
     _render_pack_markdown,
@@ -217,6 +219,58 @@ pattern = '^##\\s+(FEAT-\\d{2,4})\\s*[—–\\-]\\s*(.*)'
     config_path.write_text(template, encoding="utf-8")
     print(f"Created template config: {config_path}")
     print("Edit it to match your project's artifact naming conventions.")
+
+
+@cli.command("diff")
+@click.argument("target_id", required=False)
+@click.option(
+    "--base-ref",
+    default=None,
+    help="Git ref used as the accepted base; defaults to branch upstream, origin/HEAD, origin/main, main or HEAD",
+)
+@click.option(
+    "--mode",
+    default=None,
+    type=click.Choice(["explore", "dev", "review", "release"]),
+    help="Gate strictness for scoped gap comparison; defaults to dev",
+)
+@click.option(
+    "--out",
+    "out_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write the complete diff review as JSON",
+)
+@local_json_option
+@click.pass_context
+def diff_command(ctx, target_id, base_ref, mode, out_path):
+    """Review semantic/graph Git delta without creating a CHG manifest."""
+    root = Path(ctx.obj.get("root", ".")).resolve()
+    db = _conn(ctx)
+    _require_graph(ctx, db)
+    try:
+        payload = diff_review(
+            root,
+            db,
+            base_ref=base_ref,
+            target_id=target_id,
+            mode=mode,
+        )
+    except ChangeWorkflowError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        db.close()
+    text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    if out_path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text + "\n", encoding="utf-8")
+        if not ctx.obj.get("json"):
+            print(f"Wrote graph-ba diff review: {out_path}")
+            return
+    if ctx.obj.get("json"):
+        print(text)
+    else:
+        print(_render_diff_review_summary(payload), end="")
 
 
 @cli.command()
