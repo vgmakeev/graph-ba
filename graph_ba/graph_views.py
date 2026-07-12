@@ -75,6 +75,52 @@ def scoped_artifact_ids(
     class_policy: ClassMatrixPolicy = EMPTY_CLASS_MATRIX,
 ) -> set[str]:
     """Project a bounded semantic scope from the full knowledge graph."""
+    return _scoped_artifact_ids(
+        db,
+        root_id,
+        config,
+        view=view,
+        navigation_limit=navigation_limit,
+        class_policy=class_policy,
+        include_incoming_context=True,
+    )
+
+
+def scoped_gate_artifact_ids(
+    db: sqlite3.Connection,
+    root_id: str,
+    config: ProjectConfig,
+    *,
+    view: str = "delivery",
+    class_policy: ClassMatrixPolicy = EMPTY_CLASS_MATRIX,
+) -> set[str]:
+    """Return target-owned scope without incoming semantic context siblings.
+
+    Graph slices attach bounded incoming context for explanation. That context
+    must not become a release obligation: an unrelated AC tracing to the same
+    shared decision is visible, but it is not owned by this target.
+    """
+    return _scoped_artifact_ids(
+        db,
+        root_id,
+        config,
+        view=view,
+        navigation_limit=0,
+        class_policy=class_policy,
+        include_incoming_context=False,
+    )
+
+
+def _scoped_artifact_ids(
+    db: sqlite3.Connection,
+    root_id: str,
+    config: ProjectConfig,
+    *,
+    view: str,
+    navigation_limit: int,
+    class_policy: ClassMatrixPolicy,
+    include_incoming_context: bool,
+) -> set[str]:
     if view not in GRAPH_VIEWS:
         raise ValueError(f"unknown graph view: {view}")
     if view == "full":
@@ -117,6 +163,9 @@ def scoped_artifact_ids(
                 # context. The queued node cannot cascade context again.
                 seen.add(target_id)
                 queue.append((target_id, False))
+
+        if not include_incoming_context:
+            continue
 
         # Canonical edges are stored in one project-selected direction. A
         # delivery view therefore also reads incoming semantic context at each

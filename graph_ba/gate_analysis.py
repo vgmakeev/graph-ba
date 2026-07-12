@@ -10,7 +10,11 @@ import click
 
 from .class_matrix import ClassMatrixPolicy, EMPTY_CLASS_MATRIX, load_class_matrix_policy
 from .config import DEFAULT_RELATIONS, ProjectConfig, load_config
-from .graph_views import scoped_artifact_ids, semantic_relation_ids
+from .graph_views import (
+    scoped_artifact_ids,
+    scoped_gate_artifact_ids,
+    semantic_relation_ids,
+)
 from .artifact_state import (
     _artifact_content,
     _artifact_state_item,
@@ -85,6 +89,19 @@ def _scope_ids(
     class_policy: ClassMatrixPolicy = EMPTY_CLASS_MATRIX,
 ) -> set[str]:
     return scoped_artifact_ids(
+        db, root_id, config, view=view, class_policy=class_policy
+    )
+
+
+def _gate_scope_ids(
+    db: sqlite3.Connection,
+    root_id: str,
+    config: ProjectConfig,
+    *,
+    view: str = "delivery",
+    class_policy: ClassMatrixPolicy = EMPTY_CLASS_MATRIX,
+) -> set[str]:
+    return scoped_gate_artifact_ids(
         db, root_id, config, view=view, class_policy=class_policy
     )
 

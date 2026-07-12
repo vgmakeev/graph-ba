@@ -174,7 +174,15 @@ def _agent_worklist(
             "AC has only trace evidence; add behavior/runtime evidence",
             source={"code": "trace_only_evidence", "severity": "warn"},
         )
-    for node in nodes:
+    gate_scope_ids = {
+        item["id"] for item in gate_data.get("gate_scope", []) if item.get("id")
+    }
+    action_nodes = (
+        [node for node in nodes if node["id"] in gate_scope_ids]
+        if gate_scope_ids
+        else nodes
+    )
+    for node in action_nodes:
         artifact = node["id"]
         capabilities = set(node.get("capabilities", []))
         required_proofs = set(node.get("required_proofs", []))

@@ -15,6 +15,7 @@ from .gate_analysis import (
     _dedupe_worklist_ids,
     _evidence_profile,
     _gate_finding,
+    _gate_scope_ids,
     _infer_ac_kinds,
     _quality_axes,
     _scope_ids,
@@ -214,13 +215,21 @@ def _gate_payload(
         )
         for row in rows
     ]
+    gate_ids = _gate_scope_ids(
+        db,
+        target_id,
+        config,
+        view="delivery",
+        class_policy=class_policy,
+    )
+    gate_states = [item for item in states if item["id"] in gate_ids]
     target_row = db.execute(
         "SELECT type FROM artifacts WHERE id = ?", (target_id,)
     ).fetchone()
     target_type = target_row["type"] if target_row else ""
-    evidence_plan = _evidence_plan_for_states(db, root, states, config=config)
+    evidence_plan = _evidence_plan_for_states(db, root, gate_states, config=config)
     findings = _gate_findings(
-        states,
+        gate_states,
         selected_mode,
         bool(snapshot),
         config=config,
@@ -246,7 +255,7 @@ def _gate_payload(
             }
         )
     for edge in undeclared_class_edges(
-        db, {item["id"] for item in states}, class_policy
+        db, {item["id"] for item in gate_states}, class_policy
     ):
         findings.append(
             {
@@ -264,7 +273,7 @@ def _gate_payload(
                 "edge": edge,
             }
         )
-    evidence_profile = _evidence_profile(db, states)
+    evidence_profile = _evidence_profile(db, gate_states)
     quality_axes = _quality_axes(
         states,
         findings,
@@ -303,6 +312,7 @@ def _gate_payload(
             "fail": fail_count,
             "warn": warn_count,
             "scope": len(states),
+            "gate_scope": len(gate_states),
             "evidence_plan": {
                 "ac_total": evidence_plan_summary.get("ac_total", 0),
                 "ok": evidence_plan_summary.get("ok", 0),
@@ -324,11 +334,15 @@ def _gate_payload(
             }
             for item in states
         ],
+        "gate_scope": [
+            {"id": item["id"], "type": item["type"]}
+            for item in gate_states
+        ],
     }
     scope_ids = {item["id"] for item in states}
     worklist_nodes = [
         {"id": item["id"], "type": item["type"]}
-        for item in states
+        for item in gate_states
     ]
     worklist_edges = _graph_slice_edges(db, scope_ids, config, "delivery")
     payload["agent_worklist"] = _agent_worklist(

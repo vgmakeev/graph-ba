@@ -541,6 +541,96 @@ dirs = [".graphba"]
     assert payload["summary"]["evidence_plan"]["gap"] == 1
 
 
+def test_gate_excludes_incoming_context_acceptance_siblings(tmp_path):
+    (tmp_path / "graph-ba.toml").write_text(
+        """
+[scan]
+dirs = [".graphba"]
+
+[types.SCR]
+label = "Screens"
+origin = "canonical"
+view_role = "contract"
+capabilities = ["screen"]
+ref = '(SCR-[A-Z]+)'
+classify = 'SCR-[A-Z]+'
+
+[types.FLOW]
+label = "Flows"
+origin = "canonical"
+view_role = "contract"
+ref = '(FLOW-[A-Z]+)'
+classify = 'FLOW-[A-Z]+'
+
+[types.BD]
+label = "Decisions"
+origin = "canonical"
+view_role = "contract"
+ref = '(BD-[A-Z]+)'
+classify = 'BD-[A-Z]+'
+
+[types.AC]
+label = "Acceptance Criteria"
+origin = "canonical"
+view_role = "contract"
+required_proofs = ["verification"]
+ref = '(AC-[A-Z]+-\\d{3})'
+classify = 'AC-[A-Z]+-\\d{3}'
+
+[graph_native]
+dirs = [".graphba"]
+        """.strip(),
+        encoding="utf-8",
+    )
+    graphba_dir = tmp_path / ".graphba"
+    graphba_dir.mkdir()
+    (graphba_dir / "source.md").write_text(
+        '\n'.join(
+            [
+                ':::artifact type="SCR" id="SCR-KITCHEN" state="active" title="Kitchen" contains="FLOW-KITCHEN"',
+                ':::',
+                ':::artifact type="FLOW" id="FLOW-KITCHEN" state="active" title="Kitchen flow" contains="AC-KIT-001" traces_to="BD-SHARED"',
+                ':::',
+                ':::artifact type="BD" id="BD-SHARED" state="active" title="Shared decision"',
+                ':::',
+                ':::artifact type="AC" id="AC-KIT-001" state="active" title="Owned AC" traces_to="BD-SHARED"',
+                ':::',
+                ':::artifact type="AC" id="AC-MENU-001" state="active" title="Context sibling" traces_to="BD-SHARED"',
+                ':::',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "graph.db"
+    db = get_db(db_path)
+    do_import(tmp_path, db, quiet=True)
+    db.close()
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "--root",
+            str(tmp_path),
+            "--db",
+            str(db_path),
+            "gate",
+            "SCR-KITCHEN",
+            "--mode",
+            "dev",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    rendered_scope = {item["id"] for item in payload["scope"]}
+    gate_scope = {item["id"] for item in payload["gate_scope"]}
+    assert "AC-MENU-001" in rendered_scope
+    assert gate_scope == {"SCR-KITCHEN", "FLOW-KITCHEN", "AC-KIT-001", "BD-SHARED"}
+    assert payload["summary"]["evidence_plan"]["ac_total"] == 1
+    assert {item["artifact"] for item in payload["findings"]} == {"AC-KIT-001"}
+    assert {item["artifact"] for item in payload["agent_worklist"]} <= gate_scope
+
+
 def test_graph_slice_exports_nodes_edges_content_and_findings(tmp_path):
     (tmp_path / "graph-ba.toml").write_text(
         """
