@@ -59,18 +59,18 @@ class TestBuildGraph:
 
     def test_edge_attributes(self, built_graph):
         G, _ = built_graph
-        data = G.edges["F-01", "REQ-01"]
-        assert "source_file" in data
-        assert data["relation_type"] in {"MENTIONS", "INDEX"}
+        edges = G["F-01"]["REQ-01"].values()
+        assert all("source_file" in edge for edge in edges)
+        assert {edge["relation_type"] for edge in edges} == {"MENTIONS", "INDEX"}
 
     def test_meta_edge_relation_types(self, built_graph):
         G, _ = built_graph
         code_node = next(n for n in G.nodes() if n.startswith("CODE:") and "order.ts" in n)
         test_node = next(n for n in G.nodes() if n.startswith("TEST:"))
         ui_node = next(n for n in G.nodes() if n.startswith("UI:"))
-        assert G.edges[code_node, "REQ-01"]["relation_type"] == "IMPLEMENTS"
-        assert G.edges[test_node, "REQ-01"]["relation_type"] == "VERIFIES"
-        assert G.edges[ui_node, "REQ-01"]["relation_type"] == "VERIFIES"
+        assert {edge["relation_type"] for edge in G[code_node]["REQ-01"].values()} == {"IMPLEMENTS"}
+        assert {edge["relation_type"] for edge in G[test_node]["REQ-01"].values()} == {"VERIFIES"}
+        assert {edge["relation_type"] for edge in G[ui_node]["REQ-01"].values()} == {"VERIFIES"}
 
 
 class TestFindOwner:

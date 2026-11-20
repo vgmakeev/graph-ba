@@ -114,6 +114,7 @@ graph-ba diff F-01     # semantic/graph Git delta + scoped gaps, no CHG required
 | `search <query>` | FTS5 full-text search |
 | `node <ID>` | Node details + neighbors |
 | `path <from> <to>` | Shortest path between artifacts |
+| `trace <ID>` | Bounded typed trace with edge sources and per-test results |
 | `impact <ID>` | Cascade analysis |
 | `coverage` | Cross-layer coverage matrix |
 | `matrix` | Sparse JSON matrix of typed artifact relationships |
@@ -128,6 +129,94 @@ graph-ba diff F-01     # semantic/graph Git delta + scoped gaps, no CHG required
 | `sql <query>` | Raw SQL |
 
 All commands: `--json` for machine output, `--root`/`--db` for paths.
+
+### trace and provider exports
+
+Use a single trace to follow a stable ID through requirements, implementation,
+and tests. Traversal follows incoming and outgoing relationships by default.
+Each returned edge keeps its original direction and provenance.
+
+```sh
+graph-ba trace REQ-01 --depth 3 --relation CONTAINS,TRACES_TO,IMPLEMENTS,VERIFIES
+graph-ba trace AC-01 --direction incoming --commit "$CI_COMMIT_SHA" --json
+```
+
+`MENTIONS`, `INDEX`, `CANDIDATE_TRACE`, and `TRACE_GAP` are excluded from
+the default trace. Pass `--relation` to inspect specific relationship types.
+The same query is available to agents as `ba_trace` over MCP.
+
+An adapter for a source index, runtime registry, test catalog, or CI job can
+write a JSON projection. Add its project-relative file or glob to the config.
+
+```toml
+[providers]
+graph_files = ["reports/providers/*.json"]
+
+[tests]
+dirs = ["tests"]
+marker = "@trace"
+```
+
+The optional test marker limits the legacy file scanner to IDs after
+`@trace:` (or the configured marker followed by a colon). Provider exports
+can instead identify each individual or parameterized case by its stable ID.
+
+```json
+{
+  "schema": "graph-ba.provider.v1",
+  "provider": "backend-ci",
+  "nodes": [
+    {
+      "id": "action:reserve",
+      "type": "ACTION",
+      "origin": "implementation",
+      "source_file": "app/actions.py",
+      "line_number": 25
+    },
+    {
+      "id": "test:stock.test_debit_once",
+      "type": "TEST",
+      "origin": "evidence",
+      "test_level": "headless",
+      "source_file": "tests/test_stock.py",
+      "line_number": 42
+    }
+  ],
+  "edges": [
+    {"source_id": "action:reserve", "relation_type": "IMPLEMENTS", "target_id": "AC-01"},
+    {"source_id": "test:stock.test_debit_once", "relation_type": "VERIFIES", "target_id": "AC-01"}
+  ],
+  "test_runs": [
+    {
+      "test_id": "test:stock.test_debit_once",
+      "run_id": "ci/481",
+      "commit": "0123456789abcdef0123456789abcdef01234567",
+      "status": "passed",
+      "finished_at": "2026-01-02T08:00:00Z",
+      "evidence": "reports/junit.xml"
+    }
+  ]
+}
+```
+
+- `schema` and `provider` are required. Each of the three arrays is optional.
+  Declare a node in one owning source. An edge or run can use an ID defined
+  in another export or locally. Undefined edge endpoints appear as dangling
+  references. Runs must refer to a defined `TEST` node.
+- Artifact types are project-defined. Origins and relations must be registered
+  in the project catalog or supplied by graph-ba defaults. Edges can include
+  `context`, `source_file`, and `line_number`. Nodes can include `title`,
+  `source_file`, and `line_number`. Locations use project-relative paths and
+  one-based lines. The projection file is the fallback location.
+- Test levels are `unit`, `headless`, `ui`, and `other`. A run records
+  `passed`, `failed`, `skipped`, or `error`, an ISO 8601 completion time with a
+  time zone, and an optional evidence path or URL. The trace shows the latest
+  run per case for the requested exact commit, or across commits when omitted.
+  A case with no matching run is `not_run`. Results show alongside the declared
+  `VERIFIES` links. Release policies still use their configured acceptance evidence.
+- Rebuilds pick up replaced, added, and removed exports. A glob with no
+  matches contributes no exports. Importing malformed input fails and leaves
+  the current graph available.
 
 ### diff — lightweight Markdown review without CHG
 

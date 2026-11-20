@@ -663,8 +663,8 @@ function toggleGroup(cb) {{
 
 
 def _filter_graph(
-    G: nx.DiGraph, no_file_nodes: bool, no_transitive: bool, verbose: bool
-) -> nx.DiGraph:
+    G: nx.MultiDiGraph, no_file_nodes: bool, no_transitive: bool, verbose: bool
+) -> nx.MultiDiGraph:
     """Return a filtered copy of G for visualization."""
     if not no_file_nodes and not no_transitive:
         return G
@@ -679,17 +679,15 @@ def _filter_graph(
         removed_nodes = len(file_nodes)
 
     if no_transitive:
-        to_remove = []
-        for u, v in list(H.edges()):
-            H.remove_edge(u, v)
-            if nx.has_path(H, u, v):
-                to_remove.append((u, v))
+        topology = nx.DiGraph(H)
+        for source, target in list(topology.edges()):
+            topology.remove_edge(source, target)
+            if nx.has_path(topology, source, target):
+                keys = list(H[source][target])
+                H.remove_edges_from((source, target, key) for key in keys)
+                removed_edges += len(keys)
             else:
-                H.add_edge(u, v, **G.edges[u, v])
-        for u, v in to_remove:
-            if H.has_edge(u, v):
-                H.remove_edge(u, v)
-        removed_edges = len(to_remove)
+                topology.add_edge(source, target)
 
     if verbose or (removed_nodes or removed_edges):
         orig_n, orig_e = G.number_of_nodes(), G.number_of_edges()
