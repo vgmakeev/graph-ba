@@ -257,6 +257,7 @@ class TestsConfig:
     # Root-relative glob patterns for colocated tests (e.g. "src/**/*.test.ts")
     files: List[str] = field(default_factory=list)
     coverage_types: List[str] = field(default_factory=list)
+    marker: str = ""
 
 
 @dataclass
@@ -333,6 +334,7 @@ class ProjectConfig:
     codegraph: Optional[CodeGraphConfig] = None
     # Optional commands that materialize ignored/generated provider projections
     provider_refresh: List[ProviderRefreshConfig] = field(default_factory=list)
+    provider_graph_files: List[str] = field(default_factory=list)
     # Test traceability
     tests: Optional[TestsConfig] = None
     # UI traceability
@@ -482,6 +484,13 @@ def load_config(root: Path) -> ProjectConfig:
 
     # ── Optional providers ──
     providers_data = data.get("providers", {})
+    graph_files = providers_data.get("graph_files", [])
+    if not isinstance(graph_files, list) or any(
+        not isinstance(pattern, str) or not pattern.strip()
+        or Path(pattern).is_absolute() or ".." in Path(pattern).parts
+        for pattern in graph_files
+    ):
+        raise ValueError("providers.graph_files must contain root-relative glob patterns")
     codegraph_config = None
     if "codegraph" in providers_data:
         codegraph_data = providers_data.get("codegraph") or {}
@@ -520,6 +529,7 @@ def load_config(root: Path) -> ProjectConfig:
             extensions=tests_data.get("extensions", TestsConfig(dirs=[]).extensions),
             files=tests_data.get("files", []),
             coverage_types=tests_data.get("coverage_types", []),
+            marker=tests_data.get("marker", ""),
         )
 
     # ── UI scan config ──
@@ -594,6 +604,7 @@ def load_config(root: Path) -> ProjectConfig:
         code=code_config,
         codegraph=codegraph_config,
         provider_refresh=refresh_config,
+        provider_graph_files=graph_files,
         tests=tests_config,
         ui=ui_config,
         graph_native=graph_native_config,

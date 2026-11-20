@@ -44,6 +44,14 @@ def _find_owner(
     return best
 
 
+def add_trace_edge(graph: nx.MultiDiGraph, source: str, target: str, **attributes) -> None:
+    key = tuple(
+        attributes.get(field, "")
+        for field in ("relation_type", "source_file", "line", "provider", "context")
+    )
+    graph.add_edge(source, target, key=key, **attributes)
+
+
 def build_graph(
     registry: dict[str, Artifact],
     references: list[Reference],
@@ -55,8 +63,8 @@ def build_graph(
     graph_native_change_traces: list[GraphNativeChangeTrace] | None = None,
     graph_native_artifact_traces: list[GraphNativeArtifactTrace] | None = None,
     root: Path | None = None,
-) -> nx.DiGraph:
-    G = nx.DiGraph()
+) -> nx.MultiDiGraph:
+    G = nx.MultiDiGraph()
 
     for aid, art in registry.items():
         origin = art.origin or (
@@ -96,7 +104,8 @@ def build_graph(
         owner = _find_owner(file_arts, ref.line_number) if file_arts else None
 
         if owner and owner != target:
-            G.add_edge(
+            add_trace_edge(
+                G,
                 owner,
                 target,
                 context=ref.context,
@@ -116,7 +125,8 @@ def build_graph(
                     origin="container",
                 )
             if target != file_node:
-                G.add_edge(
+                add_trace_edge(
+                    G,
                     file_node,
                     target,
                     context=ref.context,
@@ -141,7 +151,8 @@ def build_graph(
             if src not in G:
                 continue
             if src != tgt:
-                G.add_edge(
+                add_trace_edge(
+                    G,
                     src,
                     tgt,
                     context="index_table",
@@ -194,7 +205,7 @@ def _source_path(path: Path, root: Path | None) -> str:
 
 
 def _add_graph_native_change_nodes(
-    G: nx.DiGraph,
+    G: nx.MultiDiGraph,
     traces: list[GraphNativeChangeTrace] | None,
     config: ProjectConfig,
 ):
@@ -225,7 +236,8 @@ def _add_graph_native_change_nodes(
                 defined=False,
                 origin=target_origin,
             )
-        G.add_edge(
+        add_trace_edge(
+            G,
             trace.source_id,
             trace.target_id,
             context=trace.context,
@@ -236,7 +248,7 @@ def _add_graph_native_change_nodes(
 
 
 def _add_graph_native_artifact_nodes(
-    G: nx.DiGraph,
+    G: nx.MultiDiGraph,
     traces: list[GraphNativeArtifactTrace] | None,
     config: ProjectConfig,
 ):
@@ -269,7 +281,8 @@ def _add_graph_native_artifact_nodes(
                 defined=False,
                 origin=target_origin,
             )
-        G.add_edge(
+        add_trace_edge(
+            G,
             trace.source_id,
             trace.target_id,
             context=trace.context,
@@ -280,7 +293,7 @@ def _add_graph_native_artifact_nodes(
 
 
 def _add_source_ref_nodes(
-    G: nx.DiGraph,
+    G: nx.MultiDiGraph,
     refs: list[CodeReference] | None,
     prefix: str,
     node_type: str,
@@ -319,17 +332,19 @@ def _add_source_ref_nodes(
                     defined=False,
                     origin=target_origin,
                 )
-            G.add_edge(
+            add_trace_edge(
+                G,
                 node_id,
                 target_id,
                 context=cref.context,
                 source_file=cref.rel_path,
                 line=cref.line_number,
                 relation_type=relation_type,
+                provider="codegraph" if provider_id else "",
             )
 
 
-def _resolve_dangling_variants(G: nx.DiGraph, registry: dict[str, Artifact]):
+def _resolve_dangling_variants(G: nx.MultiDiGraph, registry: dict[str, Artifact]):
     """If an ID is referenced but not defined, link to its variants if they exist.
 
     E.g. BP-01 → BP-01a, BP-01b.
@@ -345,16 +360,12 @@ def _resolve_dangling_variants(G: nx.DiGraph, registry: dict[str, Artifact]):
         ]
         if not variants:
             continue
-        preds = list(G.predecessors(node_id))
-        for pred in preds:
-            edge_data = G.edges[pred, node_id]
+        for pred, _, edge_data in list(G.in_edges(node_id, data=True)):
             for var in variants:
                 if pred != var:
-                    G.add_edge(pred, var, **edge_data)
-        succs = list(G.successors(node_id))
-        for succ in succs:
-            edge_data = G.edges[node_id, succ]
+                    add_trace_edge(G, pred, var, **edge_data)
+        for _, succ, edge_data in list(G.out_edges(node_id, data=True)):
             for var in variants:
                 if var != succ:
-                    G.add_edge(var, succ, **edge_data)
+                    add_trace_edge(G, var, succ, **edge_data)
         G.remove_node(node_id)

@@ -5,11 +5,15 @@ import re
 import sqlite3
 import sys
 import time
+from itertools import chain
 from pathlib import Path
 from typing import Optional, List, Tuple
 
+from .config import CONFIG_FILENAME
+from .provider_graph import load_provider_graph, provider_graph_files
+
 DB_PATH = Path.cwd() / "reports" / "graph.db"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -22,7 +26,9 @@ CREATE TABLE IF NOT EXISTS artifacts (
     title       TEXT NOT NULL DEFAULT '',
     source_file TEXT NOT NULL DEFAULT '',
     line_number INTEGER NOT NULL DEFAULT 0,
-    defined     INTEGER NOT NULL DEFAULT 1
+    defined     INTEGER NOT NULL DEFAULT 1,
+    provider    TEXT NOT NULL DEFAULT '',
+    test_level  TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS artifact_origins (
@@ -38,7 +44,19 @@ CREATE TABLE IF NOT EXISTS edges (
     context     TEXT NOT NULL DEFAULT '',
     source_file TEXT NOT NULL DEFAULT '',
     line_number INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (source_id, target_id, relation_type, source_file, line_number)
+    provider    TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (source_id, target_id, relation_type, source_file, line_number, provider, context)
+);
+
+CREATE TABLE IF NOT EXISTS test_runs (
+    provider    TEXT NOT NULL,
+    test_id     TEXT NOT NULL REFERENCES artifacts(id),
+    run_id      TEXT NOT NULL,
+    "commit"    TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    evidence    TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (test_id, provider, run_id)
 );
 
 CREATE TABLE IF NOT EXISTS relation_types (
@@ -125,6 +143,7 @@ def _drop_schema(conn: sqlite3.Connection) -> None:
         DROP TABLE IF EXISTS scanned_files;
         DROP TABLE IF EXISTS semantic_clusters;
         DROP TABLE IF EXISTS edges;
+        DROP TABLE IF EXISTS test_runs;
         DROP TABLE IF EXISTS relation_types;
         DROP TABLE IF EXISTS artifacts;
         DROP TABLE IF EXISTS artifact_origins;
@@ -180,6 +199,8 @@ def _remember_configured_sources(
 
 def _scan_file_mtimes(root: Path, config) -> dict[str, float]:
     files: dict[str, float] = {}
+    _remember_files(files, [root / CONFIG_FILENAME])
+    _remember_files(files, provider_graph_files(root, config))
     for d in config.scan_dirs:
         p = root / d
         if not p.exists():
@@ -285,18 +306,41 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
     ui_refs = t.scan_ui_references(root, config)
     graph_native_change_traces = t.scan_graph_native_change_traces(root, config)
     graph_native_artifact_traces = t.scan_graph_native_artifact_traces(root, config)
+    provider_graph = load_provider_graph(provider_graph_files(root, config), root, config)
     G = t.build_graph(registry, references, config, index_xrefs, code_refs, test_refs,
                       ui_refs,
                       graph_native_change_traces=graph_native_change_traces,
                       graph_native_artifact_traces=graph_native_artifact_traces,
                       root=root)
+    provider_graph.add_to(G)
 
+    source_paths = [art.source_file for art in registry.values()]
+    source_paths.extend(ref.source_file for ref in references)
+    source_paths.extend(ref.code_file for ref in chain(code_refs, test_refs, ui_refs))
+    source_paths.extend(ref.source_file for ref in chain(
+        graph_native_change_traces, graph_native_artifact_traces
+    ))
+    source_paths.extend(
+        path for node in provider_graph.nodes.values()
+        if (path := root / node["source_file"]).resolve().is_relative_to(root)
+    )
+    with db:
+        _replace_graph(db, root, config, current_files, G, registry, provider_graph, source_paths)
+
+    if not quiet:
+        _print_import_summary(db)
+    return True
+
+
+def _replace_graph(db, root, config, current_files, G, registry, provider_graph, source_paths):
     # Clear existing data
     db.executescript("""
+        BEGIN IMMEDIATE;
         DELETE FROM edges_fts;
         DELETE FROM clusters_fts;
         DELETE FROM semantic_clusters;
         DELETE FROM edges;
+        DELETE FROM test_runs;
         DELETE FROM relation_types;
         DELETE FROM artifacts;
         DELETE FROM artifact_origins;
@@ -319,24 +363,30 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
         )
 
     # Insert artifacts
-    for n, d in G.nodes(data=True):
-        art = registry.get(n)
+    for node_id, node in G.nodes(data=True):
+        art = registry.get(node_id)
         db.execute(
-            "INSERT OR REPLACE INTO artifacts (id, type, origin, title, source_file, line_number, defined) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (n, d.get("type", "UNKNOWN"), d.get("origin", ""), d.get("title", ""),
-             d.get("source_file", ""), art.line_number if art else 0,
-             1 if d.get("defined", False) else 0)
+            "INSERT INTO artifacts (id, type, origin, title, source_file, line_number, defined, provider, test_level) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (node_id, node.get("type", "UNKNOWN"), node.get("origin", ""), node.get("title", ""),
+             node.get("source_file", ""), art.line_number if art else node.get("line_number", 0),
+             int(node.get("defined", False)), node.get("provider", ""), node.get("test_level", ""))
         )
+
+    db.executemany(
+        "INSERT INTO test_runs (provider, test_id, run_id, \"commit\", status, finished_at, evidence) "
+        "VALUES (:provider, :test_id, :run_id, :commit, :status, :finished_at, :evidence)",
+        provider_graph.test_runs.values(),
+    )
 
     # Insert edges
     for u, v, d in G.edges(data=True):
         db.execute(
             "INSERT OR IGNORE INTO edges "
-            "(source_id, target_id, relation_type, context, source_file, line_number) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "(source_id, target_id, relation_type, context, source_file, line_number, provider) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (u, v, d.get("relation_type", "MENTIONS"), d.get("context", ""),
-             d.get("source_file", ""), d.get("line", 0))
+             d.get("source_file", ""), d.get("line", 0), d.get("provider", ""))
         )
 
     # Insert semantic clusters from config
@@ -358,20 +408,8 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
         file_map[relative] = str(path)
         file_map.setdefault(path.name, str(path))
 
-    for art in registry.values():
-        remember_source(art.source_file)
-    for ref in references:
-        remember_source(ref.source_file)
-    for cref in code_refs:
-        remember_source(cref.code_file)
-    for tref in test_refs:
-        remember_source(tref.code_file)
-    for uref in ui_refs:
-        remember_source(uref.code_file)
-    for gref in graph_native_change_traces:
-        remember_source(gref.source_file)
-    for gref in graph_native_artifact_traces:
-        remember_source(gref.source_file)
+    for path in source_paths:
+        remember_source(path)
     for fname, fpath in file_map.items():
         db.execute("INSERT OR IGNORE INTO file_paths (filename, full_path) VALUES (?, ?)",
                    (fname, fpath))
@@ -388,14 +426,6 @@ def do_import(root: Path, db: sqlite3.Connection, quiet: bool = False,
 
     db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('import_time', ?)",
                (str(time.time()),))
-
-    db.commit()
-
-    if quiet:
-        return
-
-    _print_import_summary(db)
-    return True
 
 
 # ── Query helpers ─────────────────────────────────────────────────
@@ -418,7 +448,7 @@ def _fts_query(q: str) -> str:
 
 def _load_nx(db: sqlite3.Connection):
     import networkx as nx
-    G = nx.DiGraph()
+    G = nx.MultiDiGraph()
     for r in db.execute("SELECT * FROM artifacts").fetchall():
         G.add_node(r["id"], type=r["type"], title=r["title"],
                    origin=r["origin"], source_file=r["source_file"],
@@ -426,7 +456,8 @@ def _load_nx(db: sqlite3.Connection):
     for r in db.execute("SELECT * FROM edges").fetchall():
         G.add_edge(r["source_id"], r["target_id"],
                    relation_type=r["relation_type"], context=r["context"],
-                   source_file=r["source_file"])
+                   source_file=r["source_file"], line=r["line_number"],
+                   provider=r["provider"])
     return G
 
 

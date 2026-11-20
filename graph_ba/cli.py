@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import re
 import sqlite3
@@ -14,6 +15,7 @@ from graph_ba.audit import run_anomalies, run_coverage
 from graph_ba.change_workflow import ChangeWorkflowError, ChangeWorkflowService
 from graph_ba.db import _load_nx, do_import
 from graph_ba.diff_review import diff_review
+from graph_ba.provider_graph import ProviderGraphError
 from graph_ba.review import run_validate
 
 from .artifact_state import _artifact_state_payload
@@ -51,9 +53,11 @@ from .rendering import (
 def cmd_import(ctx, force):
     """Scan artifacts and populate the SQLite DB."""
     root = Path(ctx.obj.get("root", "."))
-    db = _conn(ctx)
-    do_import(root, db, force=force)
-    db.close()
+    with closing(_conn(ctx)) as db:
+        try:
+            do_import(root, db, force=force)
+        except ProviderGraphError as exc:
+            raise click.ClickException(str(exc)) from exc
 
 
 @cli.command("init")
@@ -188,6 +192,10 @@ pattern = '^##\\s+(FEAT-\\d{2,4})\\s*[—–\\-]\\s*(.*)'
 # marker = "@trace"
 # coverage_types = ["FEAT", "REQ"]
 
+# Optional: import typed graph and test-run exports.
+# [providers]
+# graph_files = ["reports/providers/*.json"]
+
 # Optional: resolve each @trace location to its enclosing CodeGraph symbol.
 # Falls back to the file-level CODE: node when the index or symbol is unavailable.
 # [providers.codegraph]
@@ -206,6 +214,7 @@ pattern = '^##\\s+(FEAT-\\d{2,4})\\s*[—–\\-]\\s*(.*)'
 # counts as test evidence (no marker needed).
 # [tests]
 # dirs = ["tests"]
+# marker = "@trace"  # optional: link only IDs after an explicit @trace:
 # extensions = ["py", "ts", "tsx", "js", "dart"]
 # coverage_types = ["REQ"]
 

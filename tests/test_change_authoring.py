@@ -187,4 +187,6 @@ def test_add_link_uses_overlay_for_brownfield_source(tmp_path):
         graph_native_artifact_traces=traces,
     )
     assert result["assertion"] in registry
-    assert graph["AC-ORD-001"]["RULE-ORDER-LIVE"]["relation_type"] == "TRACES_TO"
+    assert {edge["relation_type"] for edge in graph["AC-ORD-001"]["RULE-ORDER-LIVE"].values()} == {
+        "TRACES_TO"
+    }

@@ -1,6 +1,7 @@
 """MCP stdio server for structured graph-ba access."""
 from __future__ import annotations
 
+from contextlib import closing
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,7 @@ from graph_ba.config import load_config
 from graph_ba.db import _fts_query, _load_nx, do_import, get_db, graph_is_stale
 from graph_ba.diff_review import diff_review
 from graph_ba.review import run_review
+from graph_ba.trace_query import trace_artifact
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -233,6 +235,28 @@ def ba_path(from_id: str, to_id: str, root: str = ".",
         except nx.NetworkXNoPath:
             continue
     return {"mode": None, "steps": None, "path": []}
+
+
+@mcp.tool()
+def ba_trace(
+    artifact_id: str,
+    root: str = ".",
+    db_path: Optional[str] = None,
+    direction: str = "both",
+    depth: int = 3,
+    relations: list[str] | None = None,
+    commit: str | None = None,
+) -> dict:
+    """Return typed contract, implementation and test traces with run results."""
+    try:
+        _, _, db = _open(root, db_path)
+        with closing(db):
+            return trace_artifact(
+                db, artifact_id, direction=direction, depth=depth,
+                relations=set(relations) if relations is not None else None, commit=commit,
+            )
+    except ValueError as exc:
+        return {"error": str(exc)}
 
 
 @mcp.tool()

@@ -25,6 +25,7 @@ from graph_ba.graph_snapshots import (
     impact_paths,
 )
 from graph_ba.models import Artifact
+from graph_ba.provider_graph import provider_graph_files
 from graph_ba.scanning import canonical_ownership_findings
 from graph_ba.traceability import scan_definitions
 
@@ -339,7 +340,11 @@ def _bootstrap_local_graph_inputs(
     candidates: list[Path] = []
     if config.codegraph:
         candidates.append(Path(config.codegraph.database))
-    candidates.extend(Path(item) for item in config.graph_native.dirs)
+    if config.graph_native:
+        candidates.extend(Path(item) for item in config.graph_native.dirs)
+    candidates.extend(
+        path.relative_to(source_root) for path in provider_graph_files(source_root, config)
+    )
 
     copied: list[str] = []
     warnings: list[str] = []

@@ -731,8 +731,8 @@ def scan_test_references(
 ) -> list[CodeReference]:
     """Scan test files for artifact ID references (TEST: nodes).
 
-    Unlike code scanning, no @trace marker is required: any artifact ID
-    matching a configured type ref pattern counts as test evidence.
+    By default, any matching artifact ID is linked. A configured marker
+    requires an explicit trace and limits matching to text after the marker.
 
     Files come from `dirs` (recursive, filtered by `extensions`) plus
     `files` glob patterns — the latter for colocated tests (e.g.
@@ -743,8 +743,15 @@ def scan_test_references(
         return []
 
     type_patterns = [tdef.ref_pattern for tdef in config.types.values()]
+    marker = config.tests.marker
+    marker_pattern = re.compile(rf"(?<![\w.]){re.escape(marker)}\s*:") if marker else None
 
     def extract(line: str) -> list[str]:
+        if marker_pattern:
+            match = marker_pattern.search(line)
+            if not match:
+                return []
+            line = line[match.end():]
         ids: list[str] = []
         for pattern in type_patterns:
             for m in pattern.finditer(line):

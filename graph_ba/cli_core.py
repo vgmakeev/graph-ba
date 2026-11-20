@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import re
 import sqlite3
@@ -24,6 +25,8 @@ from graph_ba.change_authoring import ChangeAuthoringError, add_artifact, add_li
 from graph_ba.config import load_config
 from graph_ba.db import _fts_query, _load_nx, do_import, get_db, graph_is_stale
 from graph_ba.provider_refresh import codegraph_health, refresh_provider_inputs
+from graph_ba.provider_graph import ProviderGraphError
+from graph_ba.trace_query import DIRECTIONS, MAX_TRACE_DEPTH, trace_artifact
 
 from .gate_analysis import _change_payload, _pack_payload
 from .gates import (
@@ -134,7 +137,10 @@ def _auto_import(ctx, db: sqlite3.Connection, reason: str) -> bool:
     except Exception:
         return False
     click.echo(f"auto-import: graph {reason} — rebuilding", err=True)
-    do_import(root, db, quiet=True)
+    try:
+        do_import(root, db, quiet=True)
+    except ProviderGraphError as exc:
+        raise click.ClickException(str(exc)) from exc
     return True
 
 
@@ -423,6 +429,53 @@ def path(ctx, from_id, to_id):
     print(f"No path between {from_id} and {to_id}")
 
 
+@cli.command("trace")
+@click.argument("artifact_id")
+@click.option("--direction", type=click.Choice(list(DIRECTIONS)), default="both", show_default=True)
+@click.option("--depth", type=click.IntRange(0, MAX_TRACE_DEPTH), default=3, show_default=True)
+@click.option("--relation", "relations", help="Comma-separated relation types to follow")
+@click.option("--commit", help="Only show test runs for this exact commit")
+@local_json_option
+@click.pass_context
+def trace(ctx, artifact_id, direction, depth, relations, commit):
+    """Trace contract, implementation and tests from a stable artifact ID."""
+    with closing(_conn(ctx)) as db:
+        _require_graph(ctx, db)
+        try:
+            result = trace_artifact(
+                db, artifact_id, direction=direction, depth=depth,
+                relations=_csv_filter(relations) if relations is not None else None,
+                commit=commit,
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+    if _json_out(ctx, result):
+        return
+
+    print(f"Trace {artifact_id} ({direction}, depth {depth})")
+    if commit:
+        print(f"Test runs for commit {commit}")
+    print(fmt_table(
+        [
+            (edge["source_id"], edge["relation_type"], edge["target_id"],
+             edge["provider"], f"{edge['source_file']}:{edge['line_number']}")
+            for edge in result["edges"]
+        ],
+        ["From", "Relation", "To", "Provider", "Source"],
+    ))
+    if result["tests"]:
+        print("\nTest results")
+        print(fmt_table(
+            [
+                (test["test_id"], test["level"] or "", ", ".join(test["verifies"]),
+                 test["status"], (test["latest_run"] or {}).get("commit", ""),
+                 (test["latest_run"] or {}).get("run_id", ""))
+                for test in result["tests"]
+            ],
+            ["Test case", "Level", "Verifies in trace", "Status", "Commit", "Run"],
+        ))
+
+
 @cli.command("matrix")
 @click.option(
     "--source-type",
@@ -460,7 +513,7 @@ def matrix(ctx, source_type, target_type, relation_filter, out_path):
     query = (
         "SELECT e.source_id, s.type AS source_type, s.title AS source_title, "
         "e.target_id, t.type AS target_type, t.title AS target_title, "
-        "e.relation_type, e.context, e.source_file, e.line_number "
+        "e.relation_type, e.context, e.source_file, e.line_number, e.provider "
         "FROM edges e "
         "LEFT JOIN artifacts s ON e.source_id = s.id "
         "LEFT JOIN artifacts t ON e.target_id = t.id "
@@ -476,7 +529,7 @@ def matrix(ctx, source_type, target_type, relation_filter, out_path):
     if relations:
         query += f" AND e.relation_type IN ({','.join('?' for _ in relations)})"
         params.extend(sorted(relations))
-    query += " ORDER BY e.source_id, e.target_id, e.relation_type"
+    query += " ORDER BY e.source_id, e.target_id, e.relation_type, e.source_file, e.line_number, e.provider, e.context"
 
     rows = [dict(row) for row in db.execute(query, params).fetchall()]
     db.close()
@@ -518,6 +571,7 @@ def matrix(ctx, source_type, target_type, relation_filter, out_path):
                     "source_file": row.get("source_file") or "",
                     "line_number": row.get("line_number") or 0,
                     "context": row.get("context") or "",
+                    **({"provider": row["provider"]} if row["provider"] else {}),
                 }
             )
 

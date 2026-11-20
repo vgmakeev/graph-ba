@@ -143,10 +143,14 @@ Observed mini resource.
         graph_native_artifact_traces=scan_graph_native_artifact_traces(tmp_path, config),
     )
     assert graph.has_edge("CHG-orders-live-update", "AC-ORD-001")
-    assert graph["CHG-orders-live-update"]["AC-ORD-001"]["relation_type"] == "DEPENDS_ON"
+    assert {edge["relation_type"] for edge in graph["CHG-orders-live-update"]["AC-ORD-001"].values()} == {
+        "DEPENDS_ON"
+    }
     assert graph.has_edge("AC-ORD-001", "ENT-Order")
     assert graph.has_edge("ENT-Order", "AC-ORD-001")
-    assert graph["ENT-Order"]["AC-ORD-001"]["relation_type"] == "DEPENDS_ON"
+    assert {edge["relation_type"] for edge in graph["ENT-Order"]["AC-ORD-001"].values()} == {
+        "DEPENDS_ON", "MENTIONS"
+    }
     assert graph.nodes["ENT-Order"]["origin"] == "implementation"
 
 
